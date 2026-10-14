@@ -1,0 +1,125 @@
+# Operator config for the cost-optimized Pi workflow.
+# No secrets belong in this file. Prices below are placeholders with an
+# effective date — replace them from your provider's current rate card.
+# The runtime never falls back to a price baked into source code.
+
+providers:
+  openai:
+    type: openai
+    auth: account-login
+    piProvider: openai
+    model: gpt-5.4
+  anthropic:
+    type: anthropic
+    auth: account-login
+    model: claude-sonnet
+  foundry:
+    type: azure-foundry
+    auth: azure-cli
+    endpointEnv: AZURE_AI_ENDPOINT
+    apiVersion: 2024-10-21
+    audience: https://cognitiveservices.azure.com
+    api: openai-completions
+    deployments:
+      classifier: classifier
+      reasoning: reasoning
+      cheap: classifier
+  local:
+    type: openai-compatible
+    baseUrl: http://127.0.0.1:11434/v1
+    model: qwen2.5-coder:7b
+
+models:
+  classifier: local
+  cheap: foundry
+  standard: anthropic
+  premium: openai
+
+routing:
+  minConfidence: 0.75
+  maxEscalations: 2
+  maxTier: premium
+  requirePremiumReviewFor:
+    - auth
+    - permissions
+    - secrets
+    - security-sensitive
+  circuitBreakerFailures: 3
+
+workers:
+  concurrency: 2
+  isolatedWorktrees: true
+  preserveUntilReviewed: true
+  tokenBudget: 8000
+  deadlineMs: 600000
+
+worktrees:
+  strategy: per-independent-task
+  integrationBranch: true
+  cleanupRequiresConfirmation: true
+  branchPrefix: cost
+
+budgets:
+  taskUsd: 20
+  autopilotPrUsd: 10
+  dailyUsd: 75
+  softWarningRatio: 0.8
+
+approvals:
+  plan: required
+  publish: required
+  merge: manual
+  securitySensitiveFix: required
+
+autopilot:
+  pollSeconds: 90
+  maxFixCycles: 5
+  autoMerge: false
+  maxRuntimeMs: 7200000
+  backoffSeconds: 30
+
+checks: []
+
+commandAllowlist:
+  - npm test
+  - npm run typecheck
+  - npm run lint
+  - npx vitest
+  - git status
+  - git diff
+
+orgProviderAllowlist: []
+proprietaryCode: false
+
+pricing:
+  - provider: local
+    model: qwen2.5-coder:7b
+    effectiveFrom: "2026-01-01"
+    inputPerMillionUsd: 0
+    outputPerMillionUsd: 0
+    cacheReadPerMillionUsd: 0
+    cacheWritePerMillionUsd: 0
+  - provider: foundry
+    model: classifier
+    effectiveFrom: "2026-01-01"
+    inputPerMillionUsd: 0.15
+    outputPerMillionUsd: 0.60
+  - provider: foundry
+    model: reasoning
+    effectiveFrom: "2026-01-01"
+    inputPerMillionUsd: 1.25
+    outputPerMillionUsd: 5.00
+  - provider: anthropic
+    model: claude-sonnet
+    effectiveFrom: "2026-01-01"
+    inputPerMillionUsd: 3
+    outputPerMillionUsd: 15
+    cacheReadPerMillionUsd: 0.30
+    cacheWritePerMillionUsd: 3.75
+  - provider: openai
+    model: gpt-5.4
+    effectiveFrom: "2026-01-01"
+    inputPerMillionUsd: 2.50
+    outputPerMillionUsd: 15
+    cacheReadPerMillionUsd: 0.25
+    cacheWritePerMillionUsd: 2.50

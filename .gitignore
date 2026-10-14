@@ -1,0 +1,14 @@
+node_modules/
+agent-tools/
+dist/
+*.tsbuildinfo
+.pi-workflows/tasks/
+.pi-workflows/cost/
+.pi-workflows/autopilot/
+.pi-workflows/metrics/
+.pi-workflows/worktrees/
+.pi-workflows/notifications.jsonl
+.pi-workflows/active-task.json
+.pi-workflows/*.local.yaml
+*.local.yaml
+.DS_Store
