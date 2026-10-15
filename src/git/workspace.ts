@@ -54,11 +54,11 @@ export class GitWorkspace {
   }
 
   /**
-   * Commits everything in `cwd`. The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
+   * Commits everything in `cwd` except the `exclude` paths (relative to `cwd`). The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
    */
-  async commitAll(cwd: string, message: string): Promise<string> {
+  async commitAll(cwd: string, message: string, exclude: string[] = []): Promise<string> {
     const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
-    const add = await this.git([...safe, "add", "-A"], cwd);
+    const add = await this.git([...safe, "add", "-A", "--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
     const commit = await this.git([...safe, "commit", "--no-verify", "-m", message], cwd);
     if (commit.code !== 0 && !/nothing to commit/i.test(commit.stdout + commit.stderr)) {
@@ -115,6 +115,22 @@ export class GitWorkspace {
     const result = await this.git(["status", "--porcelain"]);
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git status failed");
     return result.stdout;
+  }
+
+  /** Paths with changes (`git status --porcelain -z`): a rename reports its new path, and names are never quoted. */
+  async changedPaths(): Promise<string[]> {
+    const result = await this.git(["status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git status failed");
+    const fields = result.stdout.split("\0");
+    const paths: string[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const entry = fields[i]!;
+      if (entry.length < 4) continue;
+      paths.push(entry.slice(3));
+      // A rename or copy is followed by its source path as its own field.
+      if (/[RC]/.test(entry.slice(0, 2))) i++;
+    }
+    return paths;
   }
 
   /** How many commits HEAD has that `base` does not. */

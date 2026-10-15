@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -67,5 +67,30 @@ describe("git helpers for the main checkout", () => {
     expect(diff).toContain("+++ b/untracked.txt");
     expect(diff).toContain("+untracked line");
     expect(await git.statusPorcelain()).toContain("?? untracked.txt");
+  });
+});
+
+describe("changedPaths", () => {
+  const exec = promisify(execFile);
+  const sh = (cwd: string, ...args: string[]) => exec("git", args, { cwd });
+
+  it("reports the new path of a rename and unquoted odd names", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    await sh(cwd, "mv", "README.md", "RENAMED.md");
+    writeFileSync(path.join(cwd, "sp ace é.txt"), "x\n");
+    const paths = (await git.changedPaths()).sort();
+    expect(paths).toEqual(["RENAMED.md", "sp ace é.txt"]);
+  });
+
+  it("commitAll leaves excluded paths out", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    mkdirSync(path.join(cwd, "ws"));
+    writeFileSync(path.join(cwd, "ws", "state.json"), "{}\n");
+    writeFileSync(path.join(cwd, "a.txt"), "a\n");
+    await git.commitAll(cwd, "pre", ["ws"]);
+    expect((await sh(cwd, "show", "--name-only", "--format=", "HEAD")).stdout.trim()).toBe("a.txt");
+    expect(await git.changedPaths()).toEqual(["ws/state.json"]);
   });
 });

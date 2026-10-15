@@ -460,7 +460,7 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 `/build` runs the approved tickets one at a time. It refuses a plan that is not approved, a plan with no tickets, a budget that is already spent, and (for a security-sensitive plan) asks you to confirm first. It does not run in the background: it holds the Pi command until it finishes or stops.
 
-**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build refuses a working tree with uncommitted changes (outside `.pi-workflows/`), so they do not land in ticket 01's commit. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
+**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build with uncommitted changes (outside `.pi-workflows/`) lists them and asks whether to commit them first as a separate "Changes before /build" commit on the build branch, so they do not land in ticket 01's commit. Answer no (or run without a UI) and it refuses with `DIRTY_TREE`. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
 
 **Per ticket**, in dependency order (`blockedBy`):
 

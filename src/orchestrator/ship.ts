@@ -114,13 +114,7 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
 /** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
 async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
   const workspace = ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
-  return (await ctx.git.statusPorcelain())
-    .split("\n")
-    .filter((line) => line.trim())
-    .filter((line) => {
-      const file = line.slice(3).replace(/^"|"$/g, "");
-      return file !== workspace && !file.startsWith(`${workspace}/`);
-    });
+  return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
 }
 
 /** "20261014-120000" from the injected clock. */
