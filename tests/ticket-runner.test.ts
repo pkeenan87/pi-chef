@@ -156,6 +156,44 @@ describe("runTicketInChild", () => {
     expect(args.join(" ")).not.toContain("secret");
   });
 
+  it("gives the child an empty stdin, so `pi -p` (which reads piped stdin to the end) does not wait forever", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(path.join(tmpdir(), "pi-cost-stdin-"));
+    const script = path.join(dir, "fake-pi.mjs");
+    // Mirrors pi's readPipedStdin: when stdin is not a TTY it reads until "end" before doing anything else.
+    writeFileSync(
+      script,
+      [
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', () => {});",
+        "process.stdin.on('end', () => {",
+        `  console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'stop', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } }));`,
+        "  process.exit(0);",
+        "});",
+        "process.stdin.resume();",
+      ].join("\n"),
+    );
+    const result = await runTicketInChild({
+      ...runInput({ spawn: undefined as never }),
+      spawn: undefined,
+      worktreePath: dir,
+      invocation: { command: process.execPath, args: [script] },
+      baseEnv: { PATH: process.env.PATH ?? "" },
+      deadlineMs: 10_000,
+    });
+    expect(result.timedOut).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(result.finalText).toBe("done");
+  });
+
+  it("spawns with stdin ignored and stdout/stderr piped", async () => {
+    let stdio: unknown;
+    const inner = fakeSpawn(() => ({ stdout: [assistant("done", 1000)] }));
+    await runTicketInChild(runInput({ spawn: (command, args, options) => ((stdio = options.stdio), inner(command, args, options)) }));
+    expect(stdio).toEqual(["ignore", "pipe", "pipe"]);
+  });
+
   it("deletes its scratch files after the run", async () => {
     const calls: SpawnCall[] = [];
     await runTicketInChild(runInput({ spawn: fakeSpawn(() => ({}), calls) }));
