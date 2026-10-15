@@ -89,9 +89,10 @@ async function runChecks(ctx: WorkflowContext, ticket: Ticket, cwd: string): Pro
 /** The route for one ticket attempt. A tier with no model cannot run a child, so it moves up one tier. */
 async function pick(ctx: WorkflowContext, state: TaskState, ticket: Ticket, failedTier: RoutingDecision["tier"] | undefined, escalations: number): Promise<RoutingDecision> {
   const classification = state.classification!;
-  let decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, tierHint: failedTier ? undefined : ticket.suggestedTier });
+  // A ticket child cannot answer a login prompt, so only signed-in providers are eligible; an unusable tier moves up.
+  let decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, tierHint: failedTier ? undefined : ticket.suggestedTier, strictAvailability: true });
   if (decision.provider === "none" && !decision.blocked) {
-    decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations });
+    decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }
   return decision;
 }

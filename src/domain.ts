@@ -16,7 +16,13 @@ export const PHASES = [
 
 export type Phase = (typeof PHASES)[number];
 
-export const PROVIDERS = ["openai", "anthropic", "foundry", "local", "vercel"] as const;
+export const PROVIDERS = ["openai", "anthropic", "xai", "foundry", "local", "vercel"] as const;
+/** Providers Pi signs in to with an account (oauth). Pi itself registers them; an API key is used only when the user allows it. */
+export const ACCOUNT_PROVIDERS = ["openai", "anthropic", "xai"] as const;
+export type AccountProvider = (typeof ACCOUNT_PROVIDERS)[number];
+export function isAccountProvider(value: string): value is AccountProvider {
+  return (ACCOUNT_PROVIDERS as readonly string[]).includes(value);
+}
 export type ProviderId = (typeof PROVIDERS)[number];
 
 export const TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;

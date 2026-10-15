@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { WorkflowError, type ProviderId } from "../domain.js";
+import type { Billing } from "../config.js";
+import { isAccountProvider, WorkflowError, type AccountProvider, type ProviderId } from "../domain.js";
 import { redact } from "../redact.js";
 
 export type AuthStatus = "ready" | "missing" | "expired" | "blocked" | "unavailable";
@@ -33,19 +34,23 @@ function parseExpiry(expires: number | string | undefined): number | undefined {
 }
 
 export function viewFromCredential(
-  provider: "openai" | "anthropic",
+  provider: AccountProvider,
   credential: StoredCredential | undefined,
   now: number,
+  apiKeyFallback = false,
 ): ProviderAuthView {
   if (!credential) {
     return { provider, status: "missing", method: "none", detail: "No stored Pi credential. Run /login and choose account sign-in." };
+  }
+  if (credential.type === "api_key" && apiKeyFallback) {
+    return { provider, status: "ready", method: "api-key", detail: "API key stored in Pi (allowed by providers." + provider + ".apiKeyFallback). Billed per token." };
   }
   if (credential.type === "api_key") {
     return {
       provider,
       status: "blocked",
       method: "api-key",
-      detail: "API key credentials are rejected. Sign in with the provider account. There is no API-key fallback.",
+      detail: `API key credentials are rejected. Sign in with the ${provider} account, or allow the key with providers.${provider}.apiKeyFallback: true in ~/.pi/agent/cost-workflow.yaml (billed per token).`,
     };
   }
   if (credential.type !== "oauth") {
@@ -113,25 +118,43 @@ export class FileAuthProbe implements AuthProbe {
       now?: () => number;
       azure?: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
       localReachable?: () => Promise<boolean>;
+      /** Account providers whose Pi-stored API key may be used when no account login is present. */
+      apiKeyFallback?: (provider: AccountProvider) => boolean;
       /** Passive Vercel token check (see createVercelTokenSource().status). */
       vercel?: () => { status: "ready" | "expired" | "missing"; detail: string; expiresAt?: string; refreshable?: boolean };
     } = {},
   ) {}
 
+  private authFile(): string {
+    return this.options.authFile ?? path.join(homedir(), ".pi", "agent", "auth.json");
+  }
+
+  /** How an account provider is billed right now, from the credential Pi has stored for it. */
+  billing(provider: string): Billing {
+    if (!isAccountProvider(provider)) return "subscription";
+    try {
+      const stored = this.readStored(this.authFile());
+      const credential = provider === "openai" && stored.openai?.type !== "oauth" && stored["openai-codex"]?.type === "oauth" ? stored["openai-codex"] : stored[provider];
+      return credential?.type === "api_key" ? "api-key" : "subscription";
+    } catch {
+      return "subscription";
+    }
+  }
+
   async inspect(provider: ProviderId): Promise<ProviderAuthView> {
     const now = this.options.now?.() ?? Date.now();
-    if (provider === "openai" || provider === "anthropic") {
-      const file = this.options.authFile ?? path.join(homedir(), ".pi", "agent", "auth.json");
+    if (isAccountProvider(provider)) {
       let stored: Record<string, StoredCredential> = {};
       try {
-        stored = this.readStored(file);
+        stored = this.readStored(this.authFile());
       } catch {
         return { provider, status: "unavailable", method: "none", detail: "auth.json could not be read." };
       }
-      if (provider === "anthropic") return viewFromCredential("anthropic", stored.anthropic, now);
-      const openai = viewFromCredential("openai", stored.openai, now);
+      const allow = this.options.apiKeyFallback?.(provider) ?? false;
+      if (provider !== "openai") return viewFromCredential(provider, stored[provider], now, allow);
+      const openai = viewFromCredential("openai", stored.openai, now, allow);
       if (openai.status === "ready") return openai;
-      const codex = viewFromCredential("openai", stored["openai-codex"], now);
+      const codex = viewFromCredential("openai", stored["openai-codex"], now, allow);
       if (codex.status === "ready") return { ...codex, detail: "Legacy openai-codex account login is present." };
       if (openai.status === "expired" || codex.status === "expired") return openai.status === "expired" ? openai : codex;
       if (openai.status === "blocked" || codex.status === "blocked") return openai.status === "blocked" ? openai : codex;

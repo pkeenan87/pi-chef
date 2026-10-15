@@ -129,9 +129,12 @@ async function authReport(ctx: WorkflowContext, arg: string): Promise<CommandRes
       return done("OpenAI account login is Pi's `/login openai`. Choose Sign in with ChatGPT, not the API key prompt. This extension rejects OPENAI_API_KEY.");
     }
     if (provider === "anthropic") {
-      return done("Anthropic account login is Pi's `/login anthropic` (Claude Pro/Max). This extension rejects ANTHROPIC_API_KEY. A subscription may still bill extra usage; this tool does not invent a different login.");
+      return done("Anthropic account login is Pi's `/login anthropic` (Claude Pro/Max). A key saved with `/login anthropic` is used only when the user config sets providers.anthropic.apiKeyFallback: true; it is billed per token, so add `billing: api-key` pricing rows. ANTHROPIC_API_KEY is never read.");
     }
-    return fail("USAGE", "Use /auth login openai|anthropic|foundry|vercel|local.");
+    if (provider === "xai") {
+      return done("xAI account login is Pi's `/login xai`. Choose Sign in with SuperGrok or X Premium. XAI_API_KEY is never read.");
+    }
+    return fail("USAGE", "Use /auth login openai|anthropic|xai|foundry|vercel|local.");
   }
   const views = await Promise.all(PROVIDERS.map((item) => ctx.authProbe.inspect(item)));
   return done(views.map((view) => `${view.provider}\t${view.status}\t${view.method}\t${view.detail}`).join("\n"), views);

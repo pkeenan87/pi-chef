@@ -204,15 +204,29 @@ Provider setup: [Azure CLI and Foundry](#azure-cli-and-foundry-deployments) (`en
 
 ## Account login
 
-This extension does not implement OAuth and does not fall back to an API key.
+This extension does not implement OAuth. It uses Pi's account login, and uses a key stored in Pi only for a provider you opt in (below).
 
 | Provider | What to run | What this extension accepts |
 |---|---|---|
 | OpenAI | Pi `/login openai`, then **Sign in with ChatGPT** | An `oauth` credential on `openai` or legacy `openai-codex`. `OPENAI_API_KEY` is rejected |
-| Anthropic | Pi `/login anthropic` (Claude Pro/Max) | An `oauth` credential. `ANTHROPIC_API_KEY` and the other Anthropic key env vars are rejected |
+| Anthropic | Pi `/login anthropic` (Claude Pro/Max) | An `oauth` credential, or a key saved in Pi when `apiKeyFallback` is on (below). `ANTHROPIC_API_KEY` and the other Anthropic key env vars are never read |
+| xAI | Pi `/login xai`, then **Sign in with SuperGrok or X Premium** | An `oauth` credential (Grok subscription). `XAI_API_KEY` is never read |
 | Foundry | `az login` (below) | An Azure CLI token for one request, audience `https://ai.azure.com`. Pi's built-in `azure` provider is API-key only and is not used |
 | Vercel AI Gateway | `vercel login && vercel link` (below) | A `VERCEL_OIDC_TOKEN` from the environment or the pulled env file. No AI Gateway API key |
 | Local | Start your own server | `baseUrl` in config. A bearer is sent only if you set `apiKeyEnv` |
+
+### API-key fallback
+
+If you can only sign in to a provider with an API key (saved through Pi's `/login`), allow it in your user config. A project config cannot turn this on.
+
+```yaml
+# ~/.pi/agent/cost-workflow.yaml
+providers:
+  anthropic:
+    apiKeyFallback: true
+```
+
+The key is billed per token, so pricing switches to the `billing: api-key` rows for that provider (the shipped config has Anthropic's API rates). A model with no such row has unknown cost, which the budget treats as spend; it is never priced at the subscription's $0. `web_search` still needs an Anthropic subscription login.
 
 `/auth status` prints provider, status, method, and a short detail. It reads `type` and `expires` from `~/.pi/agent/auth.json`. It does not copy access tokens, refresh tokens, or keys into the task, the prompt, or the log.
 
@@ -289,7 +303,7 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 | deterministic / mechanical | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
 | classifier | `Microsoft-Decision-1` deployed in Azure Foundry, or `typesafe-ai/jev` on Vercel AI Gateway. Both use the Decisions API |
 | cheap | ChatGPT Luna `gpt-6-luna` (OpenAI account login), or Claude Haiku `claude-haiku-5-5` (Anthropic account login) |
-| standard | Claude Sonnet `claude-sonnet-5-5` (Anthropic), or Grok 4.7 deployed in Foundry |
+| standard | Claude Sonnet `claude-sonnet-5-5` (Anthropic), Grok 4.7 through a SuperGrok subscription (`xai`), or Grok 4.7 deployed in Foundry |
 | premium | Claude Opus `claude-opus-5-5` (Anthropic), or Sol 6.1 `gpt-6.1-sol` (OpenAI) |
 | advisor (on demand) | Claude Fable `claude-fable-5-1` (Anthropic), or GPT Astra `gpt-6-astra` (OpenAI and/or a Foundry deployment) |
 
@@ -546,7 +560,8 @@ Artifacts for a task:
 
 - No paid provider call is made by the tests. OpenAI and Anthropic transports throw unless a test injects one. Account login is verified by reading Pi 1.2.0's provider objects, not by completing a prompt.
 - The autopilot poll does not outlive the Pi process. There is no detached daemon.
-- Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked.
+- Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked unless the user config sets `apiKeyFallback` for that provider.
+- Ticket children never pick a provider that is not signed in: when no model in the chosen tier is usable, the ticket moves up a tier instead of failing on a login error.
 - The ticket child's bash hook is defense in depth, not a boundary: it normalizes wrappers (`env`, `command`, `sudo`, `nohup`, ...), looks inside `sh -c` and `eval`, and refuses `git push` and `gh` writes, but shell can always hide a command (a script file, an alias, an encoded string). The real controls are (a) an environment allowlist, so the child never sees `GITHUB_TOKEN`, `GH_TOKEN`, `*_TOKEN`, `*_KEY`, `*_SECRET`, `AWS_*`, `VERCEL_OIDC_TOKEN`, `ANTHROPIC_*`, or `OPENAI_*`, and (b) git config injected through `GIT_CONFIG_COUNT` that disables pushing for every remote and any URL, turns credential helpers and hooks off, and sets `GIT_TERMINAL_PROMPT=0`. A child can still use credentials stored in files under your home directory (for example `~/.ssh` or a `gh` config file) for non-git tools, so run tickets from an account that holds nothing you would not give the model.
 - Ticket children run in their own process group. They are stopped with SIGTERM then SIGKILL on cancel, deadline, a budget stop, `session_shutdown`, and Pi exiting. A running child's spend is tracked as its messages arrive, and every concurrent child is stopped when ledger plus in-flight spend passes the task or daily limit (the overshoot is at most one model call).
 - Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). It is not a full allowlist of every other command, because that would break the host agent. Worker checks are allowlisted.
