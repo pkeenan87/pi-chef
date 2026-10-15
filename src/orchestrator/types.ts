@@ -51,7 +51,27 @@ export interface WorkflowBinding {
   session?: SessionControl;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
+  /** Shows a full plan in a scrollable dialog and returns the chosen action. Absent without a UI. */
+  review?: PlanReviewFn;
+  /** Posts a plan as a displayed message in the chat transcript. */
+  show?: (markdown: string) => void;
 }
+
+export interface PlanReviewAction {
+  value: string;
+  label: string;
+  /** When set, choosing the action asks the person for text first (shown as this prompt). */
+  input?: string;
+}
+
+export interface PlanReviewRequest {
+  title: string;
+  markdown: string;
+  actions: PlanReviewAction[];
+}
+
+/** Resolves with the chosen action (and typed text for an `input` action), or undefined when dismissed. */
+export type PlanReviewFn = (request: PlanReviewRequest) => Promise<{ value: string; text?: string } | undefined>;
 
 export interface WorkflowOptions {
   cwd: string;

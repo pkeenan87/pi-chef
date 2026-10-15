@@ -22,7 +22,7 @@ Both must be green before you call a change done. There is no lint script.
 - `src/storage/store.ts`: task state, the event log, the ledger, metrics, and locks.
 - `src/git/`, `src/github/`: worktrees, the `gh` GraphQL client, and the autopilot cycle.
 - `src/agents/`: the worker pool, the model executor, and `pi-runner.ts` (spawns a child `pi` per ticket and parses its JSON events). `src/child-mode.ts`: what the extension registers inside such a child. `src/orchestrator/ticket-run.ts` runs one ticket (route, child, commit, checks, ledger, escalation). `src/review/`: checks and static review.
-- `src/tools/`: `web_search` (Anthropic subscription, Haiku), `web_fetch` (local, public-only), and the plan tools `plan_questions` / `plan_spec` / `plan_tickets` (`plan-questions.ts`, `plan-flow.ts`; `readonly-bash.ts` is the planning bash allowlist).
+- `src/tools/`: `web_search` (Anthropic subscription, Haiku), `web_fetch` (local, public-only), and the plan tools `plan_questions` / `plan_spec` / `plan_tickets` (`plan-questions.ts`, `plan-flow.ts`, `plan-review.ts` (the scrollable full-plan review used by `plan_tickets` and `/approve-plan`); `readonly-bash.ts` is the planning bash allowlist).
 - `src/sandbox.ts`: the command allowlist and deny rules. `src/redact.ts`: secret redaction.
 
 ## Rules that are not obvious from the code
@@ -34,6 +34,7 @@ Both must be green before you call a change done. There is no lint script.
 - **Unknown cost is never treated as zero.** Record `actualUsd: null` and let the budget treat it as spend or a warning. Do money math in integer micro-USD (`toMicroUsd` and `fromMicroUsd`).
 - **Spawn processes with `execFile` and argv arrays, never a shell.** Put `--` before user-derived refs. Every command must pass `assertCommandAllowed`.
 - **Writes to `.pi-workflows/` go through `atomicWrite`, `withLock`, or append-only files.** Never truncate `events.jsonl` or the ledger.
+- **Never touch a command's `ctx` or the captured `pi` after the session is replaced.** `/approve-plan` opens a new session (`newSession`); Pi then invalidates the old ctx and pi, and any use throws. Post-replacement work goes through the ctx passed to `withSession` (`replacementCtx` in `extension.ts`).
 - **Phase changes go through `transition`, which checks `machine.ts`.** Commands return results through `guard` and do not throw to Pi.
 - **Price every new model.** Add a row to `pricing` in `.pi-workflows/config.yaml`, or the selector ranks it last as `price_unknown`.
 - **Quota shadow prices rank; they never bill.** `quota.models` weights and the `quota.providers` caps (`src/cost/quota.ts`, `shadowCost`/`rankingCost` in `src/router/stats.ts`) only change scores. Never add them to `actualUsd`, `budgetStatus`, `budgetRemainingUsd`, the over-budget filter, or `expectedUsd`. Give a new subscription model a `quota.models` row as well as its $0 `pricing` row.

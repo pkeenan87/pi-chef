@@ -8,6 +8,7 @@ import { isDeniedCommand } from "./sandbox.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { Workflow, type SessionControl } from "./orchestrator/service.js";
+import { reviewPlan } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { declaredLimits, routeVirtual, VIRTUAL_THINKING_LEVELS, type RouterRegistry, type RouterRequest, type RouterState } from "./router/virtual.js";
 import { fallbackClassification } from "./router/classify.js";
@@ -121,28 +122,60 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
   }
   if (ctx) {
     const registry = (ctx as { modelRegistry?: PiRegistryLike }).modelRegistry;
+    // A replacement session's ctx brings its own sendUserMessage; the captured pi is stale after a replacement.
+    const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
     active.bind({
       chat: registry ? createRegistryChat(registry) : undefined,
       status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-router", text) : undefined,
       planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-plan", text) : undefined,
-      startTurn: piRef && typeof piRef.sendUserMessage === "function" ? (text) => piRef!.sendUserMessage(text) : undefined,
+      startTurn: send ? (text) => void send(text) : undefined,
       session: sessionFrom(ctx),
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
+      review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
+      show: (text) => showPlanMessage(ctx, text),
     });
   }
   return active;
 }
 
-type CommandContext = ExtensionContext & Parameters<typeof sessionFrom>[0];
+type CommandContext = ExtensionContext &
+  Parameters<typeof sessionFrom>[0] & {
+    sendUserMessage?: (text: string) => Promise<void> | void;
+    sendMessage?: (message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean }) => Promise<void> | void;
+  };
 
-function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never : (options?: { withSession?: (next: { sendMessage: Function }) => Promise<void> }) => Promise<{ cancelled: boolean }>; compact: (options?: { customInstructions?: string }) => void }): SessionControl {
+/**
+ * The context a command must use once it has replaced the session (Pi invalidates the old ctx and pi then).
+ * Set from `withSession` and read by the command handler after `run` returns.
+ */
+let replacementCtx: CommandContext | undefined;
+
+/** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
+function showPlanMessage(ctx: CommandContext, text: string): void {
+  const message = { customType: "cost-plan", content: text, display: true };
+  try {
+    if (typeof ctx.sendMessage === "function") void ctx.sendMessage(message, { triggerTurn: false });
+    else if (piRef && typeof (piRef as Partial<ExtensionAPI>).sendMessage === "function") void (piRef as ExtensionAPI).sendMessage(message, { triggerTurn: false });
+  } catch {
+    /* a stale or headless session: the plan file on disk is still the record */
+  }
+}
+
+function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never : (options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>; compact: (options?: { customInstructions?: string }) => void }): SessionControl {
   return {
     async reset({ boundary, handoff }) {
       try {
         const result = await ctx.newSession({
           withSession: async (next) => {
-            await next.sendMessage(
+            // Everything after this point must use `next`: Pi has invalidated the ctx and pi this command captured.
+            replacementCtx = next;
+            try {
+              workflowFor(next.cwd, next);
+            } catch {
+              /* a config problem is reported by the next command */
+            }
+            await next.sendMessage!(
               { customType: "cost-handoff", content: handoff, display: true, details: { boundary } },
               { triggerTurn: false },
             );
@@ -217,6 +250,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
           return;
         }
         let result: CommandResult;
+        replacementCtx = undefined;
         try {
           const workflow = workflowFor(ctx.cwd, ctx as unknown as CommandContext);
           result = await spec.run(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
@@ -224,10 +258,20 @@ export function registerWorkflow(pi: ExtensionAPI): void {
           // An invalid config must reach the user as a failed command, not as an exception inside Pi.
           result = asResult(error);
         }
-        syncPlanTools(pi);
-        if (ctx.hasUI) {
-          ctx.ui.setStatus("cost-workflow", result.ok ? result.text.split("\n")[0] : undefined);
-          ctx.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
+        // After a session replacement (for example the handoff in /approve-plan) the captured ctx and pi throw on
+        // use. The new session's session_start already synced the plan tools, so only the result is shown, through
+        // the replacement ctx.
+        const live: ExtensionContext = replacementCtx ?? ctx;
+        const replaced = !!replacementCtx;
+        replacementCtx = undefined;
+        if (!replaced) syncPlanTools(pi);
+        try {
+          if (live.hasUI) {
+            live.ui.setStatus("cost-workflow", result.ok ? result.text.split("\n")[0] : undefined);
+            live.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
+          }
+        } catch {
+          /* the session was replaced again or closed; the result is in the task's event log */
         }
       },
     });

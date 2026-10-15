@@ -261,7 +261,7 @@ function ticket(id: string, extra: Partial<Ticket> = {}): Ticket {
   return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: `Build part ${id}.`, acceptanceCriteria: ["retry works"], blockedBy: [], estimatedContextTokens: 40_000, ...extra };
 }
 
-const specParams = { summary: "Retry failed ingests.", decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: [], outOfScope: [], risks: [] };
+const specParams = { summary: "Retry failed ingests.", context: "src/ingest.ts parses and drops failures.", approach: "Wrap parse() in retryParse() with a fixed backoff.", changes: [{ path: "src/ingest.ts", change: "add retryParse(input, attempts)" }], reuse: ["sleep() in src/util.ts"], verification: ["npm test"], decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: [], outOfScope: [], risks: [] };
 
 /** A file the fake child writes into its worktree, named after the worktree directory. */
 const marker = (cwd: string) => `feature-${path.basename(cwd).slice(0, 2)}.txt`;

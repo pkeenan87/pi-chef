@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { AcceptedClassification, CommandResult, PlanDocument, TaskState } from "../domain.js";
 import { classifyTaskWithUsage, type ClassifierUsage, type Decider } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
@@ -5,7 +6,8 @@ import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, recordClassifier, remember } from "./budget.js";
 import { active, done, fail, guard, handoff, iso, knownZero, PUBLISHED_PHASES, requireActive, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { acceptanceCriteria, applyOverlap, assertGraph, materialChange, parseGroups, renderPlan } from "./plan.js";
+import { acceptanceCriteria, applyOverlap, assertGraph, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
+import { requestPlanChanges, SPEC_FILE } from "./interview.js";
 import { finish } from "./publish.js";
 import { announce, availability, decide, suggestAdvisor } from "./routing.js";
 
@@ -139,7 +141,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
       state = await ctx.store.update(state.taskId, "plan drafted", (task) => backToApproval({ ...task, plan: draft, classification, routing, request: safe }, at));
     }
     ctx.store.writeText(state.taskId, "plan.json", JSON.stringify(draft, null, 2));
-    ctx.store.writeText(state.taskId, "plan.md", renderPlan(draft));
+    ctx.store.writeText(state.taskId, PLAN_FILE, renderPlan(draft));
     remember(ctx, state, state.phase, routing.tier, routing.provider, routing.model, knownZero(), "success", 0, "plan");
     await announce(ctx, state.taskId, "plan", routing);
     if (draft.securitySensitive) suggestAdvisor(ctx, state.taskId, "security-sensitive plan");
@@ -148,34 +150,68 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
   });
 }
 
+/** The plan document for a task as it is shown for review: `plan.md`, or rendered from the stored plan. */
+function planMarkdown(ctx: WorkflowContext, task: TaskState): string {
+  return ctx.store.readText(task.taskId, PLAN_FILE) ?? renderPlanReview(task.plan!, ctx.store.readText(task.taskId, SPEC_FILE));
+}
+
 export function approvePlan(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
     const current = requireActive(ctx);
     if (current.phase !== "AWAITING_PLAN_APPROVAL" || !current.plan) {
       return fail("APPROVAL_REQUIRED", "There is no draft waiting for approval.");
     }
-    if (current.approvedVersion === current.plan.version) return done(`Plan v${current.plan.version} is already approved.`);
+    const version = current.plan.version;
+    if (current.approvedVersion === version) return done(`Plan v${version} is already approved.`);
     assertGraph(current.plan.groups);
+    // With a UI the person sees the whole plan (spec and tickets) before approving it.
+    if (ctx.review) {
+      const revisable = !!current.plan.tickets?.length;
+      const choice = await ctx.review({
+        title: `Approve plan v${version}?`,
+        markdown: planMarkdown(ctx, current),
+        actions: [
+          { value: "approve", label: `Approve plan v${version}` },
+          ...(revisable ? [{ value: "revise", label: "Request changes", input: "What should change in the plan?" }] : []),
+          { value: "cancel", label: "Not yet" },
+        ],
+      });
+      if (choice?.value === "revise") return requestPlanChanges(ctx, current, choice.text ?? "");
+      if (choice?.value !== "approve") {
+        return fail("NOT_APPROVED", `Plan v${version} was not approved. /show-plan shows it again; /approve-plan when ready.`);
+      }
+    }
     const at = iso(ctx);
     const body = `${JSON.stringify(current.plan, null, 2)}\n`;
-    const frozen = ctx.store.writeOnceText(current.taskId, `plan.v${current.plan.version}.approved.json`, body);
+    const frozen = ctx.store.writeOnceText(current.taskId, `plan.v${version}.approved.json`, body);
+    // Recorded before the handoff: the session reset can fail or be cancelled, and approval must not depend on it.
+    await ctx.store.update(current.taskId, "plan approved", (task) => ({ ...task, approvedVersion: task.plan?.version, updatedAt: at }));
     const note = await handoff(ctx, current, "post-approval", [
       "# Handoff after plan approval",
       "",
       `Approved plan: ${frozen}`,
-      `Version: ${current.plan.version}`,
+      `Version: ${version}`,
       "",
       current.plan.summary,
       "",
-      "Implement only the files in this plan. Do not expand scope.",
+      "Implement only the files in this plan. Do not expand scope. Run /implement to start.",
     ].join("\n"));
-    const state = await ctx.store.update(current.taskId, "plan approved", (task) => ({
-      ...task,
-      approvedVersion: task.plan?.version,
-      updatedAt: at,
-      contextResets: [...task.contextResets, note],
-    }));
+    const state = await ctx.store.update(current.taskId, "context reset", (task) => ({ ...task, contextResets: [...task.contextResets, note] }));
     return done(`Approved plan v${state.approvedVersion}. Context reset: ${note.mode}. The approved file will not be overwritten.`, state);
+  });
+}
+
+/** Posts the active task's plan in the chat (and returns where it lives on disk). */
+export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
+  return guard(async () => {
+    const current = requireActive(ctx);
+    if (!current.plan) return fail("NO_PLAN", "The active task has no plan yet. Run /plan <request>.");
+    const markdown = planMarkdown(ctx, current);
+    const approved = current.approvedVersion === current.plan.version;
+    const where = path.join(ctx.store.taskDir(current.taskId), PLAN_FILE);
+    if (ctx.show) ctx.show(markdown);
+    const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "waiting for /approve-plan" : current.phase.toLowerCase();
+    return done(ctx.show ? `Plan v${current.plan.version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
   });
 }
 

@@ -12,7 +12,7 @@ import type { TaskStore } from "../storage/store.js";
 import type { InFlightSpend } from "./inflight.js";
 import { move } from "./machine.js";
 import type { Poller } from "./poller.js";
-import type { SessionControl, WorkflowOptions, GroupExecutor, TicketRunnerFn } from "./types.js";
+import type { SessionControl, WorkflowOptions, GroupExecutor, PlanReviewFn, TicketRunnerFn } from "./types.js";
 
 /** Everything the orchestrator modules share. The UI hooks are mutable: `Workflow.bind` swaps them per command. */
 export interface WorkflowContext {
@@ -51,6 +51,10 @@ export interface WorkflowContext {
   planStatus?: (text: string | undefined) => void;
   /** Starts a model turn in the Pi session with this user message. Absent outside Pi. */
   startTurn?: (text: string) => void;
+  /** Full-plan review dialog. Absent without a UI; approval then proceeds as before. */
+  review?: PlanReviewFn;
+  /** Posts a plan as a displayed chat message. */
+  show?: (markdown: string) => void;
 }
 
 /** Phases from which /implement may start or resume work. */

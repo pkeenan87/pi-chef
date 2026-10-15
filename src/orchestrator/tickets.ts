@@ -31,7 +31,7 @@ export function projectFileSize(cwd: string, file: string): number | undefined {
 
 /** Code-side estimate: ticket text and the listed files at 4 chars per token, plus fixed overhead. */
 export function estimateTicketTokens(ticket: Ticket, fileSize: (file: string) => number | undefined): number {
-  const text = ticket.title.length + ticket.whatToBuild.length + ticket.acceptanceCriteria.reduce((sum, item) => sum + item.length, 0);
+  const text = ticket.title.length + ticket.whatToBuild.length + (ticket.implementation?.length ?? 0) + ticket.acceptanceCriteria.reduce((sum, item) => sum + item.length, 0);
   const files = (ticket.files ?? []).reduce((sum, file) => sum + (fileSize(file) ?? 0), 0);
   return Math.ceil(text / 4) + Math.ceil(files / 4) + CONTEXT_OVERHEAD_TOKENS;
 }
@@ -66,6 +66,8 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     const whatToBuild = typeof item.whatToBuild === "string" ? item.whatToBuild.trim() : "";
     if (!whatToBuild) errors.push(`Ticket ${label}: whatToBuild is required.`);
     else if (STRUCTURAL_LINE.test(whatToBuild)) errors.push(`Ticket ${label}: whatToBuild has a line starting with "# ", "## ", or "<!-- ticket", which would corrupt the ticket file. Reword it or use "###" headings.`);
+    const implementation = typeof item.implementation === "string" ? item.implementation.trim() : "";
+    if (implementation && STRUCTURAL_LINE.test(implementation)) errors.push(`Ticket ${label}: implementation has a line starting with "# ", "## ", or "<!-- ticket", which would corrupt the ticket file. Use "###" headings or lists.`);
     const acceptanceCriteria = strings(item.acceptanceCriteria);
     for (const criterion of acceptanceCriteria) {
       if (/[\r\n]/.test(criterion)) errors.push(`Ticket ${label}: each acceptance criterion must be a single line (no newlines).`);
@@ -88,6 +90,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       slug,
       title,
       whatToBuild,
+      ...(implementation ? { implementation } : {}),
       acceptanceCriteria,
       blockedBy: strings(item.blockedBy),
       ...(tier && isTier(tier) ? { suggestedTier: tier } : {}),
@@ -162,6 +165,7 @@ export function renderTicket(ticket: Ticket): string {
     "",
     ticket.whatToBuild,
     "",
+    ...(ticket.implementation ? ["## Implementation", "", ticket.implementation, ""] : []),
     "## Acceptance criteria",
     "",
     ...ticket.acceptanceCriteria.map((item) => `- [ ] ${item}`),
@@ -214,6 +218,7 @@ export function parseTicketsMarkdown(markdown: string): unknown[] {
         slug: meta.get("slug") ?? "",
         title: heading?.[2]?.trim() ?? "",
         whatToBuild: section(body, "What to build"),
+        implementation: section(body, "Implementation") || undefined,
         acceptanceCriteria: section(body, "Acceptance criteria")
           .split("\n")
           .map((line) => line.replace(/^\s*-\s*\[[ xX]\]\s*/, "").trim())

@@ -15,8 +15,8 @@ import { InFlightSpend } from "./inflight.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { implement } from "./implementation.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
-import { checkTickets, commitTickets, requireTicketStage } from "./ticket-plan.js";
-import { approvePlan, classify, plan, route } from "./planning.js";
+import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
+import { approvePlan, classify, plan, route, showPlan } from "./planning.js";
 import { Poller } from "./poller.js";
 import { complete, push, review } from "./publish.js";
 import { auth, cost, resetPhase, status } from "./reports.js";
@@ -24,7 +24,7 @@ import { announce, availability, decide } from "./routing.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
 import { worktrees } from "./worktrees.js";
 
-export type { ExecutorInput, ExecutorResult, GroupExecutor, SessionControl, WorkflowBinding, WorkflowOptions } from "./types.js";
+export type { ExecutorInput, ExecutorResult, GroupExecutor, PlanReviewFn, PlanReviewRequest, SessionControl, WorkflowBinding, WorkflowOptions } from "./types.js";
 
 /**
  * Public facade. Each command lives in its own module as a function of a shared WorkflowContext;
@@ -105,6 +105,8 @@ export class Workflow {
     ctx.startTurn = binding.startTurn ?? ctx.startTurn;
     ctx.confirm = binding.confirm ?? (async () => false);
     ctx.notify = binding.notify ?? ((message) => this.store.notify(message));
+    ctx.review = binding.review;
+    ctx.show = binding.show ?? ctx.show;
   }
 
   /** Re-arms the autopilot timer for a task that was being watched before a restart or session reset. */
@@ -212,8 +214,22 @@ export class Workflow {
     return commitTickets(this.ctx, tickets);
   }
 
+  /** The full plan these tickets would produce, for review before they are saved. */
+  previewPlan(tickets: Parameters<typeof previewPlan>[1]): string {
+    return previewPlan(this.ctx, tickets);
+  }
+
   approvePlan(): Promise<CommandResult> {
     return approvePlan(this.ctx);
+  }
+
+  /** Posts markdown as a displayed chat message, when a Pi session is bound. */
+  showMarkdown(markdown: string): void {
+    this.ctx.show?.(markdown);
+  }
+
+  showPlan(): Promise<CommandResult> {
+    return showPlan(this.ctx);
   }
 
   implement(): Promise<CommandResult> {
