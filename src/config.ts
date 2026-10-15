@@ -145,7 +145,7 @@ export interface WorkflowConfig {
   /** Commands /review runs in the integration worktree before the checks (an install, for example). Same allowlist as checks. */
   setup: CheckConfig[];
   /** The model pass of /review: a review-tier model reads the integrated diff and lists advisory findings. */
-  review: { model: boolean; maxDiffChars: number };
+  review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
   commandAllowlist: string[];
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
@@ -188,7 +188,7 @@ const DEFAULTS: WorkflowConfig = {
   autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
   checks: [],
   setup: [],
-  review: { model: true, maxDiffChars: 120_000 },
+  review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
   commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "npx vitest run *", "git status", "git diff"],
   orgProviderAllowlist: [],
   proprietaryCode: false,
@@ -495,6 +495,8 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     if (!isRecord(raw.review)) invalid(where, "review", "must be a mapping");
     if (raw.review.model !== undefined && typeof raw.review.model !== "boolean") invalid(where, "review.model", "must be a boolean");
     checkNumber(raw.review, "maxDiffChars", where, { min: 1000, integer: true }, "review");
+    checkNumber(raw.review, "maxChunks", where, { min: 1, integer: true }, "review");
+    checkNumber(raw.review, "timeoutMs", where, { min: 1000, integer: true }, "review");
   }
   if (raw.commandAllowlist !== undefined) stringArray(raw.commandAllowlist, "commandAllowlist", where);
   if (raw.orgProviderAllowlist !== undefined) {

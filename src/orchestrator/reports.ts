@@ -3,6 +3,7 @@ import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, handoff, iso, requireActive, type WorkflowContext } from "./context.js";
+import { formatDuration } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
 function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.readLedger()): string[] {
@@ -45,7 +46,8 @@ function ticketLines(state: TaskState | undefined): string[] {
   return runs.map(([id, run]) => {
     const model = run.provider && run.model ? `${run.provider}/${run.model}` : "no model yet";
     const spend = run.costUsd === null ? "cost unknown" : `$${run.costUsd.toFixed(4)}`;
-    return `Ticket ${id}: ${run.status} · ${model} · ${run.tokens} tokens over ${run.turns} turn(s) · ${spend} · peak ~${run.maxContextTokens} ctx${run.crossedTarget ? " (over soft target)" : ""}${run.attempts > 1 ? ` · ${run.attempts} attempts` : ""}${run.error && run.status !== "done" ? ` · ${run.error.slice(0, 120)}` : ""}`;
+    const trail = (run.attemptLog ?? []).map((item) => `${item.provider}/${item.model} ${item.outcome === "success" ? "ok" : "failed"} in ${formatDuration(item.elapsedMs)}`).join(", ");
+    return `Ticket ${id}: ${run.status} · ${model} · ${run.tokens} tokens over ${run.turns} turn(s) · ${spend} · ${formatDuration(run.elapsedMs ?? 0)} · peak ~${run.maxContextTokens} ctx${run.crossedTarget ? " (over soft target)" : ""}${run.attempts > 1 ? ` · ${run.attempts} attempts` : ""}${trail ? ` · [${trail}]` : ""}${run.error && run.status !== "done" ? ` · ${run.error.slice(0, 120)}` : ""}`;
   });
 }
 

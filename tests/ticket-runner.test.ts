@@ -311,6 +311,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
   const statuses: string[] = [];
   const notices: string[] = [];
   const progress: string[] = [];
+  const reports: string[] = [];
   const config = tieredConfig();
   options.mutate?.(config);
   const script =
@@ -328,6 +329,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
     status: (text) => void (text && statuses.push(text)),
     notify: (message) => void notices.push(message),
     progress: (message) => void progress.push(message),
+    report: (markdown) => void reports.push(markdown),
     ...(options.runner ? { runner: options.runner } : {}),
     ticketRunner: (input) => runTicketInChild({ ...input, spawn, invocation, extensionPath: "/pkg/src/extension.ts", baseEnv: { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: "sk-ant-api03-secretsecret", OPENAI_API_KEY: "sk-secretsecretsecret" } }),
   });
@@ -337,7 +339,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
   expect((await app.approvePlan()).ok).toBe(true);
   const taskId = app.activeTaskId()!;
   const ticketFile = (item: Ticket) => readFileSync(path.join(app.store.taskDir(taskId), "tickets", `${item.id}-${item.slug}.md`), "utf8");
-  return { cwd, app, calls, events, statuses, notices, progress, taskId, ticketFile, peak: () => {
+  return { cwd, app, calls, events, statuses, notices, progress, reports, taskId, ticketFile, peak: () => {
       let running = 0;
       let high = 0;
       for (const item of events) {
@@ -390,7 +392,7 @@ describe("/implement with tickets", () => {
     expect(t.app.store.readLedger().filter((item) => item.phase === "IMPLEMENTING" && item.tier !== "classifier").every((item) => item.reason.startsWith("ticket ") || item.reason.startsWith("web_search"))).toBe(true);
     // Status line, route events, ticket files, per-ticket state, /status.
     expect(t.statuses.some((text) => /^ticket 01 → (openai\/gpt-6-luna|anthropic\/claude-haiku-5-5)$/.test(text))).toBe(true);
-    expect(t.statuses).toContain("ticket 01 · turn 1 · ~40k ctx");
+    expect(t.statuses).toContain("ticket 01 · turn 1 · ~40k ctx · 0.0s");
     expect(readFileSync(path.join(t.app.store.taskDir(t.taskId), "events.jsonl"), "utf8")).toContain('"purpose":"implement"');
     expect(t.ticketFile(one)).toContain("## Status: done");
     expect(t.ticketFile(one)).toContain("- [x] retry works");
@@ -610,7 +612,11 @@ describe("/implement with tickets", () => {
     const failed = await bare.app.review();
     expect(failed).toMatchObject({ ok: false, code: "REVIEW_BLOCKING" });
     expect(failed.text).toContain("no checks ran");
-    expect(failed.text).toContain("Suggestions:");
+    // With a report hook the result stays short; the structured block carries the detail.
+    expect(failed.text).toContain("details above and in reports/review.md");
+    expect(bare.reports.at(-1)).toContain("## Review did not pass");
+    expect(bare.reports.at(-1)).toContain("- suggestion tests: No checks are configured");
+    expect(bare.reports.at(-1)).toContain("### Next");
   });
 
   it("posts progress lines for waves and ticket attempts", async () => {
@@ -618,8 +624,40 @@ describe("/implement with tickets", () => {
     expect((await t.app.implement()).ok).toBe(true);
     expect(t.progress[0]).toBe("Wave 1 of 2: 01-t01");
     expect(t.progress.some((line) => /^Ticket 01 \(Ticket 01\) → \S+\/\S+$/.test(line))).toBe(true);
-    expect(t.progress.some((line) => /^Ticket 01 done on \S+\/\S+: 2 turn\(s\), \$0\.0000\.$/.test(line))).toBe(true);
+    expect(t.progress.some((line) => /^Ticket 01 done on \S+\/\S+: 2 turn\(s\), 0\.0s, \$0\.0000\.$/.test(line))).toBe(true);
+    expect(t.progress).toContain("Ticket 01 check unit: passed (0.0s)");
     expect(t.progress).toContain("Wave 2 of 2: 02-t02");
+    // Every attempt leaves a block in the chat, and the run ends with a summary of all tickets.
+    expect(t.reports.some((block) => block.startsWith("### Ticket 01 done · Ticket 01") && block.includes("- Time: 0.0s this attempt") && block.includes("- Checks:") && block.includes("- [x] retry works"))).toBe(true);
+    const summary = t.reports.find((block) => block.startsWith("## Implementation done in"));
+    expect(summary).toBeDefined();
+    expect(summary).toMatch(/- 01 ✓ Ticket 01: 2 turn\(s\), 81k tokens, \$0\.0000, 0\.0s \[\S+\/\S+ ✓ 0\.0s\]/);
+    expect(summary).toContain("- Total: 2 of 2 ticket(s) done");
+    expect(summary).toContain("- Integration: cost/");
+    const run = t.app.store.load(t.taskId)!.ticketRuns!["01"]!;
+    expect(run.attemptLog).toHaveLength(1);
+    expect(run.attemptLog![0]).toMatchObject({ attempt: 1, outcome: "success", turns: 2, elapsedMs: 0 });
+    expect(typeof run.startedAt).toBe("string");
+    expect((await t.app.status()).text).toMatch(/Ticket 01: done .* · 0\.0s · peak/);
+  });
+
+  it("posts a heartbeat every few turns with the tools used, and a failed attempt's block names the next step", async () => {
+    const turns = Array.from({ length: 7 }, (_, index) => assistant(`step ${index + 1}`, 10_000 + index * 1000));
+    const tool = (name: string) => `${JSON.stringify({ type: "tool_execution_start", toolName: name })}\n`;
+    const t = await ticketTask({
+      tickets: [ticket("01")],
+      script: () => ({ code: 1, stderr: "crash", stdout: [tool("read"), tool("bash"), tool("bash"), ...turns] }),
+    });
+    expect((await t.app.implement()).ok).toBe(false);
+    const beats = t.progress.filter((line) => /^Ticket 01 · turn \d+ ·/.test(line));
+    expect(beats[0]).toMatch(/^Ticket 01 · turn 5 · ~14k ctx · 0\.0s · \$0\.0000 so far · tools since last: read×1, bash×2$/);
+    const block = t.reports.find((item) => item.startsWith("### Ticket 01 failed"))!;
+    expect(block).toContain("attempt 1 of 3");
+    expect(block).toContain("- Failure: pi exited with code 1");
+    expect(block).toContain("- Next: a fresh child at the next tier continues on this worktree");
+    const last = t.reports.filter((item) => item.startsWith("### Ticket 01 failed")).at(-1)!;
+    expect(last).toContain("- Next: escalation stopped; the ticket stays failed");
+    expect(t.reports.find((item) => item.startsWith("## Implementation failed in"))).toContain("- 01 ✗ Ticket 01");
   });
 
   it("re-runs a ticket whose text changed in a new plan version, telling the child about the earlier work", async () => {

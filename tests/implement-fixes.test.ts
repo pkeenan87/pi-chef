@@ -239,8 +239,12 @@ describe("model review", () => {
     const review = await app.review();
     expect(review.ok, review.text).toBe(true);
     expect(review.text).toContain("Review passed with 1 check(s)");
-    expect(review.text).toMatch(/Model review \(\S+\/\S+\): 1 finding\(s\)\./);
-    expect(review.text).toContain("- [high] src/ingest.ts: ingest() throws on empty input");
+    expect(review.text).toMatch(/Model review \(\S+\/\S+; 0\.0s, \$0\.\d{4}\): 1 finding\(s\)\./);
+    expect(review.text).toContain("- HIGH   src/ingest.ts — ingest() throws on empty input");
+    expect(review.text).toContain("## Review passed");
+    expect(review.text).toContain("### Checks (1 of 1 passed)");
+    expect(review.text).toContain("- ✓ unit");
+    expect(review.text).toContain("### Next");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.system).toContain("JSON array");
     expect(calls[0]!.user).toContain("# Diff");
@@ -260,7 +264,7 @@ describe("model review", () => {
     expect((await quiet.implement()).ok).toBe(true);
     const silent = await quiet.review();
     expect(silent.ok).toBe(true);
-    expect(silent.text).not.toContain("Model review");
+    expect(silent.text).toContain("### Model review\n- did not run");
     expect(off.calls).toHaveLength(0);
 
     const broken: ChatFn = async () => {
@@ -315,4 +319,70 @@ describe("model review", () => {
     expect(failed.text).toContain("fresh checkout");
     expect(failed.text).toContain("`setup:`");
   });
+});
+
+import { formatDuration, formatTokens } from "../src/orchestrator/format.js";
+import { splitDiff } from "../src/review/model-review.js";
+
+describe("verbose output", () => {
+  it("formats durations and token counts", () => {
+    expect([formatDuration(800), formatDuration(12_340), formatDuration(261_000), formatDuration(3_720_000)]).toEqual(["0.8s", "12.3s", "4m21s", "1h02m"]);
+    expect([formatTokens(512), formatTokens(81_000), formatTokens(1_654_094)]).toEqual(["512", "81k", "1.7M"]);
+  });
+
+  it("splits a large diff at file boundaries and cuts only an oversized file", () => {
+    const file = (name: string, size: number) => `diff --git a/${name} b/${name}\n${"+x".repeat(size / 2)}\n`;
+    const parts = splitDiff(file("a", 600) + file("b", 600) + file("c", 600), 1300);
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toContain("a/a b/a");
+    expect(parts[0]).toContain("a/b b/b");
+    expect(parts[1]).toContain("a/c b/c");
+    const big = splitDiff(file("a", 200) + file("huge", 5000), 1000);
+    expect(big).toHaveLength(2);
+    expect(big[1]).toContain("was cut at 1000 characters");
+    expect(splitDiff("small", 1000)).toEqual(["small"]);
+  });
+
+  it("reviews a large diff in parts, reports progress per part, and says when parts were left out", async () => {
+    let call = 0;
+    const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: call++ === 0 ? "low" : "high", category: "tests", message: `finding from part ${call}` }]));
+    const progress: string[] = [];
+    const config = tieredConfig("review: { maxDiffChars: 2000, maxChunks: 2 }");
+    const app = workflow(await tempRepo(), { config, chat, progress: (line) => void progress.push(line) });
+    await app.plan(tasksRequest.replace('"content":"export function ingest', `"content":"${"// padding line that makes this file's diff long\\n".repeat(80)}export function ingest`));
+    await app.approvePlan();
+    expect((await app.implement()).ok).toBe(true);
+    const review = await app.review();
+    expect(review.ok, review.text).toBe(true);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]!.user).toContain("# Diff (part 1 of");
+    expect(calls[0]!.system).toContain("You have no tools");
+    expect(progress.some((line) => /^Review: started · 2 worktree\(s\) · 0 setup step\(s\), 1 check\(s\) · model \S+\/\S+$/.test(line))).toBe(true);
+    expect(progress.some((line) => /^Review: running unit \(npm test\)$/.test(line))).toBe(true);
+    expect(progress.some((line) => /^Review: unit: passed in 0\.0s$/.test(line))).toBe(true);
+    expect(progress.some((line) => /^Review: asking \S+\/\S+ to review part 1 of \d+ \(\d+k chars\)$/.test(line))).toBe(true);
+    expect(progress.some((line) => /^Review: model pass done: \d+ finding\(s\) in 0\.0s, \$0\.\d{4}$/.test(line))).toBe(true);
+    // Severity order across parts, and the top line says how the pass ran.
+    expect(review.text).toMatch(/Model review \(\S+\/\S+; 2 parts, 0\.0s, \$0\.\d{4}\)/);
+    expect(review.text.indexOf("- HIGH")).toBeLessThan(review.text.indexOf("- LOW"));
+    const data = review.data as { modelReview: { chunks: number; truncated: boolean; error?: string } };
+    expect(data.modelReview.chunks).toBe(2);
+    // The padded file is larger than one part, so it was cut: the header says so.
+    expect(data.modelReview.truncated).toBe(true);
+    expect(review.text).toContain("(part of the diff was not reviewed)");
+  });
+
+  it("stops a model review call at review.timeoutMs", async () => {
+    const chat: ChatFn = (_candidate, request) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
+      });
+    const app = workflow(await tempRepo(), { config: tieredConfig("review: { timeoutMs: 1000 }"), chat });
+    await app.plan(tasksRequest);
+    await app.approvePlan();
+    expect((await app.implement()).ok).toBe(true);
+    const review = await app.review();
+    expect(review.ok).toBe(true);
+    expect(review.text).toContain("produced no findings: the call failed: aborted by signal");
+  }, 15_000);
 });

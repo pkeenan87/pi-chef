@@ -4,6 +4,7 @@ import { runWorkerPool, type WorkerJob } from "../agents/pool.js";
 import { createModelExecutor } from "../agents/model-executor.js";
 import { redact } from "../redact.js";
 import { addUsage, iso, knownZero, type WorkflowContext } from "./context.js";
+import { formatDuration, formatTokens, formatUsd } from "./format.js";
 import { assertGraph, waves } from "./plan.js";
 import { groupId } from "./tickets.js";
 import { runTicket } from "./ticket-run.js";
@@ -46,9 +47,32 @@ function attempt(tier: Tier, provider: string, model: string, outcome: AttemptRe
   return { tier, provider, model, outcome, at };
 }
 
+/** The block posted when a ticket implementation ends: one line per ticket with its trail, then the totals. */
+export function implementationReport(state: TaskState, elapsedMs: number, outcome: "done" | "failed", integration?: string): string {
+  const runs = Object.entries(state.ticketRuns ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const lines = runs.map(([id, run]) => {
+    const title = state.plan?.tickets?.find((ticket) => ticket.id === id)?.title ?? "";
+    const trail = (run.attemptLog ?? []).map((item) => `${item.provider}/${item.model} ${item.outcome === "success" ? "✓" : "✗"} ${formatDuration(item.elapsedMs)}`).join(" → ");
+    return `- ${id} ${run.status === "done" ? "✓" : run.status === "failed" ? "✗" : "…"} ${title}: ${run.turns} turn(s), ${formatTokens(run.tokens)} tokens, ${formatUsd(run.costUsd)}, ${formatDuration(run.elapsedMs ?? 0)}${trail ? ` [${trail}]` : ""}${run.error && run.status !== "done" ? ` — ${run.error.slice(0, 160)}` : ""}`;
+  });
+  const cost = runs.some(([, run]) => run.costUsd === null) ? "cost partly unknown" : formatUsd(runs.reduce((sum, [, run]) => sum + (run.costUsd ?? 0), 0));
+  const turns = runs.reduce((sum, [, run]) => sum + run.turns, 0);
+  return [
+    `## Implementation ${outcome} in ${formatDuration(elapsedMs)}`,
+    ...lines,
+    `- Total: ${runs.filter(([, run]) => run.status === "done").length} of ${runs.length} ticket(s) done, ${turns} turn(s), ${cost}`,
+    ...(integration ? [`- Integration: ${integration}`] : []),
+  ].join("\n");
+}
+
 /** Runs the plan's groups wave by wave in their own worktrees, then merges them into the integration branch. */
 export async function runImplementation(ctx: WorkflowContext, initial: TaskState, decision: RoutingDecision): Promise<ImplementationOutcome> {
   let state = initial;
+  const startedAt = ctx.now().getTime();
+  const report = (outcome: "done" | "failed", integration?: string) => {
+    if (tickets) ctx.report?.(implementationReport(requireActiveState(), ctx.now().getTime() - startedAt, outcome, integration));
+  };
+  const requireActiveState = () => ctx.store.load(state.taskId) ?? state;
   const tier = decision.tier;
   const plan = state.plan!;
   assertGraph(plan.groups);
@@ -189,7 +213,10 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
       const detail = failures.map(describeFailure).join("; ");
       const stopped = pool.stopped !== "completed" ? `Workers stopped: ${pool.stopped}. ` : "";
       const error = `${stopped}${detail}`.trim() || "Workers failed.";
-      if (tickets) return { ok: false, error, usage, fatal: true, blocked: !budgetStop && pool.stopped !== "cancelled", budget: budgetStop, ledgered: true, warnings };
+      if (tickets) {
+        report("failed");
+        return { ok: false, error, usage, fatal: true, blocked: !budgetStop && pool.stopped !== "cancelled", budget: budgetStop, ledgered: true, warnings };
+      }
       return { ok: false, error, usage, fatal: pool.stopped === "cancelled" || pool.stopped === "budget" };
     }
   }
@@ -218,6 +245,7 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
     updatedAt: iso(ctx),
   }));
   ctx.store.writeText(state.taskId, "reports/implementation.json", JSON.stringify({ tier, integration: integrationSha, worktrees: liveWorktrees(state) }, null, 2));
+  report("done", `${integrationBranch} @ ${integrationSha.slice(0, 12)}`);
   return {
     ok: true,
     summary: `Implemented ${liveWorktrees(state).length} worktree(s) on ${integrationBranch} at ${integrationSha}.`,

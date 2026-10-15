@@ -145,6 +145,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
+      report: (markdown) => showPlanMessage(ctx, markdown, "cost-report"),
       review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });
@@ -165,8 +166,8 @@ type CommandContext = ExtensionContext &
 let replacementCtx: CommandContext | undefined;
 
 /** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
-function showPlanMessage(ctx: CommandContext, text: string): void {
-  const message = { customType: "cost-plan", content: text, display: true };
+function showPlanMessage(ctx: CommandContext, text: string, customType = "cost-plan"): void {
+  const message = { customType, content: text, display: true };
   try {
     if (typeof ctx.sendMessage === "function") void ctx.sendMessage(message, { triggerTurn: false });
     else if (piRef && typeof (piRef as Partial<ExtensionAPI>).sendMessage === "function") void (piRef as ExtensionAPI).sendMessage(message, { triggerTurn: false });

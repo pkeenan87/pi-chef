@@ -188,6 +188,8 @@ export interface CheckEvidence {
   stdout: string;
   stderr: string;
   ran: boolean;
+  /** Wall time of the run; absent when it did not run. A cached pass reports the cache lookup's time. */
+  durationMs?: number;
 }
 
 export interface Finding {
@@ -212,6 +214,10 @@ export interface ModelReview {
   findings: ModelFinding[];
   /** The diff was cut to fit the configured size, so the model did not see all of it. */
   truncated: boolean;
+  /** Calls made: one per diff chunk of at most review.maxDiffChars. */
+  chunks?: number;
+  elapsedMs?: number;
+  costUsd?: number | null;
   /** Why there are no model findings (budget, no model, a failed call, or unparseable output). */
   error?: string;
 }
@@ -226,6 +232,8 @@ export interface ReviewReport {
   summary: string;
   /** The model pass, when it ran. Separate from `findings` so policy stays deterministic. */
   modelReview?: ModelReview;
+  /** Wall time of the whole review. */
+  elapsedMs?: number;
 }
 
 export interface WorkerArtifact {
@@ -287,6 +295,25 @@ export interface TicketRun {
   crossedTarget: boolean;
   /** Redacted tail of the child's final message, passed to tickets this one blocks. */
   summary?: string;
+  error?: string;
+  /** When the first attempt started. */
+  startedAt?: string;
+  /** Wall time across attempts. */
+  elapsedMs?: number;
+  /** One entry per attempt, oldest first: the trail /status shows. */
+  attemptLog?: TicketAttempt[];
+}
+
+export interface TicketAttempt {
+  attempt: number;
+  tier: Tier;
+  provider: string;
+  model: string;
+  startedAt: string;
+  elapsedMs: number;
+  turns: number;
+  costUsd: number | null;
+  outcome: "success" | "failure";
   error?: string;
 }
 
