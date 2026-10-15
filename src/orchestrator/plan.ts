@@ -1,5 +1,5 @@
 import { containsSecret } from "../redact.js";
-import { WorkflowError, type PlanDocument, type PlanGroup, type TaskState } from "../domain.js";
+import { WorkflowError, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
 
 /** The human-readable plan in the task folder: the document shown for review and approval. */
 export const PLAN_FILE = "plan.md";
@@ -156,12 +156,23 @@ export function forNewPlan(task: TaskState, draft: PlanDocument): Pick<TaskState
   const groups = new Set(draft.groups.map((group) => group.id));
   const worktrees = task.worktrees.map((item) => (groups.has(item.groupId) ? { ...item, abandoned: undefined } : { ...item, abandoned: true }));
   const live = new Set(worktrees.filter((item) => !item.abandoned).map((item) => item.groupId));
-  const was = new Map((task.plan?.tickets ?? []).map((ticket) => [ticket.id, `${ticket.id}-${ticket.slug}`]));
+  const was = new Map((task.plan?.tickets ?? []).map((ticket) => [ticket.id, ticket]));
+  // A run survives only for a ticket that is the same work: same group and same text. A revised ticket runs again
+  // (in its existing worktree, building on the earlier commits).
   const kept = Object.entries(task.ticketRuns ?? {}).filter(([id]) => {
-    const group = was.get(id);
-    return group !== undefined && live.has(group) && (draft.tickets ?? []).some((ticket) => ticket.id === id && `${ticket.id}-${ticket.slug}` === group);
+    const before = was.get(id);
+    if (!before) return false;
+    const group = `${before.id}-${before.slug}`;
+    const after = (draft.tickets ?? []).find((ticket) => ticket.id === id && `${ticket.id}-${ticket.slug}` === group);
+    return after !== undefined && live.has(group) && sameTicket(before, after);
   });
   return { attempts: [], ticketRuns: kept.length ? Object.fromEntries(kept) : undefined, worktrees, integration: undefined };
+}
+
+/** True when two versions of a ticket ask for the same work (the fields a child acts on). */
+export function sameTicket(a: Ticket, b: Ticket): boolean {
+  const view = (ticket: Ticket) => JSON.stringify([ticket.title, ticket.whatToBuild, ticket.implementation ?? "", ticket.acceptanceCriteria, ticket.checks ?? [], ticket.files ?? [], ticket.blockedBy]);
+  return view(a) === view(b);
 }
 
 export function assertGraph(groups: PlanGroup[]): void {

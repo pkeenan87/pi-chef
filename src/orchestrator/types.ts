@@ -51,6 +51,8 @@ export interface WorkflowBinding {
   session?: SessionControl;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
+  /** Posts a progress line in the chat (ticket started, done, failed; wave started). Informational, never a warning. */
+  progress?: (message: string) => void;
   /** Shows a full plan in a scrollable dialog and returns the chosen action. Absent without a UI. */
   review?: PlanReviewFn;
   /** Posts a plan as a displayed message in the chat transcript. */
@@ -85,6 +87,7 @@ export interface WorkflowOptions {
   github?: GitHubClient;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
+  progress?: (message: string) => void;
   session?: SessionControl;
   runner?: CheckRunner;
   fixer?: (request: FixRequest) => Promise<FixResult>;

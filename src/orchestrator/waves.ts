@@ -67,7 +67,9 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
   const branches = new Map(liveWorktrees(state).map((item) => [item.groupId, item.branch]));
   // Literal edits need no model, so they are a known zero. An executor that omits usage makes this unknown.
   let usage = knownZero();
-  for (const wave of waves(plan.groups)) {
+  const ordered = waves(plan.groups);
+  for (const [index, wave] of ordered.entries()) {
+    if (tickets) ctx.progress?.(`Wave ${index + 1} of ${ordered.length}: ${wave.map((group) => group.id).join(", ")}`);
     const jobs: { groupId: string; record: WorktreeRecord; job: WorkerJob }[] = [];
     // Worktree creation stays sequential: git serializes on its own lock.
     for (const group of wave) {

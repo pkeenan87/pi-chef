@@ -142,6 +142,10 @@ export interface WorkflowConfig {
     backoffSeconds: number;
   };
   checks: CheckConfig[];
+  /** Commands /review runs in the integration worktree before the checks (an install, for example). Same allowlist as checks. */
+  setup: CheckConfig[];
+  /** The model pass of /review: a review-tier model reads the integrated diff and lists advisory findings. */
+  review: { model: boolean; maxDiffChars: number };
   commandAllowlist: string[];
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
@@ -183,6 +187,8 @@ const DEFAULTS: WorkflowConfig = {
   approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
   autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
   checks: [],
+  setup: [],
+  review: { model: true, maxDiffChars: 120_000 },
   commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "npx vitest run *", "git status", "git diff"],
   orgProviderAllowlist: [],
   proprietaryCode: false,
@@ -472,16 +478,23 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(autopilot, "maxRuntimeMs", where, { exclusiveMin: 0 }, "autopilot");
     checkNumber(autopilot, "backoffSeconds", where, { min: 0 }, "autopilot");
   }
-  if (raw.checks !== undefined) {
-    if (!Array.isArray(raw.checks)) invalid(where, "checks", "must be a list");
-    raw.checks.forEach((check, index) => {
-      const field = `checks[${index}]`;
+  for (const key of ["checks", "setup"] as const) {
+    const list = raw[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) invalid(where, key, "must be a list");
+    list.forEach((check, index) => {
+      const field = `${key}[${index}]`;
       if (!isRecord(check)) invalid(where, field, "must be a mapping");
       if (typeof check.name !== "string" || typeof check.command !== "string" || check.command === "") {
         invalid(where, field, "needs string name and command");
       }
       if (check.args !== undefined) stringArray(check.args, `${field}.args`, where);
     });
+  }
+  if (raw.review !== undefined) {
+    if (!isRecord(raw.review)) invalid(where, "review", "must be a mapping");
+    if (raw.review.model !== undefined && typeof raw.review.model !== "boolean") invalid(where, "review.model", "must be a boolean");
+    checkNumber(raw.review, "maxDiffChars", where, { min: 1000, integer: true }, "review");
   }
   if (raw.commandAllowlist !== undefined) stringArray(raw.commandAllowlist, "commandAllowlist", where);
   if (raw.orgProviderAllowlist !== undefined) {
@@ -549,6 +562,8 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     checks: Array.isArray(norm.checks)
       ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
       : DEFAULTS.checks,
+    setup: Array.isArray(norm.setup) ? (norm.setup as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] })) : DEFAULTS.setup,
+    review: { ...DEFAULTS.review, ...obj("review") } as WorkflowConfig["review"],
     commandAllowlist: Array.isArray(norm.commandAllowlist) ? (norm.commandAllowlist as string[]) : DEFAULTS.commandAllowlist,
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,

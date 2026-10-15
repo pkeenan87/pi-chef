@@ -310,6 +310,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
   const events: string[] = [];
   const statuses: string[] = [];
   const notices: string[] = [];
+  const progress: string[] = [];
   const config = tieredConfig();
   options.mutate?.(config);
   const script =
@@ -326,6 +327,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
     ...(options.auth ? { auth: options.auth } : {}),
     status: (text) => void (text && statuses.push(text)),
     notify: (message) => void notices.push(message),
+    progress: (message) => void progress.push(message),
     ...(options.runner ? { runner: options.runner } : {}),
     ticketRunner: (input) => runTicketInChild({ ...input, spawn, invocation, extensionPath: "/pkg/src/extension.ts", baseEnv: { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: "sk-ant-api03-secretsecret", OPENAI_API_KEY: "sk-secretsecretsecret" } }),
   });
@@ -335,7 +337,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
   expect((await app.approvePlan()).ok).toBe(true);
   const taskId = app.activeTaskId()!;
   const ticketFile = (item: Ticket) => readFileSync(path.join(app.store.taskDir(taskId), "tickets", `${item.id}-${item.slug}.md`), "utf8");
-  return { cwd, app, calls, events, statuses, notices, taskId, ticketFile, peak: () => {
+  return { cwd, app, calls, events, statuses, notices, progress, taskId, ticketFile, peak: () => {
       let running = 0;
       let high = 0;
       for (const item of events) {
@@ -609,6 +611,35 @@ describe("/implement with tickets", () => {
     expect(failed).toMatchObject({ ok: false, code: "REVIEW_BLOCKING" });
     expect(failed.text).toContain("no checks ran");
     expect(failed.text).toContain("Suggestions:");
+  });
+
+  it("posts progress lines for waves and ticket attempts", async () => {
+    const t = await ticketTask({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] });
+    expect((await t.app.implement()).ok).toBe(true);
+    expect(t.progress[0]).toBe("Wave 1 of 2: 01-t01");
+    expect(t.progress.some((line) => /^Ticket 01 \(Ticket 01\) → \S+\/\S+$/.test(line))).toBe(true);
+    expect(t.progress.some((line) => /^Ticket 01 done on \S+\/\S+: 2 turn\(s\), \$0\.0000\.$/.test(line))).toBe(true);
+    expect(t.progress).toContain("Wave 2 of 2: 02-t02");
+  });
+
+  it("re-runs a ticket whose text changed in a new plan version, telling the child about the earlier work", async () => {
+    const t = await ticketTask({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] });
+    expect((await t.app.implement()).ok).toBe(true);
+    expect(t.calls).toHaveLength(2);
+    // Revise ticket 02 only; 01 is unchanged and stays done.
+    expect((await t.app.startPlan("Add retry to the Neo ingest parser")).ok).toBe(true);
+    await t.app.savePlanSpec(specParams);
+    await t.app.commitTickets([ticket("01"), ticket("02", { blockedBy: ["01"], whatToBuild: "Build part 02 with a backoff cap." })]);
+    expect((await t.app.approvePlan()).ok).toBe(true);
+    const again = await t.app.implement();
+    expect(again.ok, again.text).toBe(true);
+    expect(t.calls).toHaveLength(3);
+    expect(path.basename(t.calls[2]!.cwd)).toBe("02-t02");
+    expect(t.calls[2]!.prompt).toContain("Earlier work in this worktree");
+    expect(t.calls[2]!.prompt).toContain("backoff cap");
+    const runs = t.app.store.load(t.taskId)!.ticketRuns!;
+    expect(runs["01"]).toMatchObject({ status: "done", attempts: 1 });
+    expect(runs["02"]).toMatchObject({ status: "done", attempts: 1 });
   });
 
   it("is refused clearly when no runner is available", async () => {

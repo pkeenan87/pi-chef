@@ -59,6 +59,8 @@ export interface TicketPromptInput {
   repoRules?: string;
   /** Why the previous attempt on this worktree failed, when this is an escalation. */
   previousFailure?: string;
+  /** The worktree already holds commits from an earlier version of this ticket (the plan was revised). */
+  priorWork?: boolean;
 }
 
 export const TICKET_PROMPT_LIMITS = { spec: 12000, blocker: 1500, rules: 6000, failure: 4000 };
@@ -88,6 +90,7 @@ export function ticketPrompt(input: TicketPromptInput): string {
     for (const blocker of input.blockers) parts.push(`### ${blocker.id}: ${blocker.title}`, clip(blocker.summary || "(no summary recorded)", TICKET_PROMPT_LIMITS.blocker), "");
   }
   if (input.previousFailure) parts.push("", "## Previous attempt failed", "", "A cheaper model already tried this ticket in this worktree. Build on its changes where they are sound.", "", clip(input.previousFailure, TICKET_PROMPT_LIMITS.failure));
+  else if (input.priorWork) parts.push("", "## Earlier work in this worktree", "", "An earlier version of this ticket already made changes here (see `git log`). The ticket was revised since: build on what still fits the ticket as written above, and change or remove what no longer does.");
   if (input.repoRules) parts.push("", "## Repo rules (AGENTS.md)", "", clip(input.repoRules, TICKET_PROMPT_LIMITS.rules));
   parts.push(
     "",

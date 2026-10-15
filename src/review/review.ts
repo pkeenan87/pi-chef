@@ -40,6 +40,8 @@ export async function reviewDiff(options: {
   diffs: { groupId: string; diff: string }[];
   integratedDiff: string;
   checks: { name: string; command: string; args: string[] }[];
+  /** Commands run one after another before the checks (an install). A failure fails the review and skips the checks. */
+  setup?: { name: string; command: string; args: string[] }[];
   cwd: string;
   runner: CheckRunner;
   allowlist: string[];
@@ -80,7 +82,7 @@ export async function reviewDiff(options: {
     });
   }
   const checks: CheckEvidence[] = [];
-  const outcomes = await mapBounded(options.checks, CHECK_CONCURRENCY, async (check) => {
+  const runOne = async (check: { name: string; command: string; args: string[] }): Promise<{ evidence: CheckEvidence; finding?: Finding }> => {
     try {
       assertCommandAllowed(check.command, check.args, options.allowlist);
     } catch (error) {
@@ -115,7 +117,21 @@ export async function reviewDiff(options: {
           }
         : undefined;
     return { evidence, finding };
-  });
+  };
+  // Setup runs first and in order: a check cannot run before the install it needs.
+  let setupFailed = false;
+  for (const step of options.setup ?? []) {
+    const outcome = await runOne({ ...step, name: `setup: ${step.name}` });
+    checks.push(outcome.evidence);
+    if (outcome.finding) {
+      findings.push(outcome.finding);
+      setupFailed = true;
+      break;
+    }
+  }
+  const outcomes: { evidence: CheckEvidence; finding?: Finding }[] = setupFailed
+    ? options.checks.map((check) => ({ evidence: { name: check.name, command: check.command, args: check.args, cwd: options.cwd, exitCode: null, stdout: "", stderr: "skipped: setup failed", ran: false } }))
+    : await mapBounded(options.checks, CHECK_CONCURRENCY, runOne);
   for (const outcome of outcomes) {
     checks.push(outcome.evidence);
     if (outcome.finding) findings.push(outcome.finding);
