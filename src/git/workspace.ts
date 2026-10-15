@@ -10,13 +10,50 @@ export interface GitResult {
   stderr: string;
 }
 
-async function runGit(cwd: string, args: string[]): Promise<GitResult> {
+/** Name and email to fall back to when the repo has no identity of its own (the user's identity is used otherwise). */
+const FALLBACK_NAME = "pi-cost";
+const FALLBACK_EMAIL = "pi-cost@localhost";
+
+interface Identity {
+  name: boolean;
+  email: boolean;
+}
+
+function gitEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true", GIT_PAGER: "cat" };
+}
+
+/** Whether a name and an email are configured (global, system, local, includeIf) or set through the environment. */
+async function resolveIdentity(cwd: string): Promise<Identity> {
+  const env = gitEnv();
+  // Probe with no fallback injected, or `config --get` would find the fallback.
+  const probe = { name: true, email: true };
+  const configured = async (key: string, vars: string[]) => {
+    if (vars.some((name) => env[name]?.trim())) return true;
+    const result = await runGit(cwd, ["config", "--get", key], probe);
+    return result.code === 0 && result.stdout.trim() !== "";
+  };
+  return {
+    name: await configured("user.name", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+    email: await configured("user.email", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+  };
+}
+
+async function runGit(cwd: string, args: string[], identity: Identity): Promise<GitResult> {
+  // Commits are authored by the user; the pi-cost identity is only a fallback for the parts git has no value for.
+  // commit.gpgsign=false always: a signing prompt would hang a non-interactive commit.
+  const config = [
+    ...(identity.name ? [] : ["-c", `user.name=${FALLBACK_NAME}`]),
+    ...(identity.email ? [] : ["-c", `user.email=${FALLBACK_EMAIL}`]),
+    "-c",
+    "commit.gpgsign=false",
+  ];
   try {
-    const { stdout, stderr } = await exec("git", ["-c", "user.email=pi-cost@localhost", "-c", "user.name=pi-cost", "-c", "commit.gpgsign=false", ...args], {
+    const { stdout, stderr } = await exec("git", [...config, ...args], {
       cwd,
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true", GIT_PAGER: "cat" },
+      env: gitEnv(),
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
@@ -28,10 +65,13 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
 const NO_HOOKS = "/dev/null";
 
 export class GitWorkspace {
+  private identity?: Promise<Identity>;
+
   constructor(readonly repoRoot: string) {}
 
   async git(args: string[], cwd = this.repoRoot): Promise<GitResult> {
-    return runGit(cwd, args);
+    this.identity ??= resolveIdentity(this.repoRoot);
+    return runGit(cwd, args, await this.identity);
   }
 
   async head(cwd = this.repoRoot): Promise<string> {
