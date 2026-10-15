@@ -10,13 +10,50 @@ export interface GitResult {
   stderr: string;
 }
 
-async function runGit(cwd: string, args: string[]): Promise<GitResult> {
+/** Name and email to fall back to when the repo has no identity of its own (the user's identity is used otherwise). */
+const FALLBACK_NAME = "pi-cost";
+const FALLBACK_EMAIL = "pi-cost@localhost";
+
+interface Identity {
+  name: boolean;
+  email: boolean;
+}
+
+function gitEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true", GIT_PAGER: "cat" };
+}
+
+/** Whether a name and an email are configured (global, system, local, includeIf) or set through the environment. */
+async function resolveIdentity(cwd: string): Promise<Identity> {
+  const env = gitEnv();
+  // Probe with no fallback injected, or `config --get` would find the fallback.
+  const probe = { name: true, email: true };
+  const configured = async (key: string, vars: string[]) => {
+    if (vars.some((name) => env[name]?.trim())) return true;
+    const result = await runGit(cwd, ["config", "--get", key], probe);
+    return result.code === 0 && result.stdout.trim() !== "";
+  };
+  return {
+    name: await configured("user.name", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+    email: await configured("user.email", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+  };
+}
+
+async function runGit(cwd: string, args: string[], identity: Identity): Promise<GitResult> {
+  // Commits are authored by the user; the pi-cost identity is only a fallback for the parts git has no value for.
+  // commit.gpgsign=false always: a signing prompt would hang a non-interactive commit.
+  const config = [
+    ...(identity.name ? [] : ["-c", `user.name=${FALLBACK_NAME}`]),
+    ...(identity.email ? [] : ["-c", `user.email=${FALLBACK_EMAIL}`]),
+    "-c",
+    "commit.gpgsign=false",
+  ];
   try {
-    const { stdout, stderr } = await exec("git", ["-c", "user.email=pi-cost@localhost", "-c", "user.name=pi-cost", "-c", "commit.gpgsign=false", ...args], {
+    const { stdout, stderr } = await exec("git", [...config, ...args], {
       cwd,
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true", GIT_PAGER: "cat" },
+      env: gitEnv(),
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
@@ -28,10 +65,13 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
 const NO_HOOKS = "/dev/null";
 
 export class GitWorkspace {
+  private identity?: Promise<Identity>;
+
   constructor(readonly repoRoot: string) {}
 
   async git(args: string[], cwd = this.repoRoot): Promise<GitResult> {
-    return runGit(cwd, args);
+    this.identity ??= resolveIdentity(this.repoRoot);
+    return runGit(cwd, args, await this.identity);
   }
 
   async head(cwd = this.repoRoot): Promise<string> {
@@ -54,11 +94,11 @@ export class GitWorkspace {
   }
 
   /**
-   * Commits everything in `cwd`. The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
+   * Commits everything in `cwd` except the `exclude` paths (relative to `cwd`). The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
    */
-  async commitAll(cwd: string, message: string): Promise<string> {
+  async commitAll(cwd: string, message: string, exclude: string[] = []): Promise<string> {
     const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
-    const add = await this.git([...safe, "add", "-A"], cwd);
+    const add = await this.git([...safe, "add", "-A", "--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
     const commit = await this.git([...safe, "commit", "--no-verify", "-m", message], cwd);
     if (commit.code !== 0 && !/nothing to commit/i.test(commit.stdout + commit.stderr)) {
@@ -115,6 +155,22 @@ export class GitWorkspace {
     const result = await this.git(["status", "--porcelain"]);
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git status failed");
     return result.stdout;
+  }
+
+  /** Paths with changes (`git status --porcelain -z`): a rename reports its new path, and names are never quoted. */
+  async changedPaths(): Promise<string[]> {
+    const result = await this.git(["status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git status failed");
+    const fields = result.stdout.split("\0");
+    const paths: string[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const entry = fields[i]!;
+      if (entry.length < 4) continue;
+      paths.push(entry.slice(3));
+      // A rename or copy is followed by its source path as its own field.
+      if (/[RC]/.test(entry.slice(0, 2))) i++;
+    }
+    return paths;
   }
 
   /** How many commits HEAD has that `base` does not. */

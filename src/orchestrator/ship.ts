@@ -6,7 +6,7 @@ import { fallbackClassification } from "../router/classify.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
-import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, workspaceName, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { canTransition, move } from "./machine.js";
 import { announce, decide } from "./routing.js";
@@ -113,14 +113,8 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
 
 /** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
 async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
-  const workspace = ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
-  return (await ctx.git.statusPorcelain())
-    .split("\n")
-    .filter((line) => line.trim())
-    .filter((line) => {
-      const file = line.slice(3).replace(/^"|"$/g, "");
-      return file !== workspace && !file.startsWith(`${workspace}/`);
-    });
+  const workspace = workspaceName(ctx);
+  return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
 }
 
 /** "20261014-120000" from the injected clock. */
@@ -245,7 +239,7 @@ export function ship(ctx: WorkflowContext): Promise<CommandResult> {
       }
       const summaryLine = plan?.summary.split("\n")[0]?.trim();
       if ((await dirtyPaths(ctx)).length > 0) {
-        await ctx.git.commitAll(ctx.git.repoRoot, redact(`Ship: ${summaryLine ? summaryLine.slice(0, 60) : "changes"}`));
+        await ctx.git.commitAll(ctx.git.repoRoot, redact(`Ship: ${summaryLine ? summaryLine.slice(0, 60) : "changes"}`), [workspaceName(ctx)]);
       }
       let title = summaryLine?.slice(0, 72);
       if (!title) {

@@ -52,7 +52,7 @@ function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<
   return { driver, sends, state, write };
 }
 
-async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string } = {}) {
+async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string; confirm?: (title: string, message: string) => Promise<boolean> } = {}) {
   const cwd = await tempRepo();
   if (options.branch) await git(cwd, "switch", "-c", options.branch);
   const progress: string[] = [];
@@ -68,6 +68,7 @@ async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<type
       progress: (message) => void progress.push(message),
       report: (markdown) => void reports.push(markdown),
       notify: (message) => void notices.push(message),
+      ...(options.confirm ? { confirm: options.confirm } : {}),
       runner: options.runner ?? checkRunner(async () => (passing.ok ? { code: 0, stdout: "ok", stderr: "" } : { code: 1, stdout: "", stderr: "AssertionError: expected 1" })),
     },
     { approve: options.approve, cwd },
@@ -391,14 +392,16 @@ describe("/build branch and approval", () => {
     expect(again.state.fresh).toBe(0);
   });
 
-  it("refuses to start a fresh build on a dirty tree, but not a resumed one", async () => {
-    const t = await buildTask({ tickets: [ticket("01")] });
+  it("refuses to start a fresh build on a dirty tree the user will not commit, but not a resumed one", async () => {
+    const t = await buildTask({ tickets: [ticket("01")], confirm: async () => false });
     writeFileSync(path.join(t.cwd, "mine.txt"), "wip\n");
     const d = fakeDriver(t.cwd, () => undefined);
     const result = await t.run(d.driver);
     expect(result.code).toBe("DIRTY_TREE");
-    expect(result.text).toContain("Commit or stash them first");
+    expect(result.text).toContain("Commit or stash them first, or answer yes when /build asks");
     expect(d.state.fresh).toBe(0);
+    expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
+    expect(await git(t.cwd, "branch", "--show-current")).not.toContain("cost/");
     expect(t.load().build).toBeUndefined();
     // Once a build exists, a dirty tree is the ticket's own work.
     await git(t.cwd, "add", "mine.txt");
@@ -409,6 +412,57 @@ describe("/build branch and approval", () => {
     const resumed = fakeDriver(t.cwd, () => undefined);
     expect((await t.run(resumed.driver)).code).not.toBe("DIRTY_TREE");
     expect(resumed.sends).toHaveLength(1);
+  });
+
+  it("asks, then commits dirty changes separately on the feature branch before ticket 01", async () => {
+    const asked: Array<[string, string]> = [];
+    const t = await buildTask({ tickets: [ticket("01")], confirm: async (title, message) => (asked.push([title, message]), true) });
+    const base = await git(t.cwd, "branch", "--show-current");
+    writeFileSync(path.join(t.cwd, "mine.txt"), "wip\n");
+    writeFileSync(path.join(t.cwd, "other.txt"), "wip\n");
+    // The workspace dir is not swept into the pre-build commit, even when untracked and not ignored.
+    writeFileSync(path.join(t.app.store.root, "stray.json"), "{}\n");
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    const result = await t.run(d.driver);
+    expect(result.ok, result.text).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]![0]).toBe("Uncommitted changes");
+    expect(asked[0]![1]).toContain("mine.txt");
+    expect(asked[0]![1]).toContain('Commit them as a separate "Changes before /build" commit');
+    const branch = t.load().build!.branch;
+    expect(branch).not.toBe(base);
+    const subjects = (await git(t.cwd, "log", "--format=%s", branch)).split("\n");
+    expect(subjects.slice(1)).toEqual(["Changes before /build", "base"]);
+    expect(await git(t.cwd, "log", "--format=%s", base)).toBe("base");
+    expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD~1")).toBe("mine.txt\nother.txt");
+    // Ticket 01's commit holds its own file, not the earlier changes.
+    expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).not.toMatch(/mine\.txt|other\.txt/);
+    expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).toContain("f.txt");
+    // Workflow state stays out of ticket commits too.
+    expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).not.toContain("stray.json");
+    expect(t.progress.some((line) => /^Committed changes before \/build: [0-9a-f]{7}$/.test(line))).toBe(true);
+  });
+
+  it("lists at most 8 dirty paths and says how many more", async () => {
+    let message = "";
+    const t = await buildTask({ tickets: [ticket("01")], confirm: async (_title, text) => ((message = text), false) });
+    for (let i = 0; i < 11; i++) writeFileSync(path.join(t.cwd, `d${String(i).padStart(2, "0")}.txt`), "x\n");
+    await t.run(fakeDriver(t.cwd, () => undefined).driver);
+    expect(message).toContain("d07.txt");
+    expect(message).not.toContain("d08.txt");
+    expect(message).toContain("and 3 more");
+  });
+
+  it("does not ask about changes under the workspace dir only, or on a resumed build", async () => {
+    let asked = 0;
+    const t = await buildTask({ tickets: [ticket("01")], confirm: async () => (asked++, true) });
+    writeFileSync(path.join(t.app.store.root, "stray.json"), "{}\n");
+    const d = fakeDriver(t.cwd, () => ({ aborted: true }));
+    await t.run(d.driver);
+    expect(asked).toBe(0);
+    writeFileSync(path.join(t.cwd, "partial.txt"), "x\n");
+    await t.run(fakeDriver(t.cwd, () => undefined).driver);
+    expect(asked).toBe(0);
   });
 
   it("ignores the workspace directory when judging a dirty tree", async () => {

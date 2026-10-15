@@ -5,7 +5,7 @@ import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision,
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
-import { done, fail, guard, iso, requireActive, transition, type WorkflowContext } from "./context.js";
+import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
@@ -92,15 +92,10 @@ function orderedTickets(tickets: Ticket[]): Ticket[] {
 
 /** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
 async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
-  const workspace = ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
-  return (await ctx.git.statusPorcelain())
-    .split("\n")
-    .filter((line) => line.trim())
-    .filter((line) => {
-      const file = line.slice(3).replace(/^"|"$/g, "");
-      return file !== workspace && !file.startsWith(`${workspace}/`);
-    });
+  const workspace = workspaceName(ctx);
+  return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
 }
+
 
 // ---------------------------------------------------------------------------------------------------------------------
 // startBuild
@@ -131,8 +126,18 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
     if (!state.classification) return fail("NOT_READY", "The task has no classification. Run /plan again.");
 
     // A fresh build commits the whole tree per ticket, so changes made before it would land in ticket 01's commit.
-    if (!state.build && (await dirtyPaths(ctx)).length > 0) {
-      return fail("DIRTY_TREE", "Uncommitted changes in the working tree. Commit or stash them first so they don't land in ticket 01's commit.");
+    // Ask before touching the branch; the commit itself waits until the build is on its branch.
+    let commitFirst = false;
+    if (!state.build) {
+      const dirty = await dirtyPaths(ctx);
+      if (dirty.length > 0) {
+        const listed = dirty.slice(0, 8).map((file) => `  ${file}`);
+        if (dirty.length > 8) listed.push(`  and ${dirty.length - 8} more`);
+        commitFirst = await ctx.confirm("Uncommitted changes", `${listed.join("\n")}\n\nCommit them as a separate "Changes before /build" commit, so they stay out of ticket 01's commit?`);
+        if (!commitFirst) {
+          return fail("DIRTY_TREE", "Uncommitted changes in the working tree. Commit or stash them first, or answer yes when /build asks, so they don't land in ticket 01's commit.");
+        }
+      }
     }
     const current = await ctx.git.currentBranch();
     let build: BuildRecord;
@@ -154,6 +159,11 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
         baseSha = await ctx.git.mergeBase(base);
       } catch {
         baseSha = await ctx.git.head();
+      }
+      if (commitFirst) {
+        // After the switch, so the commit lands on the feature branch; the workspace dir stays out of it.
+        const sha = await ctx.git.commitAll(ctx.git.repoRoot, "Changes before /build", [workspaceName(ctx)]);
+        ctx.progress?.(`Committed changes before /build: ${sha.slice(0, 7)}`);
       }
       build = { branch, base, baseSha };
     }
@@ -260,7 +270,7 @@ type Settled =
 async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, lastText: string, credit: boolean): Promise<Settled> {
   const outcome = await runChecks(ctx, state, ticket);
   if (outcome.verdict !== "pass") return { kind: "failed", verdict: outcome.verdict, detail: failureDetail(outcome.evidence) };
-  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`);
+  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
   if (credit) {

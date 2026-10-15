@@ -99,3 +99,8 @@ export async function guard(fn: () => Promise<CommandResult>): Promise<CommandRe
 export function transition(ctx: WorkflowContext, taskId: string, reason: string, to: Phase, note?: string): Promise<TaskState> {
   return ctx.store.update(taskId, reason, (task) => move(task, to, iso(ctx), note));
 }
+
+/** The workspace dir as a repo-relative path (`.pi-workflows`): workflow state, never the user's code. */
+export function workspaceName(ctx: WorkflowContext): string {
+  return ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
+}

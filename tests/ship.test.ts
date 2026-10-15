@@ -106,6 +106,8 @@ describe("/ship with no task", () => {
     await branchWithCommit(t.cwd);
     write(t.cwd, "README.md", "base\nedited\n");
     write(t.cwd, "src/new-file.ts", "export const fresh = true;\n");
+    // Workflow state that is neither tracked nor ignored stays out of the ship commit.
+    write(t.cwd, ".pi-workflows/stray.json", "{}\n");
     const result = await t.app.ship();
     expect(result.ok, result.text).toBe(true);
     const diff = sessionReport(t.app).diff!;
@@ -113,7 +115,7 @@ describe("/ship with no task", () => {
     expect(diff).toContain("src/new-file.ts");
     expect(diff).toContain("+export const fresh = true;");
     expect(diff).toContain("src/retry.ts");
-    expect(await git(t.cwd, "status", "--porcelain")).toBe("");
+    expect(await git(t.cwd, "status", "--porcelain", "--", ".", ":(exclude).pi-workflows")).toBe("");
     expect(await git(t.cwd, "log", "--format=%s", "-1")).toBe("Ship: changes");
     expect(await git(t.cwd, "log", "--format=%B", "-1")).not.toContain("Co-Authored");
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).toBe("README.md\nsrc/new-file.ts");
