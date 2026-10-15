@@ -42,13 +42,20 @@ export async function reviewDiff(options: {
   checks: { name: string; command: string; args: string[] }[];
   /** Commands run one after another before the checks (an install). A failure fails the review and skips the checks. */
   setup?: { name: string; command: string; args: string[] }[];
+  /** Clock for check durations (injectable for tests). */
+  now?: () => number;
+  /** A line per stage and per check, for the chat. */
+  onProgress?: (line: string) => void;
   cwd: string;
   runner: CheckRunner;
   allowlist: string[];
   planAcceptance: string[];
 }): Promise<ReviewReport> {
   const findings: Finding[] = [];
+  const now = options.now ?? (() => Date.now());
+  const progress = options.onProgress ?? (() => undefined);
   const combined = options.diffs.map((item) => item.diff).join("\n") + options.integratedDiff;
+  progress(`static scan of ${options.diffs.length} worktree diff(s) and the integrated diff (${Math.round(combined.length / 1000)}k chars)`);
   if (SECRET_DIFF.test(combined)) {
     findings.push({
       severity: "blocking",
@@ -92,11 +99,15 @@ export async function reviewDiff(options: {
       return { evidence, finding };
     }
     let result: { code: number; stdout: string; stderr: string };
+    progress(`running ${check.name} (${commandLine(check.command, check.args)})`);
+    const started = now();
     try {
       result = await options.runner.run(check.command, check.args, options.cwd);
     } catch (error) {
       result = { code: 1, stdout: "", stderr: `Runner error: ${(error as Error).message}` };
     }
+    const durationMs = now() - started;
+    progress(`${check.name}: ${result.code === 0 ? (result.stdout.startsWith("cached:") ? "passed (cached from an identical tree)" : "passed") : `exit ${result.code}`} in ${(durationMs / 1000).toFixed(1)}s`);
     const evidence: CheckEvidence = {
       name: check.name,
       command: check.command,
@@ -106,6 +117,7 @@ export async function reviewDiff(options: {
       stdout: redact(result.stdout).slice(0, 4000),
       stderr: redact(result.stderr).slice(0, 4000),
       ran: true,
+      durationMs,
     };
     const finding: Finding | undefined =
       result.code !== 0
@@ -144,6 +156,7 @@ export async function reviewDiff(options: {
       evidence: "checks: []",
     });
   }
+  progress(`static findings: ${findings.filter((finding) => finding.severity === "blocking").length} blocking, ${findings.filter((finding) => finding.severity === "suggestion").length} suggestion(s)`);
   for (const acceptance of options.planAcceptance) {
     if (acceptance && !combined.includes(acceptance) && options.checks.length === 0) {
       findings.push({

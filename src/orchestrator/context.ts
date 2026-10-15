@@ -46,6 +46,8 @@ export interface WorkflowContext {
   notify: (message: string) => void;
   /** Progress lines for the chat while /implement runs. Absent without a UI. */
   progress?: (message: string) => void;
+  /** Multi-line markdown blocks kept in the chat transcript. Absent without a UI. */
+  report?: (markdown: string) => void;
   session?: SessionControl;
   chat?: ChatFn;
   status?: (text: string | undefined) => void;

@@ -3,18 +3,24 @@ import path from "node:path";
 import { CHILD_ROOT_ENV, CHILD_TASK_ENV, CHILD_TICKET_ENV, TICKET_TOOLS, type RunnerEvent, type RunnerSpend, type TicketRunResult } from "../agents/pi-runner.js";
 import { buildCostRecord } from "../cost/ledger.js";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
-import type { CheckEvidence, RoutingDecision, TaskState, Ticket, TicketRun, WorkerArtifact, WorktreeRecord } from "../domain.js";
+import type { CheckEvidence, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, WorkerArtifact, WorktreeRecord } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandAllowed } from "../sandbox.js";
 import { budgetState, chargeInFlight, recordTicketUsage } from "./budget.js";
 import type { InFlightRun } from "./inflight.js";
 import { iso, knownZero, requireActive, type WorkflowContext } from "./context.js";
+import { formatDuration, formatTokens, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
 import { TICKET_WORKER_RULES, ticketPrompt } from "./prompts.js";
 import { announce, decide, suggestAdvisor } from "./routing.js";
 import { addTicketWarning, groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, type TicketStatus } from "./tickets.js";
 
 const MAX_SUMMARY_CHARS = 3000;
+/** A heartbeat line goes to the chat every this many turns, or when this much time passed since the last one. */
+const HEARTBEAT_TURNS = 5;
+const HEARTBEAT_MS = 60_000;
+/** One warning when an attempt has used this share of its deadline. */
+const DEADLINE_WARN_SHARE = 0.75;
 
 export interface TicketJobOutcome {
   artifact: WorkerArtifact;
@@ -29,8 +35,8 @@ function ticketPath(ticket: Ticket): string {
   return `tickets/${ticketFileName(ticket)}`;
 }
 
-async function patchRun(ctx: WorkflowContext, taskId: string, ticket: Ticket, patch: (previous: TicketRun) => TicketRun): Promise<void> {
-  await ctx.store.update(taskId, `ticket ${ticket.id}`, (task) => ({
+async function patchRun(ctx: WorkflowContext, taskId: string, ticket: Ticket, patch: (previous: TicketRun) => TicketRun): Promise<TaskState> {
+  return ctx.store.update(taskId, `ticket ${ticket.id}`, (task) => ({
     ...task,
     ticketRuns: { ...task.ticketRuns, [ticket.id]: patch(task.ticketRuns?.[ticket.id] ?? BLANK) },
     updatedAt: iso(ctx),
@@ -75,8 +81,11 @@ async function runChecks(ctx: WorkflowContext, ticket: Ticket, cwd: string): Pro
       out.push({ ...base, exitCode: 126, stdout: "", stderr: redact((error as Error).message).slice(0, 2000), ran: false });
       continue;
     }
+    const started = ctx.now().getTime();
     const result = await ctx.checkRunner.run(check.command, check.args, cwd);
-    out.push({ ...base, exitCode: result.code, stdout: redact(result.stdout).slice(0, 2000), stderr: redact(result.stderr).slice(0, 2000), ran: true });
+    const durationMs = ctx.now().getTime() - started;
+    out.push({ ...base, exitCode: result.code, stdout: redact(result.stdout).slice(0, 2000), stderr: redact(result.stderr).slice(0, 2000), ran: true, durationMs });
+    ctx.progress?.(`Ticket ${ticket.id} check ${check.name}: ${result.code === 0 ? "passed" : `exit ${result.code}`} (${formatDuration(durationMs)})`);
   }
   return out;
 }
@@ -90,6 +99,60 @@ async function pick(ctx: WorkflowContext, state: TaskState, ticket: Ticket, fail
     decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }
   return decision;
+}
+
+/** A check line for a report: pass/fail, duration, and the tail of a failure's output. */
+function checkLine(check: CheckEvidence): string {
+  const took = check.durationMs !== undefined ? ` (${formatDuration(check.durationMs)})` : "";
+  if (!check.ran) return `- ✗ ${check.name}: did not run (${check.stderr.split("\n")[0] ?? ""})`;
+  if (check.exitCode === 0) return `- ✓ ${check.name}${check.stdout.startsWith("cached:") ? " (cached pass)" : took}`;
+  const tail = (check.stderr.trim() || check.stdout.trim()).split("\n").slice(-3).join(" | ").slice(0, 300);
+  return `- ✗ ${check.name}: exit ${check.exitCode}${took}${tail ? ` — ${tail}` : ""}`;
+}
+
+/**
+ * The block posted to the chat when an attempt ends: what ran, how long, what it cost, what changed, what the checks
+ * said, which criteria the child claims, and the child's closing words. Verbose on purpose: this is the trail.
+ */
+export function attemptReport(input: {
+  ticket: Pick<Ticket, "id" | "title" | "acceptanceCriteria">;
+  attempt: number;
+  maxAttempts: number;
+  tier: string;
+  provider: string;
+  model: string;
+  ok: boolean;
+  reason?: string;
+  elapsedMs: number;
+  totalElapsedMs: number;
+  turns: number;
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  maxContextTokens: number;
+  costUsd: number | null;
+  listPriceUsd?: number | null;
+  changedFiles: string[];
+  checks: CheckEvidence[];
+  finalText: string;
+  next?: string;
+}): string {
+  const total = input.usage.input + input.usage.output + input.usage.cacheRead + input.usage.cacheWrite;
+  const met = parseCriteriaMet(input.finalText, input.ticket.acceptanceCriteria);
+  const criteria = input.ticket.acceptanceCriteria.map((item, index) => `  - [${met[index] ? "x" : " "}] ${item}`);
+  const summary = input.finalText.trim().split("\n").filter((line) => line.trim() && !/^- \[[ x]\]/i.test(line.trim()) && !/^files changed/i.test(line.trim())).join(" ").slice(0, 600);
+  const files = input.changedFiles.length ? `${input.changedFiles.length} file(s): ${input.changedFiles.slice(0, 12).join(", ")}${input.changedFiles.length > 12 ? ", …" : ""}` : "none";
+  return [
+    `### Ticket ${input.ticket.id} ${input.ok ? "done" : "failed"} · ${input.ticket.title}`,
+    `- Model: ${input.provider}/${input.model} (${input.tier}), attempt ${input.attempt} of ${input.maxAttempts}`,
+    `- Time: ${formatDuration(input.elapsedMs)} this attempt${input.attempt > 1 ? `, ${formatDuration(input.totalElapsedMs)} in all` : ""}`,
+    `- Work: ${input.turns} turn(s), ${formatTokens(total)} tokens (in ${formatTokens(input.usage.input)}, out ${formatTokens(input.usage.output)}, cache read ${formatTokens(input.usage.cacheRead)}), peak context ~${formatTokens(input.maxContextTokens)}`,
+    `- Cost: ${formatUsd(input.costUsd)}${input.listPriceUsd !== undefined && input.listPriceUsd !== null && input.listPriceUsd !== input.costUsd ? ` (list price ${formatUsd(input.listPriceUsd)})` : ""}`,
+    `- Changed: ${files}`,
+    ...(input.checks.length ? ["- Checks:", ...input.checks.map((check) => `  ${checkLine(check)}`)] : ["- Checks: none ran"]),
+    ...(criteria.length ? [`- Criteria claimed met: ${met.filter(Boolean).length} of ${criteria.length}`, ...criteria] : []),
+    ...(summary ? [`- Child's summary: ${summary}`] : []),
+    ...(input.reason ? [`- Failure: ${input.reason.slice(0, 500)}`] : []),
+    ...(input.next ? [`- Next: ${input.next}`] : []),
+  ].join("\n");
 }
 
 /** The lines of a child's stderr that say what went wrong (error and fatal lines), else its last non-trace lines. */
@@ -165,6 +228,8 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
   /** Models that already ran this ticket: an escalation that lands on one of them again is not an escalation. */
   const tried = new Set<string>();
   const taskType = () => requireActive(ctx).classification?.task_type ?? "general";
+  const maxAttempts = ctx.config.routing.maxEscalations + 1;
+  const ticketStart = ctx.now().getTime();
 
   const finish = async (status: TicketStatus, finalText: string): Promise<void> => {
     const met = parseCriteriaMet(finalText, ticket.acceptanceCriteria);
@@ -208,8 +273,16 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
       }
       await announce(ctx, taskId, "implement", decision, () => ctx.status?.(`ticket ${ticket.id} → ${decision.provider}/${decision.model}`));
       ctx.progress?.(`Ticket ${ticket.id} (${ticket.title}) → ${decision.provider}/${decision.model}${escalations ? ` · escalation ${escalations} of ${ctx.config.routing.maxEscalations}` : ""}`);
-      await patchRun(ctx, taskId, ticket, (run) => ({ ...run, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: run.attempts + 1, error: undefined }));
+      const attemptStart = ctx.now();
+      await patchRun(ctx, taskId, ticket, (run) => ({ ...run, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: run.attempts + 1, error: undefined, startedAt: run.startedAt ?? attemptStart.toISOString() }));
       editTicketFile(ctx, taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));
+      const headBefore = record.headSha;
+      // Heartbeat state for this attempt: when the last line went out, and the tools used since.
+      let lastBeatTurn = 0;
+      let lastBeatAt = attemptStart.getTime();
+      let deadlineWarned = false;
+      const tools = new Map<string, number>();
+      const elapsed = () => ctx.now().getTime() - attemptStart.getTime();
 
       const latest = ctx.store.load(taskId)!;
       const blockers = ticket.blockedBy.map((id) => {
@@ -258,7 +331,23 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
           contextTarget: target,
           onEvent: (event: RunnerEvent) => {
             if ((event.kind === "turn" || event.kind === "compaction") && event.spend) charge(event.spend);
-            if (event.kind === "turn") ctx.status?.(`ticket ${ticket.id} · turn ${event.turn} · ~${Math.round(event.contextTokens / 1000)}k ctx`);
+            if (event.kind === "tool") tools.set(event.name, (tools.get(event.name) ?? 0) + 1);
+            if (event.kind === "turn") {
+              const ms = elapsed();
+              ctx.status?.(`ticket ${ticket.id} · turn ${event.turn} · ~${Math.round(event.contextTokens / 1000)}k ctx · ${formatDuration(ms)}`);
+              const since = ms - (lastBeatAt - attemptStart.getTime());
+              if (event.turn - lastBeatTurn >= HEARTBEAT_TURNS || since >= HEARTBEAT_MS) {
+                const used = [...tools.entries()].map(([name, count]) => `${name}×${count}`).join(", ");
+                ctx.progress?.(`Ticket ${ticket.id} · turn ${event.turn} · ~${Math.round(event.contextTokens / 1000)}k ctx · ${formatDuration(ms)} · ${formatUsd(fromMicroUsd(flight.micro))} so far${used ? ` · tools since last: ${used}` : ""}`);
+                lastBeatTurn = event.turn;
+                lastBeatAt = ctx.now().getTime();
+                tools.clear();
+              }
+              if (!deadlineWarned && ms >= ctx.config.workers.deadlineMs * DEADLINE_WARN_SHARE) {
+                deadlineWarned = true;
+                ctx.progress?.(`Ticket ${ticket.id} has used ${formatDuration(ms)} of its ${formatDuration(ctx.config.workers.deadlineMs)} deadline (workers.deadlineMs); it is killed at the deadline and the next tier builds on its commits.`);
+              }
+            } else if (event.kind === "compaction") ctx.progress?.(`Ticket ${ticket.id} · context compacted (${event.count}×) at ${formatDuration(elapsed())}`);
             else if (event.kind === "crossed-target") {
               const note = `Ticket ${ticket.id} passed the soft ${target}-token context target (~${event.contextTokens}). Pi's compaction continues; consider splitting it.`;
               if (!warnings.includes(note)) {
@@ -293,7 +382,9 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
       ctx.inflight.release(flight);
       if (budgetReason) budgetStop = true;
       if (!noModelCall && !planProblem) await ctx.store.bumpMetric(taskType(), decision.tier, ok, ctx.now(), decision.candidate);
-      await patchRun(ctx, taskId, ticket, (run) => ({
+      const attemptMs = elapsed();
+      const logEntry: TicketAttempt = { attempt: escalations + 1, tier: decision.tier, provider: decision.provider, model: decision.model, startedAt: attemptStart.toISOString(), elapsedMs: attemptMs, turns: usage.turns, costUsd: entry.actualUsd, outcome: ok ? "success" : "failure", ...(reason ? { error: reason.slice(0, 500) } : {}) };
+      const updated = await patchRun(ctx, taskId, ticket, (run) => ({
         ...run,
         status: "in-progress",
         turns: run.turns + usage.turns,
@@ -303,14 +394,39 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         crossedTarget: run.crossedTarget || !!result?.crossedTarget,
         summary: result?.finalText ? result.finalText.slice(0, MAX_SUMMARY_CHARS) : run.summary,
         error: reason,
+        elapsedMs: (run.elapsedMs ?? 0) + attemptMs,
+        attemptLog: [...(run.attemptLog ?? []), logEntry],
       }));
-      const spent = entry.actualUsd === null ? "cost unknown" : `$${entry.actualUsd.toFixed(4)}`;
+      const spent = formatUsd(entry.actualUsd);
+      const changedNow = await ctx.git.git(["diff", "--name-only", headBefore, "HEAD"], record.path);
+      const willEscalate = !ok && !planProblem && !result?.aborted && !signal.aborted && !budgetReason && escalations < ctx.config.routing.maxEscalations;
+      ctx.report?.(attemptReport({
+        ticket,
+        attempt: escalations + 1,
+        maxAttempts,
+        tier: decision.tier,
+        provider: decision.provider,
+        model: decision.model,
+        ok,
+        reason,
+        elapsedMs: attemptMs,
+        totalElapsedMs: updated.ticketRuns?.[ticket.id]?.elapsedMs ?? attemptMs,
+        turns: usage.turns,
+        usage,
+        maxContextTokens: result?.maxContextTokens ?? 0,
+        costUsd: entry.actualUsd,
+        listPriceUsd: entry.listPriceUsd,
+        changedFiles: changedNow.code === 0 ? changedNow.stdout.split("\n").filter(Boolean) : [],
+        checks: evidence,
+        finalText: result?.finalText ?? "",
+        next: ok ? undefined : planProblem ? "fix the plan's checks and run /implement again" : willEscalate ? "a fresh child at the next tier continues on this worktree" : "escalation stopped; the ticket stays failed",
+      }));
       if (ok) {
-        ctx.progress?.(`Ticket ${ticket.id} done on ${decision.provider}/${decision.model}: ${usage.turns} turn(s), ${spent}.`);
+        ctx.progress?.(`Ticket ${ticket.id} done on ${decision.provider}/${decision.model}: ${usage.turns} turn(s), ${formatDuration(attemptMs)}, ${spent}.`);
         succeeded = true;
         break;
       }
-      ctx.progress?.(`Ticket ${ticket.id} failed on ${decision.provider}/${decision.model} after ${usage.turns} turn(s), ${spent}: ${reason.slice(0, 240)}`);
+      ctx.progress?.(`Ticket ${ticket.id} failed on ${decision.provider}/${decision.model} after ${usage.turns} turn(s), ${formatDuration(attemptMs)}, ${spent}: ${reason.slice(0, 240)}`);
       issues.push(`${decision.provider}/${decision.model}: ${reason}`);
       if (planProblem) break;
       const detail = checkOutputDetail(evidence);
@@ -323,7 +439,7 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
     for (const flight of flights) ctx.inflight.release(flight);
   }
 
-  await patchRun(ctx, taskId, ticket, (run) => ({ ...run, status: succeeded ? "done" : "failed", error: succeeded ? undefined : issues.at(-1) }));
+  await patchRun(ctx, taskId, ticket, (run) => ({ ...run, status: succeeded ? "done" : "failed", error: succeeded ? undefined : issues.at(-1), elapsedMs: Math.max(run.elapsedMs ?? 0, ctx.now().getTime() - ticketStart) }));
   await finish(succeeded ? "done" : "failed", finalText);
   if (!succeeded && !budgetStop) suggestAdvisor(ctx, taskId, `ticket ${ticket.id} failed`);
   const run = ctx.store.load(taskId)?.ticketRuns?.[ticket.id];
