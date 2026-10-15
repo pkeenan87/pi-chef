@@ -81,7 +81,6 @@ branchPrefix: cost
 
 budgets:
   taskUsd: 20
-  autopilotPrUsd: 10
   dailyUsd: 75
   softWarningRatio: 0.8
 
@@ -90,13 +89,6 @@ approvals:
   publish: required
   merge: manual
   securitySensitiveFix: required
-
-autopilot:
-  pollSeconds: 90
-  maxFixCycles: 5
-  autoMerge: false
-  maxRuntimeMs: 7200000
-  backoffSeconds: 30
 
 checks: []
 

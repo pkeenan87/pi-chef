@@ -115,6 +115,17 @@ describe("loadConfig layering", () => {
     expect(loadConfig(project).warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
   });
 
+  it("an old autopilot section and budgets.autopilotPrUsd load with warnings; merge stays manual", () => {
+    writeUser(`${base}autopilot: { pollSeconds: 90, autoMerge: true }\nbudgets: { taskUsd: 5, autopilotPrUsd: 10 }\n`);
+    writeProject("routing: { maxEscalations: 1 }\n");
+    const config = loadConfig(project);
+    expect(config.warnings).toContain("autopilot is no longer used; merge stays manual.");
+    expect(config.warnings).toContain("budgets.autopilotPrUsd is no longer used.");
+    expect("autopilot" in config).toBe(false);
+    expect("autopilotPrUsd" in config.budgets).toBe(false);
+    expect(config.approvals.merge).toBe("manual");
+  });
+
   it("old worktrees and worker pool keys load with one warning each and do not fail", () => {
     writeUser(`${base}worktrees: { strategy: per-independent-task, integrationBranch: true }\nworkers: { concurrency: 4, deadlineMs: 5000, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 1000 }\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
@@ -163,7 +174,6 @@ describe("loadConfig layering", () => {
     expect(config.routing.maxEscalations).toBe(1);
     expect(config.budgets.taskUsd).toBe(5);
     expect(config.budgets.dailyUsd).toBe(10);
-    expect(config.budgets.autopilotPrUsd).toBe(10);
     expect(config.workers.ticketContextTokens).toBe(60000);
     expect(config.workers.tokenBudget).toBe(1000);
     expect(config.approvals.publish).toBe("required");

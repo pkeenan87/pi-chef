@@ -119,19 +119,12 @@ export interface WorkflowConfig {
   };
   /** /build and /ship name the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
   branchPrefix: string;
-  budgets: { taskUsd: number; autopilotPrUsd: number; dailyUsd: number; softWarningRatio: number };
+  budgets: { taskUsd: number; dailyUsd: number; softWarningRatio: number };
   approvals: {
     plan: "required";
     publish: "required" | "auto";
     merge: "manual";
     securitySensitiveFix: "required";
-  };
-  autopilot: {
-    pollSeconds: number;
-    maxFixCycles: number;
-    autoMerge: false;
-    maxRuntimeMs: number;
-    backoffSeconds: number;
   };
   checks: CheckConfig[];
   /** Commands /ship runs in the repo root before the checks (an install, for example). Same rules as checks. */
@@ -165,9 +158,8 @@ const DEFAULTS: WorkflowConfig = {
     ticketContextTokens: 150000,
   },
   branchPrefix: "cost",
-  budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 },
+  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 },
   approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
-  autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
@@ -384,10 +376,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   for (const name of Object.keys(providers)) {
     if (!isProviderId(name)) invalid(where, `providers.${name}`, `is not a known provider (${PROVIDERS.join(", ")})`);
   }
-  const autopilot = section(raw, "autopilot", where);
-  if (autopilot?.autoMerge === true) {
-    throw new WorkflowError("CONFIG_INVALID", "autopilot.autoMerge cannot be true.");
-  }
   const approvals = section(raw, "approvals", where);
   if (approvals?.merge && approvals.merge !== "manual") {
     throw new WorkflowError("CONFIG_INVALID", "approvals.merge must stay manual.");
@@ -445,14 +433,8 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
-    for (const key of ["taskUsd", "autopilotPrUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
+    for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
     checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
-  }
-  if (autopilot) {
-    checkNumber(autopilot, "pollSeconds", where, { exclusiveMin: 0 }, "autopilot");
-    checkNumber(autopilot, "maxFixCycles", where, { min: 0, integer: true }, "autopilot");
-    checkNumber(autopilot, "maxRuntimeMs", where, { exclusiveMin: 0 }, "autopilot");
-    checkNumber(autopilot, "backoffSeconds", where, { min: 0 }, "autopilot");
   }
   for (const key of ["checks", "setup"] as const) {
     const list = raw[key];
@@ -535,7 +517,6 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
       merge: "manual",
       securitySensitiveFix: "required",
     } as WorkflowConfig["approvals"],
-    autopilot: { ...DEFAULTS.autopilot, ...obj("autopilot"), autoMerge: false } as WorkflowConfig["autopilot"],
     checks: Array.isArray(norm.checks)
       ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
       : DEFAULTS.checks,
@@ -646,7 +627,7 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers", "autopilot"]) {
+  for (const key of ["models", "tiers", "routing", "workers"]) {
     const value = mergeSection(user[key], project[key]);
     if (value) merged[key] = value;
     else delete merged[key];
@@ -710,6 +691,18 @@ export function layerConfigs(
     warnings.push("commandAllowlist is no longer used; checks run any non-destructive command.");
   }
   delete merged.commandAllowlist;
+  // The autopilot is gone, and merge stays manual (approvals.merge). Old files still load.
+  if (user.autopilot !== undefined || project.autopilot !== undefined) {
+    warnings.push("autopilot is no longer used; merge stays manual.");
+  }
+  delete merged.autopilot;
+  for (const source of [user, project]) {
+    if (isRecord(source.budgets) && source.budgets.autopilotPrUsd !== undefined) {
+      warnings.push("budgets.autopilotPrUsd is no longer used.");
+      break;
+    }
+  }
+  if (isRecord(merged.budgets)) delete merged.budgets.autopilotPrUsd;
   // orgProviderAllowlist: an empty list means "all providers", so a project list can only restrict that.
   // Once the user names providers, the user's list is final.
   if (Array.isArray(user.orgProviderAllowlist) && user.orgProviderAllowlist.length > 0) {

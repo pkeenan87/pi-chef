@@ -43,7 +43,7 @@ providers:
 models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0.75, maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
 workers: { tokenBudget: 8000 }
-budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 }
+budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 }
 checks:
   - name: unit
     command: npm
