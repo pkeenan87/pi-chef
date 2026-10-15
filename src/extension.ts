@@ -162,9 +162,34 @@ function showPlanMessage(ctx: CommandContext, text: string): void {
   }
 }
 
+/**
+ * The model to put back after a handoff opens a new session (Pi starts it on the default model, which drops
+ * cost-opt/auto). Kept on globalThis because the new session may load a fresh copy of this module.
+ */
+const RESTORE_MODEL = Symbol.for("pi-cost-router.restore-model");
+type ModelRef = { provider: string; id: string };
+const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef };
+
+/** Re-selects the model the replaced session was using, when the new session started on a different one. */
+function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): void {
+  const wanted = restoreSlot[RESTORE_MODEL];
+  delete restoreSlot[RESTORE_MODEL];
+  if (!wanted) return;
+  const current = (ctx as { model?: ModelRef }).model;
+  if (current?.provider === wanted.provider && current.id === wanted.id) return;
+  const warn = () => {
+    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${current ? `${current.provider}/${current.id}` : "the default model"}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
+  };
+  const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
+  if (!model || typeof pi.setModel !== "function") return warn();
+  pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
+}
+
 function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never : (options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>; compact: (options?: { customInstructions?: string }) => void }): SessionControl {
   return {
     async reset({ boundary, handoff }) {
+      const model = (ctx as { model?: ModelRef }).model;
+      if (model) restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
       try {
         const result = await ctx.newSession({
           withSession: async (next) => {
@@ -181,8 +206,11 @@ function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never :
             );
           },
         });
+        // Consumed by the new session's session_start; a cancelled replacement must not leave it for a later one.
+        delete restoreSlot[RESTORE_MODEL];
         return { mode: "new-session", cancelled: result.cancelled };
       } catch {
+        delete restoreSlot[RESTORE_MODEL];
         ctx.compact({ customInstructions: "Keep .pi-workflows artifacts. Do not drop the durable task files." });
         return { mode: "compact", cancelled: false };
       }
@@ -301,6 +329,12 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     const progress = active?.planningStatus();
     if (progress && ctx.hasUI) ctx.ui.setStatus("cost-plan", progress);
     registerRouter(pi, { cwd: ctx.cwd, modelRegistry: ctx.modelRegistry });
+    // After a handoff's new session, put back the model the previous session used (normally cost-opt/auto).
+    try {
+      restoreModel(pi, ctx);
+    } catch {
+      /* the model stays as Pi chose it; /model switches it */
+    }
   });
   pi.on("session_shutdown", () => {
     clearPoll();

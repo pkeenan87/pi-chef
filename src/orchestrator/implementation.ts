@@ -31,6 +31,9 @@ export function implement(ctx: WorkflowContext): Promise<CommandResult> {
     if (!state.approvedVersion || !state.plan) {
       return fail("APPROVAL_REQUIRED", "/implement refused: the plan is still a draft.");
     }
+    // Every ticket runs in a git worktree branched from HEAD, so check for a repository with a commit before anything starts.
+    const gitProblem = await ctx.git.preflight();
+    if (gitProblem) return fail("GIT_NOT_READY", gitProblem);
     // Ticket plans carry no literal edits: only the ticket runner (child pi processes) or a configured executor can run them.
     if (state.plan.tickets && !ctx.ticketRunner && Object.keys(ctx.executors).length === 0) {
       return fail("TICKET_RUNNER_MISSING", "Ticket runner not configured: this plan's tickets have no literal edits and no executor is available to run them. The plan stays approved; nothing was applied.");

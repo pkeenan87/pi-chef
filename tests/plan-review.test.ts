@@ -217,3 +217,74 @@ describe("command handler after a session replacement", () => {
     bindWorkflow(undefined);
   });
 });
+
+describe("/implement git preflight", () => {
+  it("refuses a folder that is not a repository, or a repository with no commit", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { execFileSync } = await import("node:child_process");
+    const { GitWorkspace } = await import("../src/git/worktrees.js");
+    const plain = mkdtempSync(path.join(tmpdir(), "pi-cost-nogit-"));
+    const git = new GitWorkspace(plain);
+    expect(await git.preflight()).toMatch(/is not a git repository/);
+    execFileSync("git", ["init", "-q"], { cwd: plain });
+    expect(await git.preflight()).toMatch(/has no commits yet/);
+    expect(await new GitWorkspace(await tempRepo()).preflight()).toBeUndefined();
+  });
+
+  it("stops /implement with a clear message and leaves the task approved", async () => {
+    const { app } = await drafted();
+    expect((await app.approvePlan()).ok).toBe(true);
+    (app.git as { preflight: () => Promise<string | undefined> }).preflight = async () => "not a git repository";
+    const result = await app.implement();
+    expect(result).toMatchObject({ ok: false, code: "GIT_NOT_READY" });
+    const task = app.store.load(app.activeTaskId()!)!;
+    expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
+    expect(task.approvedVersion).toBe(1);
+  });
+});
+
+describe("model after a handoff", () => {
+  function sessionPi() {
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const selected: unknown[] = [];
+    const pi = {
+      registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => void commands.set(name, options),
+      on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => (handlers.set(event, handler), () => undefined),
+      appendEntry() {},
+      registerVirtualModel() {},
+      setModel: async (model: unknown) => (selected.push(model), true),
+    };
+    registerWorkflow(pi as unknown as ExtensionAPI);
+    return { commands, handlers, selected };
+  }
+
+  it("puts cost-opt/auto back when the new session starts on another model", async () => {
+    const { app, cwd } = await drafted();
+    const { commands, handlers, selected } = sessionPi();
+    bindWorkflow(app);
+    const auto = { provider: "cost-opt", id: "auto" };
+    const ui = { notify() {}, setStatus() {}, confirm: async () => true, custom: async () => "approve" };
+    const next = { cwd, hasUI: true, ui, model: { provider: "openai", id: "gpt-5.4" }, modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) }, sessionManager: { getEntries: () => [] }, sendMessage: async () => undefined };
+    const old = {
+      cwd,
+      hasUI: true,
+      ui,
+      model: auto,
+      compact() {},
+      newSession: async (options?: { withSession?: (ctx: unknown) => Promise<void> }) => {
+        // Pi fires session_start for the new session before withSession runs.
+        handlers.get("session_start")!({ type: "session_start", reason: "new" }, next);
+        await options?.withSession?.(next);
+        return { cancelled: false };
+      },
+    };
+    await commands.get("approve-plan")!.handler("", old);
+    expect(selected).toEqual([auto]);
+    // The hint is used once: a later session start leaves the model alone.
+    handlers.get("session_start")!({ type: "session_start", reason: "new" }, next);
+    expect(selected).toHaveLength(1);
+    bindWorkflow(undefined);
+  });
+});
