@@ -44,6 +44,8 @@ export interface WorkflowContext {
   readonly warned: Set<string>;
   confirm: (title: string, message: string) => Promise<boolean>;
   notify: (message: string) => void;
+  /** Progress lines for the chat while /implement runs. Absent without a UI. */
+  progress?: (message: string) => void;
   session?: SessionControl;
   chat?: ChatFn;
   status?: (text: string | undefined) => void;

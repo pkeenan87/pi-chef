@@ -5,12 +5,25 @@ import { setBillingResolver } from "../src/config.js";
 import { summarize, unpricedModels } from "../src/cost/ledger.js";
 import { WorkflowError, type CostRecord, type PlanDocument, type TaskState, type Ticket } from "../src/domain.js";
 import { GitWorkspace } from "../src/git/worktrees.js";
-import { forNewPlan } from "../src/orchestrator/plan.js";
+import { forNewPlan, sameTicket } from "../src/orchestrator/plan.js";
+import { ticketPrompt } from "../src/orchestrator/prompts.js";
+import { modelReviewPrompt, parseModelFindings } from "../src/review/model-review.js";
+import type { ChatFn } from "../src/providers/pi-chat.js";
 import { blank } from "../src/orchestrator/planning.js";
 import { TICKET_RULES } from "../src/orchestrator/prompts.js";
 import { validateTickets } from "../src/orchestrator/tickets.js";
 import type { DecisionsClient } from "../src/providers/clients.js";
-import { readyAuth, singleTaskRequest, tasksRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { checkRunner, readyAuth, singleTaskRequest, tasksRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
+
+const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
+function fakeChat(reply: () => string) {
+  const calls: { provider: string; model: string; user: string; system: string }[] = [];
+  const chat: ChatFn = async (candidate, request) => {
+    calls.push({ provider: candidate.provider, model: candidate.model, user: request.messages.filter((m) => m.role === "user").map((m) => m.content).join("\n"), system: request.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n") });
+    return { text: reply(), usage, provider: candidate.provider, model: candidate.model };
+  };
+  return { chat, calls };
+}
 
 const ticket = (id: string, slug: string, extra: Partial<Ticket> = {}): Ticket => ({ id, slug, title: `T${id}`, whatToBuild: "x", acceptanceCriteria: ["works"], blockedBy: [], estimatedContextTokens: 30_000, ...extra });
 const ALLOW = ["npm test", "npm run typecheck", "npx vitest run *"];
@@ -80,6 +93,22 @@ describe("state carried into a new plan version", () => {
     expect(next.worktrees.map((item) => [item.groupId, item.abandoned ?? false])).toEqual([["01-old-slug", true], ["02-same", false]]);
     // The stale "done" for ticket 01 is gone, so the new 01 runs; 02 stays done.
     expect(Object.keys(next.ticketRuns ?? {})).toEqual(["02"]);
+  });
+
+  it("drops the run of a ticket whose text changed, so it runs again in its worktree", () => {
+    const before = ticket("01", "a", { whatToBuild: "old" });
+    const task: TaskState = { ...blank("t", "req", "2026-10-15T00:00:00.000Z"), plan: draft([before]), worktrees: [record("01-a")], ticketRuns: { "01": { status: "done", attempts: 1, turns: 1, tokens: 1, costUsd: 0, maxContextTokens: 1, crossedTarget: false } } };
+    expect(forNewPlan(task, draft([ticket("01", "a", { whatToBuild: "old" })])).ticketRuns).toBeDefined();
+    const next = forNewPlan(task, draft([ticket("01", "a", { whatToBuild: "new" })]));
+    expect(next.ticketRuns).toBeUndefined();
+    expect(next.worktrees[0]!.abandoned).toBeUndefined();
+    expect(sameTicket(before, ticket("01", "a", { whatToBuild: "old", checks: ["npm test"] }))).toBe(false);
+  });
+
+  it("tells a child about earlier work in its worktree", () => {
+    const prompt = ticketPrompt({ ticket: { id: "01", title: "T", whatToBuild: "x", acceptanceCriteria: ["a"] }, blockers: [], priorWork: true });
+    expect(prompt).toContain("## Earlier work in this worktree");
+    expect(ticketPrompt({ ticket: { id: "01", title: "T", whatToBuild: "x", acceptanceCriteria: ["a"] }, blockers: [], priorWork: true, previousFailure: "boom" })).not.toContain("Earlier work");
   });
 
   it("un-abandons a worktree whose group returns in a later version", () => {
@@ -177,5 +206,113 @@ describe("phantom spend", () => {
     expect(log).toEqual([]);
     expect(app.store.readLedger().filter((item) => item.tier === "classifier")).toEqual([]);
     expect(app.store.readMetrics().classification).toBeUndefined();
+  });
+});
+
+describe("model review", () => {
+  const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false, tickets: [ticket("01", "retry", { acceptanceCriteria: ["retry works"] })] };
+
+  it("parses a JSON list out of chatty output, fills defaults, and sorts by severity", () => {
+    const text = 'Here you go:\n[{"severity":"LOW","category":"tests","message":"No test for the empty case.","file":"src/a.ts"},{"severity":"high","message":"retry() loops forever when attempts is 0.","evidence":"while (true)"},{"message":""},"junk"]';
+    const findings = parseModelFindings(text)!;
+    expect(findings.map((item) => item.severity)).toEqual(["low", "high"]);
+    expect(findings[1]).toMatchObject({ category: "general", evidence: "while (true)" });
+    expect(parseModelFindings("I found nothing.")).toBeUndefined();
+    expect(parseModelFindings("[]")).toEqual([]);
+  });
+
+  it("puts the plan before the diff and truncates the diff at the limit", () => {
+    const prompt = modelReviewPrompt(plan, "x".repeat(2000), 1000);
+    expect(prompt.truncated).toBe(true);
+    expect(prompt.text.indexOf("# Plan")).toBeLessThan(prompt.text.indexOf("# Diff"));
+    expect(prompt.text).toContain("- 01 T01: retry works");
+    expect(prompt.text).toContain("1000 more not shown");
+    expect(modelReviewPrompt(plan, "short", 1000).truncated).toBe(false);
+  });
+
+  it("lists the review model's findings in /review, ledgers the call, and keeps the pass deterministic", async () => {
+    const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: "high", category: "correctness", file: "src/ingest.ts", message: "ingest() throws on empty input but the plan asks for a skip.", evidence: 'throw new Error("empty")' }]));
+    const app = workflow(await tempRepo(), { config: tieredConfig(), chat });
+    await app.plan(tasksRequest);
+    await app.approvePlan();
+    expect((await app.implement()).ok).toBe(true);
+    const review = await app.review();
+    expect(review.ok, review.text).toBe(true);
+    expect(review.text).toContain("Review passed with 1 check(s)");
+    expect(review.text).toMatch(/Model review \(\S+\/\S+\): 1 finding\(s\)\./);
+    expect(review.text).toContain("- [high] src/ingest.ts: ingest() throws on empty input");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.system).toContain("JSON array");
+    expect(calls[0]!.user).toContain("# Diff");
+    expect(calls[0]!.user).toContain("src/ingest.ts");
+    const data = review.data as { modelReview: { findings: unknown[] }; findings: unknown[] };
+    expect(data.modelReview.findings).toHaveLength(1);
+    const entry = app.store.readLedger().find((item) => item.reason === "model review");
+    expect(entry).toMatchObject({ phase: "REVIEWING", inputTokens: 100, outcome: "success" });
+    expect(existsSync(path.join(app.store.taskDir(app.activeTaskId()!), "reports", "review.md"))).toBe(true);
+  });
+
+  it("skips the model pass when review.model is off, and reports a failed call as an unknown charge", async () => {
+    const off = fakeChat(() => "[]");
+    const quiet = workflow(await tempRepo(), { config: tieredConfig("review: { model: false }"), chat: off.chat });
+    await quiet.plan(tasksRequest);
+    await quiet.approvePlan();
+    expect((await quiet.implement()).ok).toBe(true);
+    const silent = await quiet.review();
+    expect(silent.ok).toBe(true);
+    expect(silent.text).not.toContain("Model review");
+    expect(off.calls).toHaveLength(0);
+
+    const broken: ChatFn = async () => {
+      throw new Error("rate limited");
+    };
+    const app = workflow(await tempRepo(), { config: tieredConfig(), chat: broken });
+    await app.plan(tasksRequest);
+    await app.approvePlan();
+    expect((await app.implement()).ok).toBe(true);
+    const review = await app.review();
+    expect(review.ok).toBe(true);
+    expect(review.text).toContain("produced no findings: the call failed: rate limited");
+    expect(app.store.readLedger().find((item) => item.reason === "model review")).toMatchObject({ actualUsd: null, outcome: "failure" });
+  });
+
+  it("runs setup commands in the integration worktree before the checks, and hints at setup when tooling is missing", async () => {
+    const ran: string[] = [];
+    const app = workflow(await tempRepo(), {
+      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }\ncommandAllowlist: ['npm ci', 'npm test']"),
+      runner: checkRunner(async (command, args, cwd) => (ran.push(`${[command, ...args].join(" ")} @ ${path.basename(cwd)}`), { code: 0, stdout: "ok", stderr: "" })),
+    });
+    await app.plan(tasksRequest);
+    await app.approvePlan();
+    expect((await app.implement()).ok).toBe(true);
+    const review = await app.review();
+    expect(review.ok, review.text).toBe(true);
+    expect(ran.filter((line) => line.endsWith("@ integration"))).toEqual(["npm ci @ integration", "npm test @ integration"]);
+    expect((review.data as { checks: { name: string }[] }).checks.map((check) => check.name)).toEqual(["setup: install", "unit"]);
+
+    const brokenInstall = workflow(await tempRepo(), {
+      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }\ncommandAllowlist: ['npm ci', 'npm test']"),
+      runner: checkRunner(async (command, args) => (args[0] === "ci" ? { code: 1, stdout: "", stderr: "ERESOLVE" } : { code: 0, stdout: "ok", stderr: "" })),
+    });
+    await brokenInstall.plan(tasksRequest);
+    await brokenInstall.approvePlan();
+    expect((await brokenInstall.implement()).ok).toBe(true);
+    const noInstall = await brokenInstall.review();
+    expect(noInstall.ok).toBe(false);
+    expect(noInstall.text).toContain("setup: install failed.");
+    expect((noInstall.data as { checks: { name: string; ran: boolean }[] }).checks.map((check) => [check.name, check.ran])).toEqual([["setup: install", true], ["unit", false]]);
+
+    const bare = workflow(await tempRepo(), {
+      config: tieredConfig(),
+      // Ticket worktrees have their tools; the integration worktree is a fresh checkout without them.
+      runner: checkRunner(async (_command, _args, cwd) => (path.basename(cwd) === "integration" ? { code: 127, stdout: "", stderr: "sh: tsc: command not found" } : { code: 0, stdout: "ok", stderr: "" })),
+    });
+    await bare.plan(tasksRequest);
+    await bare.approvePlan();
+    expect((await bare.implement()).ok).toBe(true);
+    const failed = await bare.review();
+    expect(failed.ok).toBe(false);
+    expect(failed.text).toContain("fresh checkout");
+    expect(failed.text).toContain("`setup:`");
   });
 });

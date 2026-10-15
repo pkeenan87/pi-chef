@@ -207,6 +207,7 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         break;
       }
       await announce(ctx, taskId, "implement", decision, () => ctx.status?.(`ticket ${ticket.id} → ${decision.provider}/${decision.model}`));
+      ctx.progress?.(`Ticket ${ticket.id} (${ticket.title}) → ${decision.provider}/${decision.model}${escalations ? ` · escalation ${escalations} of ${ctx.config.routing.maxEscalations}` : ""}`);
       await patchRun(ctx, taskId, ticket, (run) => ({ ...run, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: run.attempts + 1, error: undefined }));
       editTicketFile(ctx, taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));
 
@@ -215,7 +216,9 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         const blocker = latest.plan?.tickets?.find((item) => item.id === id);
         return { id, title: blocker?.title ?? id, summary: latest.ticketRuns?.[id]?.summary ?? "" };
       });
-      const prompt = ticketPrompt({ ticket, spec: ctx.store.readText(taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure });
+      // Commits already on this worktree before the first attempt come from an earlier version of the ticket (a revised plan).
+      const priorWork = escalations === 0 && record.headSha !== record.baseSha;
+      const prompt = ticketPrompt({ ticket, spec: ctx.store.readText(taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork });
       let result: TicketRunResult | undefined;
       let thrown: string | undefined;
       // This attempt's own abort: the caller's signal, or a budget stop raised by any concurrent ticket's spend.
@@ -301,10 +304,13 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         summary: result?.finalText ? result.finalText.slice(0, MAX_SUMMARY_CHARS) : run.summary,
         error: reason,
       }));
+      const spent = entry.actualUsd === null ? "cost unknown" : `$${entry.actualUsd.toFixed(4)}`;
       if (ok) {
+        ctx.progress?.(`Ticket ${ticket.id} done on ${decision.provider}/${decision.model}: ${usage.turns} turn(s), ${spent}.`);
         succeeded = true;
         break;
       }
+      ctx.progress?.(`Ticket ${ticket.id} failed on ${decision.provider}/${decision.model} after ${usage.turns} turn(s), ${spent}: ${reason.slice(0, 240)}`);
       issues.push(`${decision.provider}/${decision.model}: ${reason}`);
       if (planProblem) break;
       const detail = checkOutputDetail(evidence);

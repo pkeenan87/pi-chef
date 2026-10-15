@@ -144,6 +144,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       session: sessionFrom(ctx),
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
+      progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
       review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });

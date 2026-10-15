@@ -197,6 +197,25 @@ export interface Finding {
   evidence: string;
 }
 
+/** One finding from the model pass of /review. Advisory: it is shown for a person to judge and never gates publish. */
+export interface ModelFinding {
+  severity: "high" | "medium" | "low";
+  category: string;
+  file?: string;
+  message: string;
+  evidence?: string;
+}
+
+export interface ModelReview {
+  provider: string;
+  model: string;
+  findings: ModelFinding[];
+  /** The diff was cut to fit the configured size, so the model did not see all of it. */
+  truncated: boolean;
+  /** Why there are no model findings (budget, no model, a failed call, or unparseable output). */
+  error?: string;
+}
+
 export interface ReviewReport {
   passed: boolean;
   claimedPass: boolean;
@@ -205,6 +224,8 @@ export interface ReviewReport {
   worktreeDiffs: { groupId: string; diff: string }[];
   integratedDiff: string;
   summary: string;
+  /** The model pass, when it ran. Separate from `findings` so policy stays deterministic. */
+  modelReview?: ModelReview;
 }
 
 export interface WorkerArtifact {

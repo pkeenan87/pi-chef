@@ -71,6 +71,7 @@ export class Workflow {
       warned: new Set(),
       confirm: options.confirm ?? (async () => false),
       notify: options.notify ?? ((message) => this.store.notify(message)),
+      progress: options.progress,
       session: options.session,
       chat: options.chat,
       status: options.status,
@@ -105,6 +106,7 @@ export class Workflow {
     ctx.startTurn = binding.startTurn ?? ctx.startTurn;
     ctx.confirm = binding.confirm ?? (async () => false);
     ctx.notify = binding.notify ?? ((message) => this.store.notify(message));
+    ctx.progress = binding.progress ?? ctx.progress;
     ctx.review = binding.review;
     ctx.show = binding.show ?? ctx.show;
   }
