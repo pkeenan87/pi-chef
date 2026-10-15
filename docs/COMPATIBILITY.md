@@ -83,13 +83,15 @@ From `dist/core/extensions/types.d.ts` and `docs/extensions.md` in coding-agent 
 | Load the extension | Default export `(pi: ExtensionAPI) => void` | `src/extension.ts` |
 | Slash commands | `pi.registerCommand(name, { description, handler, getArgumentCompletions })` | Every command in the spec. Completions are the documented tab-completion hook |
 | Help text | `description` on the command, shown in Pi's `/` menu | Plus an in-command `help` argument |
-| Session start / stop | `pi.on("session_start")`, `pi.on("session_shutdown")` | Bind cwd. `session_shutdown` clears the in-process autopilot poll. The factory does not start a timer (docs forbid that). `/autopilot` arms a `setTimeout` for `pollSeconds` or the cycle backoff, and `/autopilot stop` clears it. The timer does not outlive the Pi process; the cursor on disk does |
-| Fresh context | `ExtensionCommandContext.newSession({ withSession })` | Command-only. Used for the three boundaries. `docs/extensions.md`: session replacement invalidates the old context; keep only plain data and continue in `withSession` |
-| Compact | `ctx.compact()` | Used when `newSession` is cancelled or the host has no command context. Compact does not delete our files |
-| Runtime model switch | `pi.setModel(model): Promise<boolean>` | False when the provider has no auth. Also `pi.registerVirtualModel` (`docs/virtual-models.md`) under provider id `cost-opt`, which is always listed because it is not a physical provider |
-| Nested / sub-agent calls | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
+| Session start / stop | `pi.on("session_start")`, `pi.on("session_shutdown")` | Bind cwd, and (on a `/build` session) read the model slot that sets the chunk model. `session_shutdown` disposes the workflow. The factory starts no timer (docs forbid that) |
+| Fresh context | `ExtensionCommandContext.newSession({ withSession })` | `/build` opens one per ticket, from the command ctx. `docs/extensions.md`: session replacement invalidates the old context; keep only plain data and continue in `withSession`. **Unverified live**, including a second `newSession` from the replacement ctx |
+| Send a turn | `sendUserMessage(text)` on the replacement ctx | `/build` sends the ticket prompt, then the one retry message. Assumed to resolve when the run ends. **Unverified live** |
+| Wait for the run | `waitForIdle()` on the replacement ctx | After each `sendUserMessage`. The order against `agent_settled`, and Esc while a command awaits, are **unverified live** |
+| Run finished | `pi.on("agent_settled")` | Records `aborted` so Esc stops the build after that turn. `message_end` keeps the last assistant text for the criteria checklist |
+| Runtime model switch | `pi.setModel(model): Promise<boolean>` | False when the provider has no auth. `/build` sets each ticket's model through the `session_start` slot (the replacement ctx has no `setModel`), then puts the user's model back with the newest instance's `setModel`; **unverified live**. Also `pi.registerVirtualModel` (`docs/virtual-models.md`) under provider id `cost-opt`, which is always listed because it is not a physical provider |
+| Nested model calls (advisor, classifier, `/ship` model pass) | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
 | Observe usage | `pi.on("message_end")` | Record token metadata. Message text is not copied |
-| Block a tool | `pi.on("tool_call")` returning `{ block: true, reason }` | Destructive shell commands. `user_bash` is the documented hook for commands typed by the user |
+| Block a tool | `pi.on("tool_call")` returning `{ block: true, reason }` | Destructive shell commands, non-read-only bash while `/plan` runs, and `git push` and branch switches while a `/build` ticket runs. `user_bash` is the documented hook for commands typed by the user |
 | Durable session notes | `pi.appendEntry` | Pointer to the active task id. Task truth lives in `.pi-workflows`, not in the transcript |
 | UI | `ctx.ui.notify`, `ctx.ui.confirm`, `ctx.ui.setStatus` | `ctx.hasUI` guards dialogs. Non-interactive mode fails closed when a required confirmation has no UI |
 | Package layout | `package.json` `"pi": { "extensions", "skills" }` and `"pi-package"` keyword | Host packages (`pi-coding-agent`, `pi-ai`, `typebox`) are optional peers, not dependencies (`docs/packages.md`) |
@@ -104,7 +106,7 @@ Events we deliberately do not subscribe to: `before_provider_headers` (would be 
 | Unregister a tool | Docs: tools cannot be unregistered; re-register with `exposure: "hidden"` if needed. We do not hide Pi's tools |
 | Auto-merge | Not implemented. `approvals.merge` is `manual`. The GitHub client has no merge method |
 | Reset that deletes the transcript in place | `newSession` starts a new session file. `compact` summarizes. Neither deletes `.pi-workflows` artifacts |
-| A hook that swaps providers per tool call inside one assistant turn | `registerVirtualModel` routes **per request**. Sub-agents use isolated clients so a worker call does not change `pi.setModel` under the user and so Foundry's Azure CLI token never becomes a Pi `apiKey` |
+| A hook that swaps providers per tool call inside one assistant turn | `registerVirtualModel` routes **per request**. Advisor, classifier, and review calls use isolated clients so they do not change `pi.setModel` under the user and so Foundry's Azure CLI token never becomes a Pi `apiKey` |
 | Forking Pi | Not required. Stop condition in the spec is not hit |
 
 ## Runtime model switching
@@ -122,13 +124,13 @@ The `cost-opt/auto` route therefore:
 3. Resolves that tier only to a physical model whose provider is account-oauth (OpenAI or Anthropic), or to a Foundry/local model this extension registered.
 4. Throws a clear error when the chosen provider is not logged in. It does not select an API-key model.
 
-Isolated clients still exist for sub-agents and for tests. That is additional to switching, not a substitute invented because switching was missing.
+Isolated clients still exist for the nested calls and for tests. That is additional to switching, not a substitute invented because switching was missing.
 
 ## Assumptions that still need a live Pi session
 
 These are labeled assumptions. Unit tests cover the code around them; they do not boot the TUI.
 
-1. `newSession()` from a command handler leaves the new session empty of the previous transcript. The type says "Start a new session". If a host build ever no-ops it, handoff files are still written and `/reset-phase` reports `handoff-only`.
+1. `newSession()` from a command handler (and again from inside `withSession`) leaves the new session empty of the previous transcript. The type says "Start a new session". `/build` depends on it: if it no-ops, a ticket would start with the previous ticket's transcript, and the model check in the driver would not notice.
 2. `getArgumentCompletions` is what Tab calls. The field exists on `RegisteredCommand`. A live TUI check is still the way to see the menu.
 3. `isUsingOAuth(model)` matches the credential Pi will actually send. We also read `auth.json` `type` ourselves when outside a session.
 4. `message_end` usage objects are the provider's counts. Missing fields stay unknown in our ledger. Pi's own `Usage.cost` type requires numbers, so a Pi transcript is not our ledger. Our ledger uses `null` for unknown charge.
@@ -144,9 +146,9 @@ Shipped as library modules plus `src/extension.ts`. No hosted coordinator, datab
 |---|---|
 | M1 | Config, redaction, locked journal, auth gate for the four providers, `/status`, `/cost`, `/auth`. Compatibility test asserts Pi's oauth objects exist and Azure's does not |
 | M2 | `/plan`, `/route`, classifier schema, deterministic fallback, approval freeze, versioned plans |
-| M3 | `/implement` refuses without approval. Worktree allocation, concurrency 2, file ownership, serial integration, restart rebuild |
-| M4 | `/review` with tool evidence, security and failing-check fixtures, `/push` gated on confirm + checks, context handoffs |
-| M5 | `/autopilot` stepped loop: dedupe, bounded verified fix, no duplicate replies, stop at `MERGE_READY`, no merge. Pause on security, scope change, and human review |
+| M3 | `/build` refuses without approval. Tickets in dependency order, each in a fresh session on a routed model, checks, one commit per ticket on one branch, resume, restart-safe state |
+| M4 | `/ship` with tool evidence (setup, checks, static scan, advisory model pass), security and failing-check fixtures, push and PR gated on confirm and checks. Works for ad-hoc branches |
+| M5 | Plan review screen with approval, `/show-plan`, a new `/plan` closes a published task. No merge: `approvals.merge` stays `manual` |
 | M6 | Expected cost-to-success, escalation cap, circuit breaker, budget hard stop, CSV/JSON export, baseline comparison fields |
 
-Context boundaries, in order: after plan approval (immutable plan + handoff), after implementation (diff, tests, decisions, open issues), after publish (PR ids, branch, head SHA, checks, findings). Each one writes a file under `handoffs/` and then calls `newSession` when the command context provides it. A reset never deletes artifacts.
+Context boundaries: `/build` starts every ticket in a fresh session (`newSession`), so the ticket prompt carries the spec, the blockers' summaries, and the repo rules. State lives in `.pi-workflows`, not in the transcript. A reset never deletes artifacts.

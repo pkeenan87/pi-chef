@@ -142,7 +142,7 @@ export function run(argv, log = console.log) {
 
   log(`
 Next:
-  1. Edit .pi-workflows/config.yaml: set checks:, commandAllowlist, and pricing rows.
+  1. Edit .pi-workflows/config.yaml: set checks:, setup:, and pricing rows.
   2. Keep endpoints, base URLs, and env-var names in ~/.pi/agent/cost-workflow.yaml.
   3. In Pi: /login openai, /login anthropic (and az login for Foundry), then /auth status.
   4. Grant project trust when Pi asks, so it reads .pi/settings.json.`);
