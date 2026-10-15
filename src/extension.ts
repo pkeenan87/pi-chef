@@ -300,7 +300,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
           // An invalid config must reach the user as a failed command, not as an exception inside Pi.
           result = asResult(error);
         }
-        // After a session replacement (for example the handoff in /approve-plan) the captured ctx and pi throw on
+        // After a session replacement (for example the handoff in /ship) the captured ctx and pi throw on
         // use. The new session's session_start already synced the plan tools, so only the result is shown, through
         // the replacement ctx.
         const live: ExtensionContext = replacementCtx ?? ctx;

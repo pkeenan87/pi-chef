@@ -4,7 +4,7 @@ import { classifyTaskWithUsage, type ClassifierUsage, type Decider } from "../ro
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, recordClassifier, remember } from "./budget.js";
-import { active, done, fail, guard, handoff, iso, knownZero, PUBLISHED_PHASES, requireActive, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireActive, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
@@ -148,7 +148,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     await announce(ctx, state.taskId, "plan", routing);
     if (draft.securitySensitive) suggestAdvisor(ctx, state.taskId, "security-sensitive plan");
     const overlap = draft.overlap.length ? ` Overlap on ${draft.overlap.join(", ")} will be serialized.` : " No file overlap.";
-    return done(`Draft v${draft.version} is waiting for /approve-plan.${overlap} Nothing was committed.`, { taskId: state.taskId, plan: draft, routing });
+    return done(`Draft v${draft.version} is waiting for approval (/show-plan).${overlap} Nothing was committed.`, { taskId: state.taskId, plan: draft, routing });
   });
 }
 
@@ -157,7 +157,17 @@ function planMarkdown(ctx: WorkflowContext, task: TaskState): string {
   return ctx.store.readText(task.taskId, PLAN_FILE) ?? renderPlanReview(task.plan!, ctx.store.readText(task.taskId, SPEC_FILE));
 }
 
-export function approvePlan(ctx: WorkflowContext): Promise<CommandResult> {
+/** Freezes the draft as plan.v{N}.approved.json and records the approved version. No dialog and no session reset. */
+export async function freezeApproval(ctx: WorkflowContext, state: TaskState): Promise<TaskState> {
+  const plan = state.plan!;
+  const body = `${JSON.stringify(plan, null, 2)}\n`;
+  ctx.store.writeOnceText(state.taskId, `plan.v${plan.version}.approved.json`, body);
+  const at = iso(ctx);
+  return ctx.store.update(state.taskId, "plan approved", (task) => ({ ...task, approvedVersion: task.plan?.version, updatedAt: at }));
+}
+
+/** Approves the active draft (the choice was already made on a review screen). */
+export function approveDraft(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
     const current = requireActive(ctx);
     if (current.phase !== "AWAITING_PLAN_APPROVAL" || !current.plan) {
@@ -166,54 +176,42 @@ export function approvePlan(ctx: WorkflowContext): Promise<CommandResult> {
     const version = current.plan.version;
     if (current.approvedVersion === version) return done(`Plan v${version} is already approved.`);
     assertGraph(current.plan.groups);
-    // With a UI the person sees the whole plan (spec and tickets) before approving it.
-    if (ctx.review) {
-      const revisable = !!current.plan.tickets?.length;
-      const choice = await ctx.review({
-        title: `Approve plan v${version}?`,
-        markdown: planMarkdown(ctx, current),
-        actions: [
-          { value: "approve", label: `Approve plan v${version}` },
-          ...(revisable ? [{ value: "revise", label: "Request changes", input: "What should change in the plan?" }] : []),
-          { value: "cancel", label: "Not yet" },
-        ],
-      });
-      if (choice?.value === "revise") return requestPlanChanges(ctx, current, choice.text ?? "");
-      if (choice?.value !== "approve") {
-        return fail("NOT_APPROVED", `Plan v${version} was not approved. /show-plan shows it again; /approve-plan when ready.`);
-      }
-    }
-    const at = iso(ctx);
-    const body = `${JSON.stringify(current.plan, null, 2)}\n`;
-    const frozen = ctx.store.writeOnceText(current.taskId, `plan.v${version}.approved.json`, body);
-    // Recorded before the handoff: the session reset can fail or be cancelled, and approval must not depend on it.
-    await ctx.store.update(current.taskId, "plan approved", (task) => ({ ...task, approvedVersion: task.plan?.version, updatedAt: at }));
-    const note = await handoff(ctx, current, "post-approval", [
-      "# Handoff after plan approval",
-      "",
-      `Approved plan: ${frozen}`,
-      `Version: ${version}`,
-      "",
-      current.plan.summary,
-      "",
-      "Implement only the files in this plan. Do not expand scope. Run /implement to start.",
-    ].join("\n"));
-    const state = await ctx.store.update(current.taskId, "context reset", (task) => ({ ...task, contextResets: [...task.contextResets, note] }));
-    return done(`Approved plan v${state.approvedVersion}. Context reset: ${note.mode}. The approved file will not be overwritten.`, state);
+    const state = await freezeApproval(ctx, current);
+    return done(`Approved plan v${version}. Run /build.`, state);
   });
 }
 
-/** Posts the active task's plan in the chat (and returns where it lives on disk). */
+/** Posts the active task's plan in the chat. A draft opens the review screen, so it can be approved from here. */
 export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
     const current = requireActive(ctx);
     if (!current.plan) return fail("NO_PLAN", "The active task has no plan yet. Run /plan <request>.");
     const markdown = planMarkdown(ctx, current);
-    const approved = current.approvedVersion === current.plan.version;
+    const version = current.plan.version;
+    const approved = current.approvedVersion === version;
     const where = path.join(ctx.store.taskDir(current.taskId), PLAN_FILE);
+    if (!approved && current.phase === "AWAITING_PLAN_APPROVAL" && ctx.review) {
+      assertGraph(current.plan.groups);
+      const revisable = !!current.plan.tickets?.length;
+      const choice = await ctx.review({
+        title: `Plan v${version} (draft)`,
+        markdown,
+        actions: [
+          { value: "approve", label: `Approve plan v${version}` },
+          ...(revisable ? [{ value: "revise", label: "Request changes", input: "What should change in the plan?" }] : []),
+          { value: "close", label: "Close" },
+        ],
+      });
+      if (choice?.value === "revise") return requestPlanChanges(ctx, current, choice.text ?? "");
+      if (choice?.value === "approve") {
+        const state = await freezeApproval(ctx, current);
+        return done(`Approved plan v${version}. Run /build.`, state);
+      }
+      return done(`Plan v${version} is still a draft. /show-plan to approve later. File: ${where}`, { taskId: current.taskId, file: where });
+    }
     if (ctx.show) ctx.show(markdown);
-    const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "waiting for /approve-plan" : current.phase.toLowerCase();
-    return done(ctx.show ? `Plan v${current.plan.version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
+    const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "a draft; /show-plan in a session with a UI approves it" : current.phase.toLowerCase();
+    return done(ctx.show ? `Plan v${version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
   });
 }
 

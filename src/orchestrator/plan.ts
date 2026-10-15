@@ -95,7 +95,7 @@ export function renderPlan(plan: PlanDocument): string {
   for (const group of plan.groups) {
     lines.push("", `### ${group.id}`, group.summary, `Files: ${group.files.join(", ") || "(none)"}`, `Depends on: ${group.dependsOn.join(", ") || "(none)"}`);
   }
-  lines.push("", "This draft does not edit the repository. Implementation waits for /approve-plan.");
+  lines.push("", "This draft does not edit the repository. Building waits for plan approval.");
   return `${lines.join("\n")}\n`;
 }
 
@@ -131,7 +131,7 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined): 
   }
   lines.push("", "## Execution order", "", ...order);
   if (plan.overlap.length > 0) lines.push("", `File overlap (serialized, not parallel): ${plan.overlap.join(", ")}`);
-  lines.push("", "## Policy", "", ...plan.risks.map((item) => `- ${item}`), "- This draft does not edit the repository. Implementation waits for /approve-plan.");
+  lines.push("", "## Policy", "", ...plan.risks.map((item) => `- ${item}`), "- This draft does not edit the repository. Building waits for plan approval.");
   return `${lines.join("\n")}\n`;
 }
 

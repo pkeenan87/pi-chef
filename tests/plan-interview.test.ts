@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -336,7 +336,7 @@ describe("plan_tickets", () => {
       ticket("02", { blockedBy: ["01"], title: "Second", acceptanceCriteria: ["a", "b"], checks: ["npm test"] }),
     ];
     const result = await call(tickets, { tickets: input }, headless);
-    expect(textOf(result)).toContain("/approve-plan");
+    expect(textOf(result)).toContain("/show-plan");
     const dir = path.join(app.store.taskDir(app.activeTaskId()!), "tickets");
     expect(readdirSync(dir).sort()).toEqual(["01-t01.md", "02-t02.md"]);
     const first = readFileSync(path.join(dir, "01-t01.md"), "utf8");
@@ -367,7 +367,7 @@ describe("plan_tickets", () => {
     await call(tickets, { tickets: [ticket("01")] }, headless);
     const early = await app.implement();
     expect(early).toMatchObject({ ok: false, code: "APPROVAL_REQUIRED" });
-    expect((await app.approvePlan()).ok).toBe(true);
+    expect((await app.approveDraft()).ok).toBe(true);
     const late = await app.implement();
     expect(late.ok).toBe(false);
     expect(late.code).toBe("TICKET_RUNNER_MISSING");
@@ -429,11 +429,22 @@ describe("plan_tickets", () => {
       expect(plan.groups[1]!.dependsOn).toEqual(["01-t01"]);
     });
 
-    it("does not save when the review is closed", async () => {
+    it("saves a draft when the review is closed with Esc", async () => {
       const { tickets, app } = await atTicketStage();
       const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: [undefined] }).ctx);
-      expect(textOf(result)).toContain("closed the plan review");
-      expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
+      expect(textOf(result)).toContain("Draft saved");
+      const task = app.store.load(app.activeTaskId()!)!;
+      expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
+      expect(task.approvedVersion).toBeUndefined();
+    });
+
+    it("approves inside plan_tickets and freezes the plan", async () => {
+      const { tickets, app } = await atTicketStage();
+      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: ["approve"] }).ctx);
+      expect(textOf(result)).toContain("/build");
+      const task = app.store.load(app.activeTaskId()!)!;
+      expect(task.approvedVersion).toBe(1);
+      expect(existsSync(path.join(app.store.taskDir(task.taskId), "plan.v1.approved.json"))).toBe(true);
     });
   });
 

@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import { renderSpec } from "../src/orchestrator/interview.js";
 import { ticketPrompt } from "../src/orchestrator/prompts.js";
 import type { PlanReviewRequest } from "../src/orchestrator/types.js";
@@ -33,7 +31,7 @@ function ticket(id: string, extra: Record<string, unknown> = {}) {
   return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: "Users can retry a failed ingest.", implementation: "Add retryParse() in src/ingest.ts and call it from ingest().", acceptanceCriteria: ["retry works"], blockedBy: [] as string[], estimatedContextTokens: 40000, ...extra };
 }
 
-/** A workflow with a drafted ticket plan waiting for /approve-plan. */
+/** A workflow with a drafted ticket plan waiting for approval. */
 async function drafted(extras: Parameters<typeof workflow>[1] = {}) {
   const cwd = await tempRepo();
   const turns: string[] = [];
@@ -78,28 +76,41 @@ describe("ticket implementation notes", () => {
   });
 });
 
-describe("/approve-plan review", () => {
+describe("/show-plan on a draft", () => {
   it("shows the full plan and approves only on an explicit approve", async () => {
     const { app } = await drafted();
     const seen: PlanReviewRequest[] = [];
-    app.bind({ review: async (request) => (seen.push(request), { value: "cancel" }) });
-    const declined = await app.approvePlan();
-    expect(declined).toMatchObject({ ok: false, code: "NOT_APPROVED" });
+    app.bind({ review: async (request) => (seen.push(request), { value: "close" }) });
+    const closed = await app.showPlan();
+    expect(closed.ok).toBe(true);
+    expect(closed.text).toContain("/show-plan to approve later");
     expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBeUndefined();
     expect(seen[0]!.markdown).toContain("## Approach");
     expect(seen[0]!.markdown).toContain("### 02: Ticket 02");
     expect(seen[0]!.markdown).toContain("## Execution order\n\n1. 01\n2. 02");
-    expect(seen[0]!.actions.map((action) => action.value)).toEqual(["approve", "revise", "cancel"]);
+    expect(seen[0]!.actions.map((action) => action.value)).toEqual(["approve", "revise", "close"]);
     app.bind({ review: async () => ({ value: "approve" }) });
-    const approved = await app.approvePlan();
+    const approved = await app.showPlan();
     expect(approved.ok, approved.text).toBe(true);
-    expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBe(1);
+    expect(approved.text).toBe("Approved plan v1. Run /build.");
+    const task = app.store.load(app.activeTaskId()!)!;
+    expect(task.approvedVersion).toBe(1);
+    expect(existsSync(path.join(app.store.taskDir(task.taskId), "plan.v1.approved.json"))).toBe(true);
+  });
+
+  it("does not open the review for an approved plan", async () => {
+    const { app } = await drafted();
+    expect((await app.approveDraft()).ok).toBe(true);
+    let opened = false;
+    app.bind({ review: async () => ((opened = true), { value: "close" }), show: () => undefined });
+    expect((await app.showPlan()).text).toContain("approved");
+    expect(opened).toBe(false);
   });
 
   it("sends the plan back for changes and drafts it again without new interview questions", async () => {
     const { app, turns } = await drafted();
     app.bind({ startTurn: (text) => void turns.push(text), review: async () => ({ value: "revise", text: "Merge the two tickets" }) });
-    const sent = await app.approvePlan();
+    const sent = await app.showPlan();
     expect(sent.ok, sent.text).toBe(true);
     const task = app.store.load(app.activeTaskId()!)!;
     expect(task.phase).toBe("PLANNING");
@@ -116,21 +127,19 @@ describe("/approve-plan review", () => {
     expect(redrafted.plan!.tickets).toHaveLength(1);
   });
 
-  it("records approval even when the session handoff fails", async () => {
-    const { app } = await drafted({ session: { reset: async () => Promise.reject(new Error("stale ctx")) } });
-    const result = await app.approvePlan();
-    expect(result.ok).toBe(false);
-    expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBe(1);
+  it("approveDraft refuses when there is no draft", async () => {
+    const app = workflow(await tempRepo(), { startTurn: () => undefined });
+    expect((await app.approveDraft()).ok).toBe(false);
   });
 
-  it("shows the plan on demand", async () => {
+  it("prints the plan without a UI", async () => {
     const { app } = await drafted();
     const headlessResult = await app.showPlan();
     expect(headlessResult.text).toContain("# Plan v1");
     const shown: string[] = [];
     app.bind({ show: (markdown) => void shown.push(markdown) });
     const result = await app.showPlan();
-    expect(result.text).toContain("waiting for /approve-plan");
+    expect(result.text).toContain("is shown above");
     expect(shown[0]).toBe(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8"));
   });
 });
@@ -168,56 +177,6 @@ describe("plan review dialog", () => {
   });
 });
 
-describe("command handler after a session replacement", () => {
-  it("reports through the new session's ctx and never touches the stale ctx or pi", async () => {
-    const { app, cwd } = await drafted();
-    let stale = false;
-    const guard = <T extends (...args: never[]) => unknown>(fn: T) => ((...args: never[]) => {
-      if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
-      return fn(...args);
-    }) as T;
-    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
-    const pi = {
-      registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => void commands.set(name, options),
-      on: () => () => undefined,
-      appendEntry: guard(() => undefined),
-      registerVirtualModel() {},
-      getActiveTools: guard(() => [] as string[]),
-      setActiveTools: guard(() => undefined),
-      sendUserMessage: guard(() => undefined),
-    };
-    registerWorkflow(pi as unknown as ExtensionAPI);
-    bindWorkflow(app);
-    const notices: string[] = [];
-    const sent: unknown[] = [];
-    const next = {
-      cwd,
-      hasUI: true,
-      ui: { notify: (message: string) => void notices.push(message), setStatus() {}, confirm: async () => true, custom: async () => "approve" },
-      newSession: async () => ({ cancelled: false }),
-      compact() {},
-      sendMessage: async (message: unknown) => void sent.push(message),
-      sendUserMessage: async () => undefined,
-    };
-    const old = {
-      cwd,
-      hasUI: true,
-      ui: { notify: guard(() => undefined), setStatus: guard(() => undefined), confirm: guard(async () => true), custom: guard(async () => "approve") },
-      newSession: async (options?: { withSession?: (ctx: unknown) => Promise<void> }) => {
-        stale = true;
-        await options?.withSession?.(next);
-        return { cancelled: false };
-      },
-      compact() {},
-    };
-    await expect(commands.get("approve-plan")!.handler("", old)).resolves.toBeUndefined();
-    expect(notices.join("\n")).toContain("Approved plan v1");
-    expect(sent).toMatchObject([{ customType: "cost-handoff" }]);
-    expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBe(1);
-    bindWorkflow(undefined);
-  });
-});
-
 describe("/implement git preflight", () => {
   it("refuses a folder that is not a repository, or a repository with no commit", async () => {
     const { mkdtempSync } = await import("node:fs");
@@ -234,57 +193,12 @@ describe("/implement git preflight", () => {
 
   it("stops /implement with a clear message and leaves the task approved", async () => {
     const { app } = await drafted();
-    expect((await app.approvePlan()).ok).toBe(true);
+    expect((await app.approveDraft()).ok).toBe(true);
     (app.git as { preflight: () => Promise<string | undefined> }).preflight = async () => "not a git repository";
     const result = await app.implement();
     expect(result).toMatchObject({ ok: false, code: "GIT_NOT_READY" });
     const task = app.store.load(app.activeTaskId()!)!;
     expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
     expect(task.approvedVersion).toBe(1);
-  });
-});
-
-describe("model after a handoff", () => {
-  function sessionPi() {
-    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-    const selected: unknown[] = [];
-    const pi = {
-      registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => void commands.set(name, options),
-      on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => (handlers.set(event, handler), () => undefined),
-      appendEntry() {},
-      registerVirtualModel() {},
-      setModel: async (model: unknown) => (selected.push(model), true),
-    };
-    registerWorkflow(pi as unknown as ExtensionAPI);
-    return { commands, handlers, selected };
-  }
-
-  it("puts cost-opt/auto back when the new session starts on another model", async () => {
-    const { app, cwd } = await drafted();
-    const { commands, handlers, selected } = sessionPi();
-    bindWorkflow(app);
-    const auto = { provider: "cost-opt", id: "auto" };
-    const ui = { notify() {}, setStatus() {}, confirm: async () => true, custom: async () => "approve" };
-    const next = { cwd, hasUI: true, ui, model: { provider: "openai", id: "gpt-5.4" }, modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) }, sessionManager: { getEntries: () => [] }, sendMessage: async () => undefined };
-    const old = {
-      cwd,
-      hasUI: true,
-      ui,
-      model: auto,
-      compact() {},
-      newSession: async (options?: { withSession?: (ctx: unknown) => Promise<void> }) => {
-        // Pi fires session_start for the new session before withSession runs.
-        handlers.get("session_start")!({ type: "session_start", reason: "new" }, next);
-        await options?.withSession?.(next);
-        return { cancelled: false };
-      },
-    };
-    await commands.get("approve-plan")!.handler("", old);
-    expect(selected).toEqual([auto]);
-    // The hint is used once: a later session start leaves the model alone.
-    handlers.get("session_start")!({ type: "session_start", reason: "new" }, next);
-    expect(selected).toHaveLength(1);
-    bindWorkflow(undefined);
   });
 });

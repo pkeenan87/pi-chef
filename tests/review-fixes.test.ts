@@ -237,7 +237,7 @@ describe("O6 re-planning after review", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     expect((await app.review()).ok).toBe(true);
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PUBLISH_APPROVAL");
@@ -252,7 +252,7 @@ describe("O6 re-planning after review", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     await app.implement();
     await app.review();
     await app.store.update(app.activeTaskId()!, "pause", (task) => move(task, "PAUSED", "2026-10-14T12:00:00.000Z", "paused"));
@@ -277,7 +277,7 @@ describe("O7 publish survives a handoff failure", () => {
       },
     });
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     await app.implement();
     await app.review();
     const pushed = await app.push();
@@ -427,7 +427,7 @@ describe("R1 circuit breaker escalation", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     const task = app.store.load(app.activeTaskId()!)!;
     const type = task.classification!.task_type;
     // the cheap tier has failed repeatedly for this task type; standard is healthy

@@ -21,7 +21,6 @@ export const COMMANDS: CommandSpec[] = [
     complete: (prefix) => completeWords(prefix, ["--no-questions"]),
   },
   { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets).", complete: () => [] },
-  { name: "approve-plan", run: (w) => w.approvePlan(), description: "Review the full plan, then approve it (freezes an immutable version) or request changes.", complete: () => [] },
   { name: "implement", run: (w) => w.implement(), description: "Run an approved plan in isolated worktrees. Refuses a draft.", complete: () => [] },
   { name: "review", run: (w) => w.review(), description: "Review each worktree and the integrated diff in a fresh context.", complete: () => [] },
   { name: "push", run: (w) => w.push(), description: "After checks and approval, push the integration branch and open or update one PR.", complete: () => [] },

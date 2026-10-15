@@ -336,7 +336,7 @@ async function ticketTask(options: { tickets: Ticket[]; script?: (call: SpawnCal
   expect((await app.startPlan("Add retry to the Neo ingest parser")).ok).toBe(true);
   await app.savePlanSpec(specParams);
   await app.commitTickets(options.tickets);
-  expect((await app.approvePlan()).ok).toBe(true);
+  expect((await app.approveDraft()).ok).toBe(true);
   const taskId = app.activeTaskId()!;
   const ticketFile = (item: Ticket) => readFileSync(path.join(app.store.taskDir(taskId), "tickets", `${item.id}-${item.slug}.md`), "utf8");
   return { cwd, app, calls, events, statuses, notices, progress, reports, taskId, ticketFile, peak: () => {
@@ -668,7 +668,7 @@ describe("/implement with tickets", () => {
     expect((await t.app.startPlan("Add retry to the Neo ingest parser")).ok).toBe(true);
     await t.app.savePlanSpec(specParams);
     await t.app.commitTickets([ticket("01"), ticket("02", { blockedBy: ["01"], whatToBuild: "Build part 02 with a backoff cap." })]);
-    expect((await t.app.approvePlan()).ok).toBe(true);
+    expect((await t.app.approveDraft()).ok).toBe(true);
     const again = await t.app.implement();
     expect(again.ok, again.text).toBe(true);
     expect(t.calls).toHaveLength(3);
@@ -686,7 +686,7 @@ describe("/implement with tickets", () => {
     await app.startPlan("Add retry to the Neo ingest parser");
     await app.savePlanSpec(specParams);
     await app.commitTickets([ticket("01")]);
-    await app.approvePlan();
+    await app.approveDraft();
     expect(await app.implement()).toMatchObject({ ok: false, code: "TICKET_RUNNER_MISSING" });
   });
 });

@@ -38,7 +38,7 @@ The spec is saved. Break the work into tickets and call plan_tickets once.
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
 - suggestedTier is optional: deterministic, cheap, standard or premium.
 - checks is optional: shell command lines the parent runs in the worktree after the ticket (one command per entry, no prose). Destructive commands are refused. Verification steps that are not a command belong in implementation.
-plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves with /approve-plan. Do not implement anything.`;
+plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves on the review screen (or later with /show-plan) and then runs /build. Do not implement anything.`;
 
 /** Appended to the system prompt of a ticket child process. */
 export const TICKET_WORKER_RULES = `[TICKET WORKER]

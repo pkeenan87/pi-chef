@@ -70,9 +70,10 @@ export const PlanTicketsParams = Type.Object({
 });
 
 const REVIEW_ACTIONS: PlanReviewAction[] = [
-  { value: "save", label: "Save for /approve-plan" },
+  { value: "approve", label: "Approve plan" },
   { value: "revise", label: "Request changes", input: "What should change in the plan? (spec or tickets)" },
   { value: "edit", label: "Edit tickets" },
+  { value: "save", label: "Save as draft" },
 ];
 
 export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
@@ -80,7 +81,7 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
     name: "plan_tickets",
     label: "Plan Tickets",
     description:
-      "Submit the tickets (vertical, independently testable slices, each within one context window, each with technical implementation steps) for the saved spec. The tool validates them, shows the user the full plan for review, writes the ticket files, and drafts the plan for /approve-plan. Only usable after plan_spec.",
+      "Submit the tickets (vertical, independently testable slices, each within one context window, each with technical implementation steps) for the saved spec. The tool validates them, shows the user the full plan for review, writes the ticket files, and saves the plan as a draft, or approves it when the user chooses Approve. Only usable after plan_spec.",
     promptSnippet: "plan_tickets: submit the vertical-slice tickets for the spec",
     parameters: PlanTicketsParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -91,12 +92,17 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       if (check.errors.length) throw new Error(`Tickets rejected. Fix these and call plan_tickets again:\n- ${check.errors.join("\n- ")}`);
       let tickets: Ticket[] = check.tickets;
       let edited = false;
+      let approve = false;
       if (ctx.hasUI) {
         // The person sees the whole plan (spec and tickets) before anything is saved.
         for (;;) {
           const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets), actions: REVIEW_ACTIONS });
-          if (!choice) return text("The user closed the plan review. The tickets were not saved. Ask how they want to proceed.");
-          if (choice.value === "save") break;
+          // Closing the review (Esc) keeps the work: it saves the draft like "Save as draft".
+          if (!choice || choice.value === "save") break;
+          if (choice.value === "approve") {
+            approve = true;
+            break;
+          }
           if (choice.value === "revise") {
             return text(
               `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_tickets with the full revised ticket list.`,
@@ -114,10 +120,17 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
         }
       }
       const { plan, files, markdown } = await workflow.commitTickets(tickets);
-      // Also kept in the transcript (posted when this turn ends), so the plan stays visible for /approve-plan.
+      // Also kept in the transcript (posted when this turn ends), so the plan stays visible.
       workflow.showMarkdown(markdown);
-      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and is shown to the user in full: they must run /approve-plan before /implement.${edited ? " The user edited the tickets before saving." : ""} End your turn with a two-line summary; do not repeat the plan and do not implement anything.`;
-      return text(summary, { tickets, files, version: plan.version });
+      const editNote = edited ? " The user edited the tickets before saving." : "";
+      const ending = "End your turn with a two-line summary; do not repeat the plan and do not implement anything.";
+      if (approve) {
+        const approved = await workflow.approveDraft();
+        if (!approved.ok) throw new Error(`The tickets were saved but approval failed: ${approved.text}`);
+        return text(`${tickets.length} tickets written (${files.length} files). The user approved plan v${plan.version}; they run /build next.${editNote} ${ending}`, { tickets, files, version: plan.version, approved: true });
+      }
+      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and was shown to the user in full. Draft saved; the user can /show-plan to approve it later.${editNote} ${ending}`;
+      return text(summary, { tickets, files, version: plan.version, approved: false });
     },
   });
 }

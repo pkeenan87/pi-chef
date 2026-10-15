@@ -142,7 +142,7 @@ export async function publishedWorkflow(extras: Partial<WorkflowOptions> = {}, g
   const cwd = await tempRepo();
   const app = workflow(cwd, { github, ...extras });
   await app.plan(singleTaskRequest);
-  await app.approvePlan();
+  await app.approveDraft();
   if (!(await app.implement()).ok) throw new Error("implement failed in fixture");
   if (!(await app.review()).ok) throw new Error("review failed in fixture");
   const pushed = await app.push();

@@ -55,7 +55,7 @@ export function previewPlan(ctx: WorkflowContext, tickets: Ticket[]): string {
 
 /**
  * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
- * Plan approval is still required before /implement.
+ * Plan approval is still required before /build.
  */
 export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<{ plan: PlanDocument; files: string[]; markdown: string }> {
   requireTicketStage(ctx);
@@ -75,6 +75,6 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Pr
     await announce(ctx, task.taskId, "plan", routing);
   }
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
-  ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for /approve-plan`);
+  ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
   return { plan: draft, files, markdown };
 }

@@ -274,7 +274,7 @@ export interface PlanningProgress {
   stage: "interview" | "tickets";
   /** True when /plan --no-questions skipped the interview. */
   noQuestions: boolean;
-  /** The person's requested changes when a drafted plan was sent back from /approve-plan. */
+  /** The person's requested changes when a drafted plan was sent back from the plan review. */
   revision?: string;
 }
 

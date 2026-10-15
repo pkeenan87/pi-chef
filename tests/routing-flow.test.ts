@@ -61,7 +61,7 @@ describe("deterministic tier", () => {
     const statuses: string[] = [];
     const app = workflow(cwd, { config: tieredConfig(), auth: authWith(), chat, status: (text) => text && statuses.push(text) });
     await app.plan(emptyGroupPlan);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok, result.text).toBe(true);
     expect(calls).toHaveLength(1);
@@ -82,7 +82,7 @@ describe("deterministic tier", () => {
     const { chat } = fakeChat(() => JSON.stringify({ edits: [{ path: "src/other.ts", content: "x" }] }));
     const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat });
     await app.plan(emptyGroupPlan);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok).toBe(false);
     expect(app.store.readMetrics().mechanical?.["model:deterministic:local/qwen2.5-coder:7b"]).toMatchObject({ success: 0, failure: 1 });
@@ -92,7 +92,7 @@ describe("deterministic tier", () => {
     const { chat, calls } = fakeChat(() => "{}");
     const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat });
     await app.plan(literalPlan);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     expect(calls).toHaveLength(0);
   });
@@ -269,7 +269,7 @@ describe("advisor", () => {
         rng: seededRng(6),
       });
       await app.plan(literalPlan);
-      await app.approvePlan();
+      await app.approveDraft();
       const result = await app.implement();
       return { result, notes };
     };
@@ -286,7 +286,7 @@ describe("tier selection during implement", () => {
     const config = tieredConfig("orgProviderAllowlist: [vercel]\nrouting: { maxTier: standard }\n");
     const app = workflow(await tempRepo(), { config, auth: authWith() });
     await app.plan(`add a feature\n${fence}tasks\n[{"id":"a","files":["src/a.ts"],"edits":[{"path":"src/a.ts","content":"export {};\\n"}]}]\n${fence}`);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result).toMatchObject({ ok: false, code: "NO_CANDIDATE" });
     expect((await app.status()).text).toContain("BLOCKED");

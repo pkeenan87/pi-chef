@@ -113,7 +113,7 @@ describe("state carried into a new plan version", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     expect((await app.plan(tasksRequest)).ok).toBe(true);
-    expect((await app.approvePlan()).ok).toBe(true);
+    expect((await app.approveDraft()).ok).toBe(true);
     expect((await app.implement()).ok).toBe(true);
     const taskId = app.activeTaskId()!;
     const before = app.store.load(taskId)!;
@@ -140,7 +140,7 @@ describe("state carried into a new plan version", () => {
     expect(existsSync(orphanDir)).toBe(false);
     expect(app.store.load(taskId)!.worktrees.map((item) => item.groupId)).toEqual(["ingest"]);
     // The next run rebuilds the integration branch from the base with the live branch only.
-    expect((await app.approvePlan()).ok).toBe(true);
+    expect((await app.approveDraft()).ok).toBe(true);
     const again = await app.implement();
     expect(again.ok, again.text).toBe(true);
     const log = await git.git(["log", "--format=%s", `cost/${taskId}/integration`]);
@@ -176,7 +176,7 @@ describe("phantom spend", () => {
     };
     const app = workflow(cwd, { git });
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok).toBe(false);
     const record = app.store.readLedger().find((item) => item.reason.includes("not a git repository"));
@@ -227,7 +227,7 @@ describe("model review", () => {
     const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: "high", category: "correctness", file: "src/ingest.ts", message: "ingest() throws on empty input but the plan asks for a skip.", evidence: 'throw new Error("empty")' }]));
     const app = workflow(await tempRepo(), { config: tieredConfig(), chat });
     await app.plan(tasksRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok, review.text).toBe(true);
@@ -253,7 +253,7 @@ describe("model review", () => {
     const off = fakeChat(() => "[]");
     const quiet = workflow(await tempRepo(), { config: tieredConfig("review: { model: false }"), chat: off.chat });
     await quiet.plan(tasksRequest);
-    await quiet.approvePlan();
+    await quiet.approveDraft();
     expect((await quiet.implement()).ok).toBe(true);
     const silent = await quiet.review();
     expect(silent.ok).toBe(true);
@@ -265,7 +265,7 @@ describe("model review", () => {
     };
     const app = workflow(await tempRepo(), { config: tieredConfig(), chat: broken });
     await app.plan(tasksRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok).toBe(true);
@@ -280,7 +280,7 @@ describe("model review", () => {
       runner: checkRunner(async (command, args, cwd) => (ran.push(`${[command, ...args].join(" ")} @ ${path.basename(cwd)}`), { code: 0, stdout: "ok", stderr: "" })),
     });
     await app.plan(tasksRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok, review.text).toBe(true);
@@ -292,7 +292,7 @@ describe("model review", () => {
       runner: checkRunner(async (command, args) => (args[0] === "ci" ? { code: 1, stdout: "", stderr: "ERESOLVE" } : { code: 0, stdout: "ok", stderr: "" })),
     });
     await brokenInstall.plan(tasksRequest);
-    await brokenInstall.approvePlan();
+    await brokenInstall.approveDraft();
     expect((await brokenInstall.implement()).ok).toBe(true);
     const noInstall = await brokenInstall.review();
     expect(noInstall.ok).toBe(false);
@@ -305,7 +305,7 @@ describe("model review", () => {
       runner: checkRunner(async (_command, _args, cwd) => (path.basename(cwd) === "integration" ? { code: 127, stdout: "", stderr: "sh: tsc: command not found" } : { code: 0, stdout: "ok", stderr: "" })),
     });
     await bare.plan(tasksRequest);
-    await bare.approvePlan();
+    await bare.approveDraft();
     expect((await bare.implement()).ok).toBe(true);
     const failed = await bare.review();
     expect(failed.ok).toBe(false);
@@ -343,7 +343,7 @@ describe("verbose output", () => {
     const config = tieredConfig("review: { maxDiffChars: 2000, maxChunks: 2 }");
     const app = workflow(await tempRepo(), { config, chat, progress: (line) => void progress.push(line) });
     await app.plan(tasksRequest.replace('"content":"export function ingest', `"content":"${"// padding line that makes this file's diff long\\n".repeat(80)}export function ingest`));
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok, review.text).toBe(true);
@@ -372,7 +372,7 @@ describe("verbose output", () => {
       });
     const app = workflow(await tempRepo(), { config: tieredConfig("review: { timeoutMs: 1000 }"), chat });
     await app.plan(tasksRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok).toBe(true);

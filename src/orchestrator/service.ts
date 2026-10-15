@@ -16,7 +16,7 @@ import { cachingRunner, defaultRunner } from "./exec.js";
 import { implement } from "./implementation.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
-import { approvePlan, classify, plan, route, showPlan } from "./planning.js";
+import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
 import { Poller } from "./poller.js";
 import { complete, push, review } from "./publish.js";
 import { auth, cost, resetPhase, status } from "./reports.js";
@@ -223,8 +223,9 @@ export class Workflow {
     return previewPlan(this.ctx, tickets);
   }
 
-  approvePlan(): Promise<CommandResult> {
-    return approvePlan(this.ctx);
+  /** Approves the active draft: freezes plan.vN.approved.json. The choice was made on a review screen. */
+  approveDraft(): Promise<CommandResult> {
+    return approveDraft(this.ctx);
   }
 
   /** Posts markdown as a displayed chat message, when a Pi session is bound. */

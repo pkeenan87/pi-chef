@@ -27,14 +27,14 @@ describe("workflow", () => {
     expect(refused.ok).toBe(false);
     expect(refused.code).toBe("APPROVAL_REQUIRED");
     expect(refused.text).toMatch(/draft/);
-    const approved = await app.approvePlan();
+    const approved = await app.approveDraft();
     expect(approved.ok).toBe(true);
-    expect(approved.text).toContain("new-session");
+    expect(approved.text).toContain("Run /build");
     const frozen = path.join(cwd, ".pi-workflows", "tasks");
     const taskDir = readdirSync(frozen)[0]!;
     const approvedFile = path.join(frozen, taskDir, "plan.v1.approved.json");
     const first = readFileSync(approvedFile, "utf8");
-    expect((await app.approvePlan()).text).toMatch(/already approved/);
+    expect((await app.approveDraft()).text).toMatch(/already approved/);
     expect(readFileSync(approvedFile, "utf8")).toBe(first);
 
     const implemented = await app.implement();
@@ -62,7 +62,7 @@ describe("workflow", () => {
       auth: { async inspect(provider) { return { provider, status: "expired", method: "oauth", detail: "Account session expired." }; } },
     });
     await expired.plan("Add a retry counter to the Neo ingest parser");
-    await expired.approvePlan();
+    await expired.approveDraft();
     const result = await expired.implement();
     expect(result.code).toBe("AUTH_EXPIRED");
     const status = await expired.status();
@@ -80,7 +80,7 @@ describe("workflow", () => {
       }),
     });
     await app.plan(tasksRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const review = await app.review();
     expect(review.ok).toBe(false);
@@ -177,7 +177,7 @@ describe("workflow", () => {
       }),
     });
     await app.plan(readmePlan);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok).toBe(true);
     expect(attempts).toBeGreaterThan(1);
@@ -197,7 +197,7 @@ describe("workflow", () => {
       }),
     });
     await app.plan(readmePlan);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok).toBe(false);
     expect(result.code).toBe("FAILED");
@@ -212,7 +212,7 @@ describe("workflow", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd, { confirm: async () => false });
     await app.plan("change auth and permissions for Neo production secrets");
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.code).toBe("SECURITY_PAUSE");
     expect((await app.status()).text).toContain("PAUSED");
@@ -348,7 +348,7 @@ describe("implementation robustness", () => {
     const cwd = await tempRepo();
     const blocked = workflow(cwd, { auth: readyAuth("missing") });
     await blocked.plan(singleTaskRequest);
-    await blocked.approvePlan();
+    await blocked.approveDraft();
     const first = await blocked.implement();
     expect(first.code).toBe("AUTH_MISSING");
     expect((await blocked.status()).text).toContain("BLOCKED");
@@ -372,7 +372,7 @@ describe("implementation robustness", () => {
     };
     const app = workflow(cwd, { git });
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.ok).toBe(false);
     expect(result.text).toContain("disk exploded");
@@ -399,7 +399,7 @@ describe("implementation robustness", () => {
       runner: checkRunner(async () => ({ code: 1, stdout: "", stderr: "nope" })),
     });
     await app.plan(readmePlan);
-    await app.approvePlan();
+    await app.approveDraft();
     const result = await app.implement();
     expect(result.code).toBe("BUDGET");
     expect(calls).toBe(1);
@@ -414,7 +414,7 @@ describe("implementation robustness", () => {
     config.budgets.taskUsd = 1;
     const app = workflow(cwd, { config, notify: (message) => messages.push(message), confirm: async () => (prompts += 1, true) });
     await app.plan("change auth and permissions for Neo production secrets");
-    await app.approvePlan();
+    await app.approveDraft();
     const id = app.activeTaskId()!;
     const spend = (actualUsd: number) =>
       app.store.appendLedger({
@@ -437,7 +437,7 @@ describe("implementation robustness", () => {
     git.removeWorktree = async () => ({ ok: false, worktreeRemoved: false, branchDeleted: false, error: "worktree is locked" });
     const app = workflow(cwd, { git });
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const result = await app.worktrees("cleanup", true);
     expect(result.code).toBe("CLEANUP_FAILED");
@@ -450,7 +450,7 @@ describe("implementation robustness", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     const dir = path.join(cwd, ".pi-workflows", "tasks", app.activeTaskId()!);
     const events = path.join(dir, "events.jsonl");
     writeFileSync(events, `${readFileSync(events, "utf8").replace(/\n$/, "")}\nnot json\n{"seq":99}\n`);
@@ -467,7 +467,7 @@ describe("implementation robustness", () => {
       {"id":"c","files":["src/c.ts"],"dependsOn":["a","b"],"edits":[${edit("src/c.ts")}]}
     ]\n\`\`\``;
     expect((await app.plan(request)).ok).toBe(true);
-    await app.approvePlan();
+    await app.approveDraft();
     expect((await app.implement()).ok).toBe(true);
     const state = (await app.status()).data as { state: { worktrees: { groupId: string; path: string }[] } };
     const c = state.state.worktrees.find((item) => item.groupId === "c")!;
@@ -484,7 +484,7 @@ describe("implementation robustness", () => {
     let runs = 0;
     const app = workflow(cwd, { runner: checkRunner(async () => (runs += 1, { code: 0, stdout: "ok", stderr: "" })) });
     await app.plan(singleTaskRequest);
-    await app.approvePlan();
+    await app.approveDraft();
     await app.implement();
     const afterImplement = runs;
     expect(afterImplement).toBe(1);

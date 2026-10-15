@@ -431,11 +431,11 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
 
 /**
  * Sends a drafted plan back to planning with the person's requested changes. The model rewrites the spec and
- * tickets (no new interview questions), and the plan returns to /approve-plan. Plan approval stays required.
+ * tickets (no new interview questions), and the plan returns for approval. Plan approval stays required.
  */
 export async function requestPlanChanges(ctx: WorkflowContext, task: TaskState, feedback: string): Promise<CommandResult> {
   const text = redact(feedback.trim());
-  if (!text) return fail("USAGE", "Describe the changes you want, then run /approve-plan again.");
+  if (!text) return fail("USAGE", "Describe the changes you want, then run /show-plan again.");
   if (!readInterview(ctx, task.taskId)) return fail("NO_INTERVIEW", "This plan was not drafted by the /plan interview. Run /plan again with the changes in the request.");
   if (!ctx.startTurn) return fail("NO_SESSION", "Revising the plan needs a Pi session.");
   const at = iso(ctx);
@@ -446,5 +446,5 @@ export async function requestPlanChanges(ctx: WorkflowContext, task: TaskState, 
   }));
   showStatus(ctx);
   ctx.startTurn(`Revise the plan with these changes:\n\n${text}`);
-  return done("Sent the plan back for changes. The revised plan will be shown for /approve-plan again.", { taskId: task.taskId });
+  return done("Sent the plan back for changes. The revised plan will be shown for review again.", { taskId: task.taskId });
 }
