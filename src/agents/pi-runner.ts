@@ -16,6 +16,8 @@ export const CHILD_ROOT_ENV = "PI_COST_ROUTER_ROOT";
 /**
  * Flags were verified against the installed pi 1.2.0 `--help`: `--mode json`, `-p`, `--no-session`, `--model provider/id`,
  * `--tools`, `--thinking`, `-ne/--no-extensions` with an explicit `-e`, `--append-system-prompt <text|file>`, and `@file` prompts.
+ * `--no-approve` ("ignore project-local files") was verified live on 2026-10-15: without it a project whose .pi/settings.json
+ * lists a git package made the child clone it at startup and exit 1 under the no-credential git config; with it the child ran.
  * Child mode was verified to load and register `local/qwen2.5-coder:7b` via `pi -ne -e ./src/extension.ts --list-models`.
  * The JSON event names are not verified live.
  */
@@ -124,6 +126,11 @@ export interface TicketRunResult {
   truncated?: boolean;
   /** Last assistant stopReason "error" message, redacted, when there was one. */
   error?: string;
+  /**
+   * False when the child exited before any model request started (for example while Pi was loading). Nothing can
+   * have been billed then, and the failure says nothing about the model.
+   */
+  modelCalled?: boolean;
 }
 
 export type TicketRunner = (input: Omit<TicketRunInput, "spawn">) => Promise<TicketRunResult>;
@@ -205,6 +212,9 @@ export function childArgs(input: Pick<TicketRunInput, "model" | "thinking" | "to
     "--mode", "json",
     "-p",
     "--no-session",
+    // Project-local Pi files (.pi/settings.json packages, extensions, skills) are not loaded: the worktree is model-written,
+    // and a listed git package would make Pi clone it at startup, which fails under the child's no-credential git config.
+    "--no-approve",
     "--model", `${input.model.provider}/${input.model.id}`,
     ...(input.thinking ? ["--thinking", input.thinking] : []),
     "--tools", input.tools.join(","),
@@ -254,6 +264,7 @@ function supervise(input: TicketRunInput, command: string, args: string[], env: 
   let compactions = 0;
   let finalText = "";
   let lastStop: { reason?: string; error?: string } = {};
+  let modelCalled = false;
   let stderr = "";
   let buffer = "";
   let timedOut = false;
@@ -284,6 +295,7 @@ function supervise(input: TicketRunInput, command: string, args: string[], env: 
   };
 
   const handle = (event: Record<string, unknown>) => {
+    if ((event.type === "message_start" || event.type === "message_end") && (event.message as { role?: unknown } | undefined)?.role === "assistant") modelCalled = true;
     if (event.type === "tool_execution_start" && typeof event.toolName === "string") {
       emit({ kind: "tool", name: event.toolName });
     } else if (event.type === "compaction_end" && event.result && !event.aborted) {
@@ -428,6 +440,7 @@ function supervise(input: TicketRunInput, command: string, args: string[], env: 
       timedOut,
       aborted,
       stderrTail: redact(stderr.slice(-STDERR_TAIL_CHARS)),
+      modelCalled,
       ...(truncated ? { truncated: true } : {}),
       ...(message ? { error: message } : {}),
     };

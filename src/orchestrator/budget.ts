@@ -150,14 +150,18 @@ export function recordWebSearch(ctx: WorkflowContext, input: { provider: string;
 export function recordTicketUsage(
   ctx: WorkflowContext,
   state: TaskState,
-  input: { tier: string; provider: string; model: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number | null; turns: number }; outcome: CostRecord["outcome"]; retries: number; reason: string },
+  input: { tier: string; provider: string; model: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number | null; turns: number }; outcome: CostRecord["outcome"]; retries: number; reason: string; noModelCall?: boolean },
 ): CostRecord {
-  const reported = input.usage.turns > 0;
+  // A child that never started a model request reported zero usage, and that zero is known.
+  const reported = input.usage.turns > 0 || input.noModelCall === true;
   const usage: TokenUsage = reported
     ? { input: input.usage.input, output: input.usage.output, cacheRead: input.usage.cacheRead, cacheWrite: input.usage.cacheWrite, requests: input.usage.turns }
     : { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 };
   const entry = buildCostRecord({ provider: input.provider, model: input.model, phase: state.phase, taskId: state.taskId, tier: input.tier, usage, outcome: input.outcome, retries: input.retries, reason: input.reason, estimatedUsd: state.routing?.estimatedUsd ?? null }, ctx.config.pricing, ctx.now(), ctx.id());
-  if (reported && input.usage.costUsd !== null && input.usage.costUsd > 0) {
+  if (input.noModelCall === true && input.usage.turns === 0) {
+    entry.actualUsd = 0;
+    entry.usageKnown = true;
+  } else if (reported && input.usage.costUsd !== null && input.usage.costUsd > 0) {
     entry.actualUsd = fromMicroUsd(toMicroUsd(input.usage.costUsd));
     entry.usageKnown = true;
   }

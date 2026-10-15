@@ -138,7 +138,7 @@ describe("runTicketInChild", () => {
     expect(call.command).toBe("pi");
     expect(call.cwd).toBe("/work/tree-01");
     const { args } = call;
-    expect(args.slice(0, 6)).toEqual(["--mode", "json", "-p", "--no-session", "--model", "anthropic/claude-sonnet-5-5"]);
+    expect(args.slice(0, 7)).toEqual(["--mode", "json", "-p", "--no-session", "--no-approve", "--model", "anthropic/claude-sonnet-5-5"]);
     expect(args).toContain("--thinking");
     expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,edit,write,grep,find,ls,web_search,web_fetch");
     expect(args.indexOf("--no-extensions")).toBeGreaterThan(-1);
@@ -330,8 +330,8 @@ describe("/implement with tickets", () => {
     expect(t.calls[0]!.prompt).toContain("Rule: tests live in tests/.");
     // argv, env, and the model map to a configured candidate.
     for (const call of t.calls) {
-      expect(call.args.slice(0, 5)).toEqual(["--mode", "json", "-p", "--no-session", "--model"]);
-      expect(call.args[5]).toMatch(/^(openai\/gpt-6-luna|anthropic\/claude-haiku-5-5)$/);
+      expect(call.args.slice(0, 6)).toEqual(["--mode", "json", "-p", "--no-session", "--no-approve", "--model"]);
+      expect(call.args[6]).toMatch(/^(openai\/gpt-6-luna|anthropic\/claude-haiku-5-5)$/);
       expect(call.env[CHILD_ENV]).toBe("1");
       expect(call.env[CHILD_TASK_ENV]).toBe(t.taskId);
       expect(call.env[CHILD_ROOT_ENV]).toBe(t.cwd);
@@ -413,8 +413,8 @@ describe("/implement with tickets", () => {
     expect(result.ok, result.text).toBe(true);
     expect(t.calls).toHaveLength(2);
     expect(t.calls[1]!.cwd).toBe(t.calls[0]!.cwd);
-    expect(t.calls[0]!.args[5]).toMatch(/gpt-6-luna|claude-haiku-5-5/);
-    expect(t.calls[1]!.args[5]).toMatch(/claude-sonnet-5-5|grok-4-7/);
+    expect(t.calls[0]!.args[6]).toMatch(/gpt-6-luna|claude-haiku-5-5/);
+    expect(t.calls[1]!.args[6]).toMatch(/claude-sonnet-5-5|grok-4-7/);
     expect(t.calls[1]!.prompt).toContain("Previous attempt failed");
     expect(t.calls[1]!.prompt).toContain("Checks failed");
     const records = ticketLedger(t.app);
@@ -434,6 +434,30 @@ describe("/implement with tickets", () => {
     expect(t.ticketFile(ticket("01"))).toContain("## Status: failed");
     expect(t.notices.some((item) => item.includes("/advisor"))).toBe(true);
     expect(ticketLedger(t.app).every((item) => item.outcome === "failure")).toBe(true);
+  });
+
+  it("reports a child that died while Pi was loading by its error line, with no charge and no strike against the model", async () => {
+    const stderr = [
+      "Cloning into '/w/.pi/git/origin.example.com/pkg'...",
+      "fatal: could not read Username for 'https://origin.example.com': terminal prompts disabled",
+      "Error: git clone https://origin.example.com/pkg /w/.pi/git/origin.example.com/pkg failed with code 128",
+      "    at ChildProcess.<anonymous> (file:///pi/chunk.js:497:12870)",
+      "    at ChildProcess._handle.onexit (node:internal/child_process:294:12)",
+      "",
+      "Node.js v24.14.0",
+    ].join("\n");
+    const t = await ticketTask({ tickets: [ticket("01")], script: () => ({ code: 1, stderr, stdout: [] }) });
+    const result = await t.app.implement();
+    expect(result.ok).toBe(false);
+    const run = t.app.store.load(t.taskId)!.ticketRuns!["01"]!;
+    expect(run.error).toContain("before calling the model");
+    expect(run.error).toContain("fatal: could not read Username");
+    expect(run.error).toContain("git clone");
+    expect(run.error).not.toContain("onexit");
+    const ledger = ticketLedger(t.app);
+    expect(ledger.length).toBeGreaterThan(0);
+    expect(ledger.every((item) => item.actualUsd === 0)).toBe(true);
+    expect(JSON.stringify(t.app.store.readMetrics())).not.toContain('"failure"');
   });
 
   it("stops scheduling new tickets once the budget is hard", async () => {
