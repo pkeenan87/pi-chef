@@ -438,6 +438,8 @@ describe("/build branch and approval", () => {
     // Ticket 01's commit holds its own file, not the earlier changes.
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).not.toMatch(/mine\.txt|other\.txt/);
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).toContain("f.txt");
+    // Workflow state stays out of ticket commits too.
+    expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD")).not.toContain("stray.json");
     expect(t.progress.some((line) => /^Committed changes before \/build: [0-9a-f]{7}$/.test(line))).toBe(true);
   });
 

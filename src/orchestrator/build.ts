@@ -5,7 +5,7 @@ import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision,
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
-import { done, fail, guard, iso, requireActive, transition, type WorkflowContext } from "./context.js";
+import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
@@ -96,9 +96,6 @@ async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
   return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
 }
 
-function workspaceName(ctx: WorkflowContext): string {
-  return ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // startBuild
@@ -273,7 +270,7 @@ type Settled =
 async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, lastText: string, credit: boolean): Promise<Settled> {
   const outcome = await runChecks(ctx, state, ticket);
   if (outcome.verdict !== "pass") return { kind: "failed", verdict: outcome.verdict, detail: failureDetail(outcome.evidence) };
-  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`);
+  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
   if (credit) {
