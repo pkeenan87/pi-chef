@@ -184,72 +184,10 @@ export function commandLine(command: string, args: string[]): string {
   return [command, ...args].join(" ");
 }
 
-const METACHARS = /[;&|`<>\n\r]|\$\(/;
-/** Flags that can run arbitrary code or write files, rejected in wildcard extras for every command. */
-const DANGEROUS_FLAGS = new Set(["--exec", "-e", "--eval", "--require", "-r", "--import", "--loader", "--experimental-loader"]);
-
-/** Returns a reason when an extra arg (supplied under a trailing " *" allowlist entry) is unsafe. */
-function dangerousArg(command: string, tokens: string[], arg: string): string | null {
-  if (METACHARS.test(arg)) return `argument contains shell metacharacters: ${arg}`;
-  const flag = arg.startsWith("-") ? arg.split("=")[0] : arg;
-  if (DANGEROUS_FLAGS.has(flag)) return `argument is not permitted: ${arg}`;
-  const isVitest = tokens.some((token) => baseName(token) === "vitest");
-  if (isVitest && (flag === "--config" || flag === "-c")) return `argument is not permitted for vitest: ${arg}`;
-  if (baseName(command) === "git" && flag === "--output") return `argument is not permitted for git: ${arg}`;
-  return null;
-}
-
-export interface AllowlistEntry {
-  tokens: string[];
-  wildcard: boolean;
-}
-
-export function parseAllowlistEntry(entry: string): AllowlistEntry {
-  const tokens = entry.trim().split(/\s+/).filter(Boolean);
-  const wildcard = tokens.length > 1 && tokens[tokens.length - 1] === "*";
-  return { tokens: wildcard ? tokens.slice(0, -1) : tokens, wildcard };
-}
-
-/**
- * True when allowlist entry `outer` permits everything entry `inner` permits.
- * Used to intersect a project allowlist with a user allowlist.
- */
-export function allowlistEntryCovers(outer: string, inner: string): boolean {
-  const o = parseAllowlistEntry(outer);
-  const i = parseAllowlistEntry(inner);
-  if (i.tokens.length < o.tokens.length) return false;
-  if (!o.tokens.every((token, idx) => i.tokens[idx] === token)) return false;
-  if (i.tokens.length === o.tokens.length) return !i.wildcard || o.wildcard;
-  return o.wildcard;
-}
-
-/**
- * Allowlist semantics: an entry matches the full command line exactly. An entry ending in " *"
- * additionally accepts extra args, which are screened for shell metacharacters and
- * code-execution or file-writing flags.
- */
-export function assertCommandAllowed(command: string, args: string[], allowlist: string[], approved = false): void {
+/** Refuses destructive commands (rm -rf, force push, reset --hard, piping a download into a shell) unless `approved`. Everything else may run. */
+export function assertCommandSafe(command: string, args: string[], approved = false): void {
   const line = commandLine(command, args);
-  const argv = [command, ...args];
-  if (isDeniedCommand(line) || deniedArgv(argv)) {
-    if (!approved) {
-      throw new WorkflowError("COMMAND_DENIED", `Blocked destructive command: ${line}`);
-    }
+  if ((isDeniedCommand(line) || deniedArgv([command, ...args])) && !approved) {
+    throw new WorkflowError("COMMAND_DENIED", `Blocked destructive command: ${line}`);
   }
-  let rejection: string | null = null;
-  for (const raw of allowlist) {
-    const entry = parseAllowlistEntry(raw);
-    if (entry.tokens.length === 0 || argv.length < entry.tokens.length) continue;
-    if (!entry.tokens.every((token, idx) => argv[idx] === token)) continue;
-    if (argv.length === entry.tokens.length) return;
-    if (!entry.wildcard) continue;
-    const extras = argv.slice(entry.tokens.length);
-    const bad = extras.map((arg) => dangerousArg(command, argv, arg)).find((reason) => reason !== null) ?? null;
-    if (bad === null) return;
-    rejection = bad;
-  }
-  if (rejection) {
-    throw new WorkflowError("COMMAND_DENIED", `Command arguments rejected (${rejection}): ${line}`);
-  }
-  throw new WorkflowError("COMMAND_DENIED", `Command is not on the allowlist: ${line}`);
 }

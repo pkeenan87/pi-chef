@@ -108,20 +108,6 @@ autopilot:
 
 checks: []
 
-# Allowlist entries match the full command line exactly. An entry ending in " *"
-# also accepts extra arguments, which are rejected if they contain shell
-# metacharacters or code-execution flags (--config, --output, --exec, -e,
-# --eval, --require, -r, --import, --loader). A project allowlist can only
-# narrow a user-level one (~/.pi/agent/cost-workflow.yaml); it never widens it.
-commandAllowlist:
-  - npm test
-  - npm run typecheck
-  - npm run lint
-  - npx vitest
-  - npx vitest run *
-  - git status
-  - git diff
-
 orgProviderAllowlist: []
 proprietaryCode: false
 

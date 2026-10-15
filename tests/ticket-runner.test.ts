@@ -537,17 +537,17 @@ describe("/implement with tickets", () => {
     expect(after.every((call) => call.cwd.endsWith("02-t02"))).toBe(true);
   });
 
-  it("stops a ticket without escalation or a strike when a plan check is not an allowlisted command", async () => {
-    const t = await ticketTask({ tickets: [ticket("01", { checks: ["Validate all BDK APIs against the current docs."] })] });
+  it("stops a ticket without escalation or a strike when a plan check is destructive", async () => {
+    const t = await ticketTask({ tickets: [ticket("01", { checks: ["rm -rf /"] })] });
     const result = await t.app.implement();
     expect(result).toMatchObject({ ok: false, code: "BLOCKED" });
     expect(result.text).toContain("could not run");
-    expect(result.text).toContain("Validate all BDK APIs");
+    expect(result.text).toContain("rm -rf /");
     // One child only: a pricier model cannot fix the plan.
     expect(t.calls).toHaveLength(1);
     const run = t.app.store.load(t.taskId)!.ticketRuns!["01"]!;
     expect(run).toMatchObject({ status: "failed", attempts: 1 });
-    expect(run.error).toMatch(/not on the command allowlist/);
+    expect(run.error).toMatch(/refused as destructive/);
     expect(t.ticketFile(ticket("01"))).toContain("## Status: failed");
     expect(JSON.stringify(t.app.store.readMetrics())).not.toContain('"failure"');
   });

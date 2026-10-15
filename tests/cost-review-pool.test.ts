@@ -40,7 +40,6 @@ describe("cost, review, and workers", () => {
       integratedDiff: "",
       checks: [{ name: "unit", command: "npm", args: ["test"] }],
       cwd: "/tmp",
-      allowlist: ["npm test"],
       planAcceptance: [],
       runner: { async run() { return { code: 1, stdout: "", stderr: "FAIL injected test" }; } } satisfies CheckRunner,
     });
@@ -54,7 +53,6 @@ describe("cost, review, and workers", () => {
       integratedDiff: "",
       checks: [{ name: "unit", command: "npm", args: ["test"] }],
       cwd: "/tmp",
-      allowlist: ["npm test"],
       planAcceptance: [],
       runner: { async run() { return { code: 0, stdout: "ok", stderr: "" }; } } satisfies CheckRunner,
     });

@@ -1,6 +1,6 @@
 import { redact } from "../redact.js";
 import type { CheckEvidence, Finding, ReviewReport } from "../domain.js";
-import { assertCommandAllowed, commandLine } from "../sandbox.js";
+import { assertCommandSafe, commandLine } from "../sandbox.js";
 
 export interface CheckRunner {
   run(command: string, args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }>;
@@ -48,7 +48,6 @@ export async function reviewDiff(options: {
   onProgress?: (line: string) => void;
   cwd: string;
   runner: CheckRunner;
-  allowlist: string[];
   planAcceptance: string[];
 }): Promise<ReviewReport> {
   const findings: Finding[] = [];
@@ -91,11 +90,11 @@ export async function reviewDiff(options: {
   const checks: CheckEvidence[] = [];
   const runOne = async (check: { name: string; command: string; args: string[] }): Promise<{ evidence: CheckEvidence; finding?: Finding }> => {
     try {
-      assertCommandAllowed(check.command, check.args, options.allowlist);
+      assertCommandSafe(check.command, check.args);
     } catch (error) {
       const message = (error as Error).message;
       const evidence: CheckEvidence = { name: check.name, command: check.command, args: check.args, cwd: options.cwd, exitCode: null, stdout: "", stderr: message, ran: false };
-      const finding: Finding = { severity: "blocking", category: "checks", message: `Check ${check.name} is not allowlisted.`, evidence: message };
+      const finding: Finding = { severity: "blocking", category: "checks", message: `Check ${check.name} was refused.`, evidence: message };
       return { evidence, finding };
     }
     let result: { code: number; stdout: string; stderr: string };

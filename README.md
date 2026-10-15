@@ -192,7 +192,6 @@ npm run typecheck
 
 | Field | Layering rule |
 |---|---|
-| `commandAllowlist` | A project entry is kept only if the user list covers it. With no user list, the built-in defaults are the ceiling. So the result is an intersection, and a project cannot grant itself new commands |
 | `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
 | `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
 | `approvals` | Plan approval stays required, merge stays `manual`, and publish is `auto` only if the user config says so |
@@ -410,7 +409,7 @@ Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This p
 
 ## Sample workflow
 
-Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass, and `/push` then refuses. With `checks: []`, `/review` falls back to the distinct `checks` of the plan's tickets (allowlisted commands, validated at plan time) and runs them on the integration branch; with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
+Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass, and `/push` then refuses. With `checks: []`, `/review` falls back to the distinct `checks` of the plan's tickets (validated at plan time) and runs them on the integration branch; with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
 
 ```yaml
 checks:
@@ -419,7 +418,7 @@ checks:
     args: ["test"]
 ```
 
-The command must also be on `commandAllowlist` (prefix or exact). Destructive commands stay blocked even if someone adds them to the allowlist, unless that call is explicitly approved.
+Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused.
 
 ```text
 /plan Harden Neo ingest: reject empty events. AC: empty input throws
@@ -432,7 +431,7 @@ The command must also be on `commandAllowlist` (prefix or exact). Destructive co
 /autopilot stop
 ```
 
-`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, allowlisted bash, `web_search`, `web_fetch`) plus three plan tools. It does not create a worktree and does not edit the repo.
+`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus three plan tools. It does not create a worktree and does not edit the repo.
 
 1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
 2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan in the style of an engineer's plan mode (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps). Code rejects a spec without an approach, file changes, or verification.
@@ -450,7 +449,7 @@ Ticket plans have no literal edits. In Pi, `/implement` runs each ticket in a ch
 
 1. The ticket is routed with purpose `implement`. `suggestedTier` is a hint: it is capped by `routing.maxTier`, and a security-sensitive classification still forces the policy tier. The selector picks the model; the status line reads `ticket 01 → provider/model` and a `route` event is logged.
 2. The prompt holds the ticket (what to build, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by (truncated), the repo's `AGENTS.md` (truncated), and the instruction to implement only this ticket, add tests, run the checks, and close with each criterion marked met or not met plus the files changed.
-3. When the child exits, its changes are committed, then the configured checks and the ticket's own `checks` run through the caching runner and the command allowlist. A ticket's `checks` are shell command lines (one command per entry, no prose) and `plan_tickets` rejects any that the allowlist would refuse, so the planner rewrites them; should one still reach a run, the ticket stops as `failed` with the reason, without escalating or counting against the model. The ticket is `done` only if the child exited cleanly and every check passed. When no check ran at all, a child whose closing summary marks no acceptance criterion as met is a failure too. A failed check's output (last 1,500 characters) is shown to the next attempt. The ticket file's `## Status:` goes `in-progress`, then `done` or `failed`, and criteria checkboxes are ticked from the child's summary (best effort).
+3. When the child exits, its changes are committed, then the configured checks and the ticket's own `checks` run through the caching runner. A ticket's `checks` are shell command lines (one command per entry, no prose) and `plan_tickets` rejects any that the sandbox deny rules would refuse, so the planner rewrites them; should one still reach a run, the ticket stops as `failed` with the reason, without escalating or counting against the model. The ticket is `done` only if the child exited cleanly and every check passed. When no check ran at all, a child whose closing summary marks no acceptance criterion as met is a failure too. A failed check's output (last 1,500 characters) is shown to the next attempt. The ticket file's `## Status:` goes `in-progress`, then `done` or `failed`, and criteria checkboxes are ticked from the child's summary (best effort).
 4. A failed ticket is retried in a fresh child on the same worktree at the next tier, up to `routing.maxEscalations`. After that the task is `BLOCKED` with an `/advisor` suggestion. Finished tickets stay done, and a later `/implement` runs only the rest.
 5. The budget is checked before every ticket attempt. A hard budget starts no new tickets and blocks the task.
 
@@ -464,7 +463,7 @@ Limitations: the child's `bash` tool is not allowlisted, because a ticket must r
 
 `/review` diffs each worktree and the integration branch against the plan. Blocking findings (failed checks, secrets, auth bypass, `eval`) are separate from suggestions. `passed` is true only when every check (configured, else the tickets') exited 0 and nothing blocking was found. A review that did not pass says why in its summary and lists its suggestions.
 
-The integration worktree is a fresh checkout, so nothing a ticket child installed is there. List the install command under `setup:` (same shape as `checks:`, same allowlist), and `/review` runs it there first; a failed setup is a failed check. A check that fails for want of a tool ("command not found", a missing package) gets a hint to that effect.
+The integration worktree is a fresh checkout, so nothing a ticket child installed is there. List the install command under `setup:` (same shape as `checks:`), and `/review` runs it there first; a failed setup is a failed check. A check that fails for want of a tool ("command not found", a missing package) gets a hint to that effect.
 
 After the deterministic pass, a review-tier model (the same choice `/route` shows for review: premium for sensitive work, standard otherwise) reads the plan and the integrated diff and returns findings for a person to judge: severity, category, file, message, evidence. A diff larger than `review.maxDiffChars` (default 120,000 characters) is split at file boundaries and reviewed in parts, one call each, up to `review.maxChunks` (default 6); each call stops at `review.timeoutMs` (default 5 minutes). The model is told it has no tools and must judge what it is given. Findings are ledgered with reason `model review` and budget-gated. They never change `passed`: policy stays deterministic, the model advises. `review.model: false` turns the pass off.
 
@@ -572,7 +571,7 @@ Artifacts for a task:
 - Ticket children never pick a provider that is not signed in: when no model in the chosen tier is usable, the ticket moves up a tier instead of failing on a login error.
 - The ticket child's bash hook is defense in depth, not a boundary: it normalizes wrappers (`env`, `command`, `sudo`, `nohup`, ...), looks inside `sh -c` and `eval`, and refuses `git push` and `gh` writes, but shell can always hide a command (a script file, an alias, an encoded string). The real controls are (a) an environment allowlist, so the child never sees `GITHUB_TOKEN`, `GH_TOKEN`, `*_TOKEN`, `*_KEY`, `*_SECRET`, `AWS_*`, `VERCEL_OIDC_TOKEN`, `ANTHROPIC_*`, or `OPENAI_*`, and (b) git config injected through `GIT_CONFIG_COUNT` that disables pushing for every remote and any URL, turns credential helpers and hooks off, and sets `GIT_TERMINAL_PROMPT=0`. A child can still use credentials stored in files under your home directory (for example `~/.ssh` or a `gh` config file) for non-git tools, so run tickets from an account that holds nothing you would not give the model.
 - Ticket children run in their own process group. They are stopped with SIGTERM then SIGKILL on cancel, deadline, a budget stop, `session_shutdown`, and Pi exiting. A running child's spend is tracked as its messages arrive, and every concurrent child is stopped when ledger plus in-flight spend passes the task or daily limit (the overshoot is at most one model call).
-- Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). It is not a full allowlist of every other command, because that would break the host agent. Worker checks are allowlisted.
+- Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). Other commands are not restricted, because that would break the host agent. Checks run any non-destructive command.
 - `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands. In `/implement`, groups with literal `edits` apply exactly those edits; only groups without them are written by the selected model. The worker pool does not spawn further agents.
 - The `gh` client is argument-array `gh` with no shell. Tests use an in-memory GitHub client. A live `gh auth status` is still required before `/push` against GitHub.
 - Context reset uses `newSession` from a command, then `compact` if that throws. Both leave the files in `.pi-workflows`. Whether the new session is empty of the old transcript depends on Pi; the handoff file is the durable copy.

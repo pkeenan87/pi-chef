@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 import { isTier, type PlanGroup, type Ticket } from "../domain.js";
-import { assertCommandAllowed } from "../sandbox.js";
+import { assertCommandSafe } from "../sandbox.js";
 import { assertGraph } from "./plan.js";
 
 /** Fixed allowance for the system prompt and tool definitions in a fresh worker context. */
@@ -48,11 +48,11 @@ export function splitCheckLine(line: string): { command: string; args: string[] 
   return { command, args };
 }
 
-/** Why a ticket check cannot run under the command allowlist, or undefined when it can. */
-export function checkLineProblem(line: string, allowlist: string[]): string | undefined {
+/** Why a ticket check cannot run under the sandbox deny rules, or undefined when it can. */
+export function checkLineProblem(line: string): string | undefined {
   const { command, args } = splitCheckLine(line);
   try {
-    assertCommandAllowed(command, args, allowlist);
+    assertCommandSafe(command, args);
     return undefined;
   } catch (error) {
     return (error as Error).message;
@@ -64,7 +64,7 @@ function strings(value: unknown): string[] {
 }
 
 /** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
-export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; /** When given, every ticket check must be a command line this allowlist accepts. */ allowlist?: string[] }): TicketCheck {
+export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; }): TicketCheck {
   const errors: string[] = [];
   const tickets: Ticket[] = [];
   if (!Array.isArray(input) || input.length === 0) return { tickets, errors: ["tickets must be a non-empty array."] };
@@ -103,14 +103,12 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       }
     }
     const checks = strings(item.checks);
-    if (options.allowlist) {
-      for (const check of checks) {
-        const problem = checkLineProblem(check, options.allowlist);
-        if (problem === undefined) continue;
-        errors.push(
-          `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the child exits, one command per entry, from the command allowlist: ${options.allowlist.join(", ") || "(empty)"}. Put prose verification steps in implementation instead.`,
-        );
-      }
+    for (const check of checks) {
+      const problem = checkLineProblem(check);
+      if (problem === undefined) continue;
+      errors.push(
+        `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the ticket, one command per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
+      );
     }
     tickets.push({
       id,

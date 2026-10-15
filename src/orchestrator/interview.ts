@@ -407,7 +407,7 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const feedback = revision ? ["", "The user sent the drafted plan back with these requested changes:", revision] : [];
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
-    return [TICKET_RULES(ctx.config.workers.ticketContextTokens, ctx.config.commandAllowlist), ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
+    return [TICKET_RULES(ctx.config.workers.ticketContextTokens), ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
   }
   if (revision) {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";

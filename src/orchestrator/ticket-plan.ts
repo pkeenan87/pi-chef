@@ -9,7 +9,7 @@ import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validat
 
 /** Validates model- or person-written tickets against the config's context target and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
-  return validateTickets(input, { target: ctx.config.workers.ticketContextTokens, fileSize: (file) => projectFileSize(ctx.cwd, file), allowlist: ctx.config.commandAllowlist });
+  return validateTickets(input, { target: ctx.config.workers.ticketContextTokens, fileSize: (file) => projectFileSize(ctx.cwd, file) });
 }
 
 /** Throws unless a task is at the ticket stage (spec saved). */

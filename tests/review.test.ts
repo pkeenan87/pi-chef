@@ -7,7 +7,6 @@ async function review(diff: string, checks: { name: string; command: string; arg
     integratedDiff: "",
     checks,
     cwd: "/tmp",
-    allowlist: ["npm test", "npm run lint", "npm run build"],
     planAcceptance: [],
     runner: { run: async (c, a) => (run ? run(c, a) : { code: 0, stdout: "", stderr: "" }) },
   });

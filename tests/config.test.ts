@@ -42,7 +42,6 @@ describe("parseConfig validation", () => {
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-01-01', inputPerMillionUsd: -1, outputPerMillionUsd: 1 }\n", /inputPerMillionUsd/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: 'soon', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-02-30', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],
-    ["commandAllowlist: npm test\n", /commandAllowlist/],
     ["orgProviderAllowlist: [mars]\n", /orgProviderAllowlist/],
   ])("rejects %j", (yaml, message) => {
     expect(() => parseConfig(yaml)).toThrow(message);
@@ -77,7 +76,7 @@ pricing:
     process.env.HOME = mkdtempSync(path.join(tmpdir(), "pi-home-"));
     try {
       const config = loadConfig(path.resolve(__dirname, ".."));
-      expect(config.commandAllowlist).toContain("npm test");
+      expect(config.warnings ?? []).toEqual([]);
     } finally {
       process.env.HOME = prior;
     }
@@ -110,19 +109,15 @@ describe("loadConfig layering", () => {
 
   const base = `${PROVIDERS_BLOCK}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`;
 
-  it("project cannot widen user commandAllowlist, only narrow it", () => {
-    writeUser(`${base}commandAllowlist: ["npm test", "npx vitest *"]\n`);
-    writeProject("commandAllowlist: [\"npm test\", \"rm -rf /\", \"npx vitest run\", \"npx vitest *\", \"git status\"]\n");
-    expect(loadConfig(project).commandAllowlist).toEqual(["npm test", "npx vitest run", "npx vitest *"]);
-  });
-
-  it("project allowlist applies when user defines none, and user list stands when project has none", () => {
-    writeUser(base);
-    writeProject('commandAllowlist: ["npm test"]\n');
-    expect(loadConfig(project).commandAllowlist).toEqual(["npm test"]);
-    writeUser(`${base}commandAllowlist: ["git status"]\n`);
+  it("an old commandAllowlist key loads with a warning, from either file", () => {
+    writeUser(`${base}commandAllowlist: ["npm test"]\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
-    expect(loadConfig(project).commandAllowlist).toEqual(["git status"]);
+    const fromUser = loadConfig(project);
+    expect(fromUser.warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
+    expect("commandAllowlist" in fromUser).toBe(false);
+    writeUser(base);
+    writeProject('commandAllowlist: ["npm test", "curl *"]\n');
+    expect(loadConfig(project).warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
   });
 
   it("user org allowlist and proprietaryCode win", () => {
@@ -230,14 +225,6 @@ models: { classifier: local, cheap: local, standard: local, premium: local }
     expect(() => parseConfig(p('baseUrl: "http://127.0.0.1:11434/v1"', "local"))).not.toThrow();
     expect(() => parseConfig(p('baseUrl: "http://example.com/v1"', "vercel"))).toThrow(/baseUrl/);
     expect(() => parseConfig(p('apiKeyEnv: "X; rm -rf /"', "local"))).toThrow(/apiKeyEnv/);
-  });
-
-  it("S3: without a user list, the project commandAllowlist is intersected with the built-in defaults", () => {
-    writeUser(base);
-    writeProject('commandAllowlist: ["npm test", "curl *", "bash -c *", "npx vitest run foo"]\n');
-    const config = loadConfig(project);
-    expect(config.commandAllowlist).toEqual(["npm test", "npx vitest run foo"]);
-    expect(config.warnings?.join("\n")).toMatch(/curl \*, bash -c \*/);
   });
 
   it("S3: an empty user orgProviderAllowlist lets a project list only restrict", () => {

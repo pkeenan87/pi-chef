@@ -64,7 +64,7 @@ export const PlanTicketsParams = Type.Object({
       suggestedTier: Type.Optional(Type.String({ description: `One of: ${TIERS.join(", ")}` })),
       files: Type.Optional(Type.Array(Type.String(), { description: "Files this ticket touches (ownership hints; overlapping tickets run one after another)" })),
       estimatedContextTokens: Type.Number({ description: "Your estimate of the tokens one fresh context needs for this ticket" }),
-      checks: Type.Optional(Type.Array(Type.String(), { description: "Shell command lines the parent runs after the child exits, one command per entry, each on the command allowlist (for example \"npm test\"). Not prose: verification steps that are not a command go in implementation." })),
+      checks: Type.Optional(Type.Array(Type.String(), { description: "Shell command lines the parent runs after the ticket, one command per entry (for example \"npm test\"); destructive commands are refused. Not prose: verification steps that are not a command go in implementation." })),
     }),
   ),
 });

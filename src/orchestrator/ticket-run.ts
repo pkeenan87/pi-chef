@@ -5,7 +5,7 @@ import { buildCostRecord } from "../cost/ledger.js";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { CheckEvidence, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, WorkerArtifact, WorktreeRecord } from "../domain.js";
 import { redact } from "../redact.js";
-import { assertCommandAllowed } from "../sandbox.js";
+import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, chargeInFlight, recordTicketUsage } from "./budget.js";
 import type { InFlightRun } from "./inflight.js";
 import { iso, knownZero, requireActive, type WorkflowContext } from "./context.js";
@@ -66,7 +66,7 @@ function childEnvNames(ctx: WorkflowContext): string[] {
   return [providers.foundry?.endpointEnv, providers.local?.apiKeyEnv].filter((name): name is string => !!name);
 }
 
-/** Configured checks, then the ticket's own, through the sandbox allowlist and the caching runner. */
+/** Configured checks, then the ticket's own, through the sandbox deny rules and the caching runner. */
 async function runChecks(ctx: WorkflowContext, ticket: Ticket, cwd: string): Promise<CheckEvidence[]> {
   const planned = [
     ...ctx.config.checks.map((check) => ({ name: check.name, command: check.command, args: check.args })),
@@ -76,7 +76,7 @@ async function runChecks(ctx: WorkflowContext, ticket: Ticket, cwd: string): Pro
   for (const check of planned) {
     const base = { name: check.name, command: check.command, args: check.args, cwd };
     try {
-      assertCommandAllowed(check.command, check.args, ctx.config.commandAllowlist);
+      assertCommandSafe(check.command, check.args);
     } catch (error) {
       out.push({ ...base, exitCode: 126, stdout: "", stderr: redact((error as Error).message).slice(0, 2000), ran: false });
       continue;
@@ -188,11 +188,11 @@ function unmetReason(result: TicketRunResult | undefined, checks: CheckEvidence[
   return "No check ran for this ticket and the child's summary marks no acceptance criterion as met, so the ticket is not done.";
 }
 
-/** The checks the plan asked for that the allowlist refused: a plan problem, which no model can fix. */
+/** The checks the plan asked for that the sandbox refused: a plan problem, which no model can fix. */
 function unrunnableReason(checks: CheckEvidence[]): string | undefined {
   const refused = checks.filter((item) => !item.ran);
   if (refused.length === 0) return undefined;
-  return `Checks could not run (not on the command allowlist): ${refused.map((item) => `"${item.name}"`).join(", ")}. Fix the plan's checks (allowlisted commands only) and run /implement again.`;
+  return `Checks could not run (refused as destructive): ${refused.map((item) => `"${item.name}"`).join(", ")}. Fix the plan's checks (non-destructive commands only) and run /implement again.`;
 }
 
 function failureReason(result: TicketRunResult | undefined, thrown: string | undefined, checks: CheckEvidence[]): string | undefined {
@@ -369,7 +369,7 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         thrown ??= `Could not commit the ticket's changes: ${redact((error as Error).message)}`;
       }
       evidence = result?.ok && !thrown ? await runChecks(ctx, ticket, record.path) : [];
-      // A check the allowlist refused is a plan problem: the ticket stops here, with no strike against the model and no escalation.
+      // A check the sandbox refused is a plan problem: the ticket stops here, with no strike against the model and no escalation.
       const planProblem = result?.ok && !thrown && !budgetReason ? unrunnableReason(evidence) : undefined;
       const reason = planProblem ?? failureReason(result, thrown ?? budgetReason, evidence) ?? unmetReason(result, evidence, ticket.acceptanceCriteria);
       const ok = reason === undefined;

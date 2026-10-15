@@ -4,7 +4,6 @@ import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
 import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
-import { allowlistEntryCovers } from "./sandbox.js";
 
 export interface ProviderConfig {
   type: string;
@@ -142,11 +141,10 @@ export interface WorkflowConfig {
     backoffSeconds: number;
   };
   checks: CheckConfig[];
-  /** Commands /review runs in the integration worktree before the checks (an install, for example). Same allowlist as checks. */
+  /** Commands /review runs in the integration worktree before the checks (an install, for example). Same rules as checks. */
   setup: CheckConfig[];
   /** The model pass of /review: a review-tier model reads the integrated diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
-  commandAllowlist: string[];
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -189,7 +187,6 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "npx vitest run *", "git status", "git diff"],
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -498,7 +495,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(raw.review, "maxChunks", where, { min: 1, integer: true }, "review");
     checkNumber(raw.review, "timeoutMs", where, { min: 1000, integer: true }, "review");
   }
-  if (raw.commandAllowlist !== undefined) stringArray(raw.commandAllowlist, "commandAllowlist", where);
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
     for (const id of list) if (!isProviderId(id)) invalid(where, "orgProviderAllowlist", `contains unknown provider ${id}`);
@@ -566,7 +562,6 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
       : DEFAULTS.checks,
     setup: Array.isArray(norm.setup) ? (norm.setup as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] })) : DEFAULTS.setup,
     review: { ...DEFAULTS.review, ...obj("review") } as WorkflowConfig["review"],
-    commandAllowlist: Array.isArray(norm.commandAllowlist) ? (norm.commandAllowlist as string[]) : DEFAULTS.commandAllowlist,
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,
     pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
@@ -716,17 +711,11 @@ export function layerConfigs(
     securitySensitiveFix: "required",
   };
 
-  // commandAllowlist: keep only project entries that the user list covers. Without a user list the
-  // built-in defaults are the ceiling, so a project file cannot grant itself new commands.
-  const projectList = Array.isArray(project.commandAllowlist) ? (project.commandAllowlist as string[]) : undefined;
-  const ceiling = Array.isArray(user.commandAllowlist) ? (user.commandAllowlist as string[]) : DEFAULTS.commandAllowlist;
-  if (projectList) {
-    const kept = projectList.filter((entry) => ceiling.some((outer) => allowlistEntryCovers(outer, entry)));
-    if (kept.length < projectList.length) warnings.push(`Ignored project commandAllowlist entries that the ${Array.isArray(user.commandAllowlist) ? "user" : "built-in"} allowlist does not cover: ${projectList.filter((entry) => !kept.includes(entry)).join(", ")}.`);
-    merged.commandAllowlist = kept;
-  } else if (Array.isArray(user.commandAllowlist)) {
-    merged.commandAllowlist = user.commandAllowlist;
+  // commandAllowlist is gone: checks run any non-destructive command. Old files still load.
+  if (user.commandAllowlist !== undefined || project.commandAllowlist !== undefined) {
+    warnings.push("commandAllowlist is no longer used; checks run any non-destructive command.");
   }
+  delete merged.commandAllowlist;
   // orgProviderAllowlist: an empty list means "all providers", so a project list can only restrict that.
   // Once the user names providers, the user's list is final.
   if (Array.isArray(user.orgProviderAllowlist) && user.orgProviderAllowlist.length > 0) {

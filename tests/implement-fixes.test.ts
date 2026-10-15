@@ -26,38 +26,31 @@ function fakeChat(reply: () => string) {
 }
 
 const ticket = (id: string, slug: string, extra: Partial<Ticket> = {}): Ticket => ({ id, slug, title: `T${id}`, whatToBuild: "x", acceptanceCriteria: ["works"], blockedBy: [], estimatedContextTokens: 30_000, ...extra });
-const ALLOW = ["npm test", "npm run typecheck", "npx vitest run *"];
 
 describe("ticket checks at plan time", () => {
-  const options = { target: 150_000, fileSize: () => undefined, allowlist: ALLOW };
+  const options = { target: 150_000, fileSize: () => undefined };
 
-  it("rejects a check that is not an allowlisted command line and says what to do instead", () => {
-    const result = validateTickets([ticket("01", "a", { checks: ["Validate all BDK APIs against the current docs."] })], options);
+  it("rejects a destructive check and says what to do instead", () => {
+    const result = validateTickets([ticket("01", "a", { checks: ["rm -rf /"] })], options);
     expect(result.errors).toHaveLength(1);
-    expect(result.errors[0]).toContain('Ticket 01: check "Validate all BDK APIs against the current docs." cannot run');
-    expect(result.errors[0]).toContain("npm test, npm run typecheck, npx vitest run *");
+    expect(result.errors[0]).toContain('Ticket 01: check "rm -rf /" cannot run');
     expect(result.errors[0]).toContain("implementation instead");
   });
 
-  it("accepts allowlisted commands, including wildcard extras, and rejects unsafe extras", () => {
-    expect(validateTickets([ticket("01", "a", { checks: ["npm test", "npx vitest run tests/a.test.ts"] })], options).errors).toEqual([]);
-    expect(validateTickets([ticket("01", "a", { checks: ["npx vitest run --config evil.ts"] })], options).errors[0]).toContain("cannot run");
+  it("accepts any non-destructive command", () => {
+    expect(validateTickets([ticket("01", "a", { checks: ["npm test", "make test", "npm ci"] })], options).errors).toEqual([]);
   });
 
-  it("skips the command check when no allowlist is given (callers that only parse)", () => {
-    expect(validateTickets([ticket("01", "a", { checks: ["anything goes"] })], { target: 150_000, fileSize: () => undefined }).errors).toEqual([]);
-  });
-
-  it("tells the planner that checks are allowlisted commands", () => {
-    const rules = TICKET_RULES(150_000, ALLOW);
+  it("tells the planner what checks are", () => {
+    const rules = TICKET_RULES(150_000);
     expect(rules).toContain("shell command lines");
-    expect(rules).toContain("npm test, npm run typecheck, npx vitest run *");
-    expect(TICKET_RULES(150_000, [])).toContain("leave checks empty");
+    expect(rules).toContain("Destructive commands are refused");
+    expect(rules).not.toContain("allowlist");
   });
 
-  it("rejects prose checks through the workflow with the project's allowlist", async () => {
-    const app = workflow(await tempRepo(), { config: tieredConfig("commandAllowlist: ['npm test']") });
-    const check = app.checkTickets([ticket("01", "a", { checks: ["Run the smoke test by hand."] })]);
+  it("rejects destructive checks through the workflow", async () => {
+    const app = workflow(await tempRepo(), { config: tieredConfig() });
+    const check = app.checkTickets([ticket("01", "a", { checks: ["git push --force"] })]);
     expect(check.errors[0]).toContain("cannot run");
     expect(app.checkTickets([ticket("01", "a", { checks: ["npm test"] })]).errors).toEqual([]);
   });
@@ -283,7 +276,7 @@ describe("model review", () => {
   it("runs setup commands in the integration worktree before the checks, and hints at setup when tooling is missing", async () => {
     const ran: string[] = [];
     const app = workflow(await tempRepo(), {
-      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }\ncommandAllowlist: ['npm ci', 'npm test']"),
+      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }"),
       runner: checkRunner(async (command, args, cwd) => (ran.push(`${[command, ...args].join(" ")} @ ${path.basename(cwd)}`), { code: 0, stdout: "ok", stderr: "" })),
     });
     await app.plan(tasksRequest);
@@ -295,7 +288,7 @@ describe("model review", () => {
     expect((review.data as { checks: { name: string }[] }).checks.map((check) => check.name)).toEqual(["setup: install", "unit"]);
 
     const brokenInstall = workflow(await tempRepo(), {
-      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }\ncommandAllowlist: ['npm ci', 'npm test']"),
+      config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }"),
       runner: checkRunner(async (command, args) => (args[0] === "ci" ? { code: 1, stdout: "", stderr: "ERESOLVE" } : { code: 0, stdout: "ok", stderr: "" })),
     });
     await brokenInstall.plan(tasksRequest);

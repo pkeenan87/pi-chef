@@ -145,7 +145,6 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
       onProgress: progress,
       cwd: integration.path ?? ctx.git.repoRoot,
       runner: ctx.checkRunner,
-      allowlist: ctx.config.commandAllowlist,
       planAcceptance: plan.acceptance,
     });
     report.modelReview = await modelPass(ctx, state, plan, decision, report.integratedDiff);
