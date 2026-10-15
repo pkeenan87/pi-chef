@@ -95,7 +95,13 @@ export function createRuntime(config: WorkflowConfig, root: string, overrides: R
     : undefined;
   const local = config.providers.local;
   const localReachable = local?.baseUrl ? createReachabilityProbe({ baseUrl: local.baseUrl, fetchImpl: overrides.fetchImpl, now: overrides.now }) : undefined;
-  const auth = new FileAuthProbe({ azure, localReachable, vercel: vercel ? () => vercel.status() : undefined, now: overrides.now });
+  const auth = new FileAuthProbe({
+    azure,
+    localReachable,
+    vercel: vercel ? () => vercel.status() : undefined,
+    apiKeyFallback: (provider) => config.providers[provider]?.apiKeyFallback === true,
+    now: overrides.now,
+  });
   const deciders: ProviderRuntime["deciders"] = {};
   if (config.providers.foundry) {
     const tokens = createTokenCache(async (audience) => {

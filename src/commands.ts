@@ -9,7 +9,7 @@ export interface CommandSpec {
   complete: (prefix: string) => { label: string; value: string }[];
 }
 
-const PROVIDER_VALUES = ["openai", "anthropic", "foundry", "vercel", "local"];
+const PROVIDER_VALUES = ["openai", "anthropic", "xai", "foundry", "vercel", "local"];
 
 export const COMMANDS: CommandSpec[] = [
   {

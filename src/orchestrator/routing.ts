@@ -27,7 +27,7 @@ export async function decide(
   ctx: WorkflowContext,
   classification: AcceptedClassification,
   purpose: "plan" | "implement" | "review" | "preview",
-  extra: { failedTier?: Tier; escalations?: number; taskId?: string; tierHint?: Tier } = {},
+  extra: { failedTier?: Tier; escalations?: number; taskId?: string; tierHint?: Tier; strictAvailability?: boolean } = {},
 ): Promise<RoutingDecision> {
   return decideRoute(classification, ctx.config, ctx.store.readMetrics(), {
     purpose,
@@ -35,6 +35,7 @@ export async function decide(
     failedTier: extra.failedTier,
     escalations: extra.escalations,
     tierHint: extra.tierHint,
+    strictAvailability: extra.strictAvailability,
     availability: await availability(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, extra.taskId),
     quota: quotaState(ctx),

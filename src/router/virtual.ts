@@ -1,6 +1,6 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
 import type { QuotaUsage } from "../cost/quota.js";
-import { modelMetricKey, type AcceptedClassification, type Tier, type TierCandidate } from "../domain.js";
+import { isAccountProvider, modelMetricKey, type AcceptedClassification, type Tier, type TierCandidate } from "../domain.js";
 import { decideRoute } from "./policy.js";
 import { circuitOpenFor } from "./stats.js";
 import { selectCandidate, type Availability } from "./select.js";
@@ -100,6 +100,8 @@ export interface VirtualDeps<M extends ModelLike> {
   onRoute?(event: RouteEvent): void | Promise<void>;
   /** Runs before a candidate is returned, e.g. to refresh a provider token. */
   prepare?(candidate: TierCandidate): void | Promise<void>;
+  /** Account providers whose Pi-stored API key the user allowed (providers.<name>.apiKeyFallback). */
+  apiKeyFallback?(provider: string): boolean;
 }
 
 export interface RouterResult<M extends ModelLike> {
@@ -207,8 +209,8 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
     const model = registry.find(provider, id);
     if (!model) return undefined;
     if (!registry.getAvailable().some((item) => same(item, provider, id))) return undefined;
-    // OpenAI and Anthropic only through an account login, never an API key.
-    if ((provider === "openai" || provider === "anthropic") && !registry.isUsingOAuth?.(model)) return undefined;
+    // Account providers only through an account login, unless the user allowed that provider's API key.
+    if (isAccountProvider(provider) && !registry.isUsingOAuth?.(model) && !deps.apiKeyFallback?.(provider)) return undefined;
     return model;
   };
   const done = async (_model: M, candidate: TierCandidate): Promise<void> => {

@@ -38,6 +38,11 @@ export interface RouteOptions {
   tierHint?: Tier;
   /** Uniform [0, 1) for exploration. Defaults to Math.random. */
   rng?: () => number;
+  /**
+   * Never pick a provider that is not signed in, and move up a tier when none in the chosen tier is. For work
+   * that runs unattended (ticket children), where nobody can answer a login prompt.
+   */
+  strictAvailability?: boolean;
 }
 
 export function decideRoute(
@@ -69,7 +74,7 @@ export function decideRoute(
       rng,
       at,
       // A local model that is down must fall back to literal edits, not to a login prompt.
-      strictAvailability: tier === "deterministic",
+      strictAvailability: tier === "deterministic" || options.strictAvailability === true,
     });
   // Whether a tier is blocked never depends on sampling, so probes use a constant and leave the caller's rng alone.
   const probe = (tier: Tier): Selection => select(tier, () => 0.5);
@@ -112,7 +117,8 @@ export function decideRoute(
   if (ORDER.indexOf(tier) > ORDER.indexOf(cap)) tier = cap;
   let selection = probe(tier);
   // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
-  while (selection.blocked && tier !== "deterministic" && (selection.blocked.code === "excluded" || selection.blocked.code === "circuit_open")) {
+  const movable = (code: string) => code === "excluded" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
+  while (selection.blocked && tier !== "deterministic" && movable(selection.blocked.code)) {
     const escalated = escalateImplementation(tier, cap, config);
     if (escalated === tier) break;
     reasons.push(`escalated_from_${tier}_${selection.blocked.code}`);

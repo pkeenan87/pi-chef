@@ -1,4 +1,4 @@
-import { WorkflowError, type ProviderId } from "../domain.js";
+import { isAccountProvider, WorkflowError, type ProviderId } from "../domain.js";
 import { ProviderCallError, type ChatRequest, type ChatResponse } from "./clients.js";
 
 /** The slice of Pi's ModelRegistry that chat calls need. Structural so tests can fake it. */
@@ -21,17 +21,17 @@ export interface PiRegistryLike {
 export type ChatFn = (candidate: { provider: ProviderId; model: string }, request: Omit<ChatRequest, "model">) => Promise<ChatResponse>;
 
 /**
- * Chat through Pi's model registry, which owns authentication. OpenAI and Anthropic calls are refused
- * unless the registry is using an account login for that model, so there is no API-key fallback.
+ * Chat through Pi's model registry, which owns authentication. OpenAI, Anthropic, and xAI calls are refused
+ * unless the registry is using an account login for that model, or the user allowed that provider's API key.
  */
-export function createRegistryChat(registry: PiRegistryLike): ChatFn {
+export function createRegistryChat(registry: PiRegistryLike, apiKeyFallback: (provider: string) => boolean = () => false): ChatFn {
   return async (candidate, request) => {
     const model = registry.find(candidate.provider, candidate.model);
     if (!model) {
       throw new ProviderCallError("config", `Model ${candidate.provider}/${candidate.model} is not registered in this Pi session.`);
     }
-    if ((candidate.provider === "openai" || candidate.provider === "anthropic") && !registry.isUsingOAuth?.(model as never)) {
-      throw new WorkflowError("API_KEY_REJECTED", `No ${candidate.provider} account login is available. Run /login ${candidate.provider}. API keys are not accepted.`);
+    if (isAccountProvider(candidate.provider) && !registry.isUsingOAuth?.(model as never) && !apiKeyFallback(candidate.provider)) {
+      throw new WorkflowError("API_KEY_REJECTED", `No ${candidate.provider} account login is available. Run /login ${candidate.provider}, or allow its API key with providers.${candidate.provider}.apiKeyFallback in the user config.`);
     }
     const system = request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
     const result = await registry.complete(

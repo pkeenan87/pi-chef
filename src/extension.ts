@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionContext, ModelRoute } from "@earendil-works
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
-import { configPaths, loadConfig, type WorkflowConfig } from "./config.js";
+import { configPaths, loadConfig, setBillingResolver, type WorkflowConfig } from "./config.js";
+import type { FileAuthProbe } from "./providers/auth.js";
 import { GhCli } from "./github/gh.js";
 import { isDeniedCommand } from "./sandbox.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
@@ -13,7 +14,7 @@ import { asResult } from "./orchestrator/context.js";
 import { declaredLimits, routeVirtual, VIRTUAL_THINKING_LEVELS, type RouterRegistry, type RouterRequest, type RouterState } from "./router/virtual.js";
 import { fallbackClassification } from "./router/classify.js";
 import type { Availability } from "./router/select.js";
-import type { CommandResult, TokenUsage } from "./domain.js";
+import { ACCOUNT_PROVIDERS, type CommandResult, type TokenUsage } from "./domain.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { CHILD_ENV, runTicketInChild, type TicketRunner } from "./agents/pi-runner.js";
@@ -54,6 +55,8 @@ function schedule(delayMs: number, run: () => void): () => void {
 
 export function bindWorkflow(workflow: Workflow | undefined): void {
   clearPoll();
+  // A workflow bound from outside brings its own auth probe; prices fall back to subscription billing.
+  setBillingResolver(undefined);
   active = workflow;
   loaded = undefined;
   registeredSignature = undefined;
@@ -96,6 +99,12 @@ function syncProviders(config: WorkflowConfig): void {
   registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel });
 }
 
+/** Prices follow the credential Pi holds: API-key rows while a provider is on an API key. */
+function useBilling(next: ProviderRuntime): void {
+  const probe = next.auth as Partial<Pick<FileAuthProbe, "billing">>;
+  setBillingResolver(typeof probe.billing === "function" ? (provider) => probe.billing!(provider) : undefined);
+}
+
 /**
  * One Workflow per project root: the autopilot timer and its cancel handle live on the instance, so
  * rebuilding it per command would orphan a running timer. Later commands only rebind session/UI hooks,
@@ -108,11 +117,13 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     active?.dispose();
     cwd = root;
     runtime = createRuntime(config, root);
+    useBilling(runtime);
     active = new Workflow({ cwd: root, config, auth: runtime.auth, deciders: runtime.deciders, github: new GhCli(root), schedule, ticketRunner: childTicketRunner });
     // A watcher that was running before a restart or session reset keeps watching.
     active.resumeAutopilot();
   } else if (changed) {
     runtime = createRuntime(config, root);
+    useBilling(runtime);
     active.reconfigure(config, { auth: runtime.auth, deciders: runtime.deciders });
     try {
       syncProviders(config);
@@ -124,8 +135,9 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     const registry = (ctx as { modelRegistry?: PiRegistryLike }).modelRegistry;
     // A replacement session's ctx brings its own sendUserMessage; the captured pi is stale after a replacement.
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
+    const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
     active.bind({
-      chat: registry ? createRegistryChat(registry) : undefined,
+      chat: registry ? createRegistryChat(registry, apiKeyFallback) : undefined,
       status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-router", text) : undefined,
       planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-plan", text) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
@@ -436,8 +448,10 @@ function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
           const taskId = workflow?.activeTaskId();
           // Provider readiness: the auth probe, with the registry as the truth for account-login providers.
           const availability: Availability = workflow ? await workflow.availability() : {};
-          for (const provider of ["openai", "anthropic"] as const) {
-            availability[provider] = { ok: registry.getAvailable().some((item) => item.provider === provider && registry.isUsingOAuth?.(item)), detail: "no account login" };
+          const allowed = configFor().providers;
+          for (const provider of ACCOUNT_PROVIDERS) {
+            const ok = registry.getAvailable().some((item) => item.provider === provider && (registry.isUsingOAuth?.(item) || allowed[provider]?.apiKeyFallback === true));
+            availability[provider] = { ok, detail: "no account login" };
           }
           return {
             config: configFor(),
@@ -455,6 +469,7 @@ function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
           if (workflow && taskId) await workflow.announce(taskId, event.purpose, event, () => undefined);
         },
         // Pi reads the Vercel token from the env file, so make sure the CLI has refreshed it first.
+        apiKeyFallback: (provider) => configFor().providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true,
         prepare: async (candidate) => {
           if (candidate.provider === "vercel") await runtime?.vercel?.getToken();
         },

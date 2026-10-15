@@ -27,7 +27,7 @@ Both must be green before you call a change done. There is no lint script.
 
 ## Rules that are not obvious from the code
 
-- **No API-key fallback for OpenAI or Anthropic.** Only Pi account login (oauth) is allowed. Do not read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- **Account providers (OpenAI, Anthropic, xAI) use Pi account login by default.** A key stored in Pi (`/login` with a key) is used only when the user config sets `providers.<name>.apiKeyFallback: true`; a project config cannot set it (`restrictProject`). While a provider is on a key, prices come from `billing: api-key` rows (`setBillingResolver`, fed by `FileAuthProbe.billing`); with no such row the cost is unknown, never the subscription's $0. Never read `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `XAI_API_KEY`. Do not name a config field so it ends in a secret word (`apiKey`, `token`): `containsSecret` rejects it.
 - **No secrets in config.** `assertNoSecrets` enforces this. Tokens (az, vercel, oauth) live in memory only. Never log them or write them to state, the ledger, or prompts.
 - **Policy is deterministic; models only advise.** Plan approval stays required. `autopilot.autoMerge` stays false and merge stays manual. A project config can never loosen the user's policy fields (allowlists, `proprietaryCode`, approvals, budgets).
 - **Credential and location fields are user-config-only.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `decisionsPath` from a project config are ignored with a warning (`config.warnings`, shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be https; only `local.baseUrl` may be http, and only for loopback.

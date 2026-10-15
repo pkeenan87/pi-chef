@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
-import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
+import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
 import { allowlistEntryCovers } from "./sandbox.js";
 
 export interface ProviderConfig {
@@ -28,6 +28,11 @@ export interface ProviderConfig {
   projectDir?: string;
   /** Vercel: env file `vercel env pull` writes. Defaults to .env.local. */
   envFile?: string;
+  /**
+   * openai, anthropic, xai: accept an API key stored in Pi (`/login` with a key) when no account login is
+   * present. Billed per token, so it needs `billing: api-key` pricing rows. User config only.
+   */
+  apiKeyFallback?: boolean;
 }
 
 export const DEFAULT_VERCEL_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1";
@@ -41,6 +46,21 @@ export interface PricingRow {
   outputPerMillionUsd: number;
   cacheReadPerMillionUsd?: number;
   cacheWritePerMillionUsd?: number;
+  /** "api-key": this row prices the model while the provider is on a Pi-stored API key (per-token billing). */
+  billing?: "api-key";
+}
+
+/** How an account provider is billed right now: its subscription (account login) or per token (API key). */
+export type Billing = "subscription" | "api-key";
+
+let billingOf: (provider: string) => Billing = () => "subscription";
+
+/**
+ * Tells pricing how each provider is billed right now. The host sets this from Pi's stored credentials, so
+ * every price lookup (ranking, ledger, budgets) uses API-key rows while a provider runs on an API key.
+ */
+export function setBillingResolver(resolve: ((provider: string) => Billing) | undefined): void {
+  billingOf = resolve ?? (() => "subscription");
 }
 
 /**
@@ -253,9 +273,10 @@ function normalizePricing(value: unknown, where: string): PricingRow[] {
         invalid(where, `${field}.${key}`, "must be a finite number >= 0");
       }
     }
-    const key = `${item.provider}\u0000${item.model}\u0000${effectiveFrom}`;
+    if (item.billing !== undefined && item.billing !== "api-key") invalid(where, `${field}.billing`, 'must be "api-key" when set');
+    const key = `${item.provider}\u0000${item.model}\u0000${effectiveFrom}\u0000${item.billing ?? ""}`;
     if (seen.has(key)) {
-      invalid(where, field, `duplicates another row for ${item.provider}/${item.model} effective ${effectiveFrom}`);
+      invalid(where, field, `duplicates another row for ${item.provider}/${item.model}${item.billing ? ` (${item.billing})` : ""} effective ${effectiveFrom}`);
     }
     seen.add(key);
     return { ...(item as unknown as PricingRow), effectiveFrom };
@@ -334,6 +355,13 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     }
     if (name === "anthropic" && provider.auth && provider.auth !== "account-login") {
       throw new WorkflowError("CONFIG_INVALID", "Anthropic auth must be account-login.");
+    }
+    if (name === "xai" && provider.auth && provider.auth !== "account-login") {
+      throw new WorkflowError("CONFIG_INVALID", "xAI auth must be account-login.");
+    }
+    if (provider.apiKeyFallback !== undefined) {
+      if (typeof provider.apiKeyFallback !== "boolean") invalid(where, `providers.${name}.apiKeyFallback`, "must be true or false");
+      if (!isAccountProvider(name)) invalid(where, `providers.${name}.apiKeyFallback`, "applies only to openai, anthropic, and xai");
     }
     if (name === "foundry" && provider.auth && provider.auth !== "azure-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Foundry auth must be azure-cli.");
@@ -588,6 +616,11 @@ function isBuiltinDefault(provider: string, field: string, value: unknown): bool
 function restrictProject(name: string, user: unknown, project: unknown, warnings: string[]): unknown {
   if (!isRecord(project)) return project;
   const out: Record<string, unknown> = { ...project };
+  // Accepting an API key loosens the sign-in policy, so only the user can turn it on.
+  if ("apiKeyFallback" in out) {
+    if (out.apiKeyFallback === true) warnings.push(`Ignored project providers.${name}.apiKeyFallback: only the user config (~/.pi/agent/cost-workflow.yaml) can allow an API key.`);
+    delete out.apiKeyFallback;
+  }
   for (const field of USER_ONLY_PROVIDER_FIELDS) {
     if (!(field in out)) continue;
     const userDefines = isRecord(user);
@@ -676,7 +709,7 @@ export function layerConfigs(
   // Pricing: project rows override user rows for the same provider/model/date.
   const rows = new Map<string, PricingRow>();
   for (const row of [...((user.pricing as PricingRow[] | undefined) ?? []), ...((project.pricing as PricingRow[] | undefined) ?? [])]) {
-    rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}`, row);
+    rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}\u0000${row.billing ?? ""}`, row);
   }
   merged.pricing = [...rows.values()];
 
@@ -730,8 +763,8 @@ interface PriceIndex {
 }
 const priceIndexes = new WeakMap<PricingRow[], PriceIndex>();
 
-function priceKey(provider: string, model: string): string {
-  return `${provider}\u0000${model}`;
+function priceKey(provider: string, model: string, billing?: Billing): string {
+  return `${provider}\u0000${model}${billing === "api-key" ? "\u0000api-key" : ""}`;
 }
 
 function priceIndex(pricing: PricingRow[]): PriceIndex {
@@ -741,7 +774,7 @@ function priceIndex(pricing: PricingRow[]): PriceIndex {
   pricing.forEach((row) => {
     const day = normalizeEffectiveFrom(row.effectiveFrom);
     if (!day) return;
-    const key = priceKey(row.provider, row.model);
+    const key = priceKey(row.provider, row.model, row.billing);
     const list = byKey.get(key);
     if (list) list.push({ day, row });
     else byKey.set(key, [{ day, row }]);
@@ -756,15 +789,18 @@ function priceIndex(pricing: PricingRow[]): PriceIndex {
 /**
  * Newest row for provider+model whose effectiveFrom is on or before `at` (UTC day).
  * Equal effective dates resolve to the later row in the list. The index is built once per array.
+ * While the provider is on an API key only `billing: api-key` rows apply; with none the price is unknown
+ * (never the subscription's $0).
  */
 export function priceFor(
   pricing: PricingRow[],
   provider: string,
   model: string,
   at: Date,
+  billing: Billing = billingOf(provider),
 ): PricingRow | undefined {
   if (Number.isNaN(at.getTime())) return undefined;
-  const list = priceIndex(pricing).byKey.get(priceKey(provider, model));
+  const list = priceIndex(pricing).byKey.get(priceKey(provider, model, billing));
   if (!list) return undefined;
   const day = at.toISOString().slice(0, 10);
   let lo = 0;
