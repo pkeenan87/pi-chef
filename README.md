@@ -410,7 +410,7 @@ Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This p
 
 ## Sample workflow
 
-Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass, and `/push` then refuses.
+Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass, and `/push` then refuses. With `checks: []`, `/review` falls back to the distinct `checks` of the plan's tickets (allowlisted commands, validated at plan time) and runs them on the integration branch; with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
 
 ```yaml
 checks:
@@ -462,7 +462,7 @@ The parent ledgers each ticket attempt once from the child's JSON events: provid
 
 Limitations: the child's `bash` tool is not allowlisted, because a ticket must run builds and tests, so a child can still run other commands in its worktree. The `tool_call` hook that refuses `git push`, `gh` writes, and the sandbox deny rules is defense in depth only (see Limitations below). The real controls are the child's allowlisted environment and git config, the `--tools` list, and the post-run checks. Review the diff. The child gets its prompt from a file in the system temp directory that is deleted after the run.
 
-`/review` diffs each worktree and the integration branch against the plan. Blocking findings (failed checks, secrets, auth bypass, `eval`) are separate from suggestions. `passed` is true only when every configured check exited 0 and nothing blocking was found.
+`/review` diffs each worktree and the integration branch against the plan. Blocking findings (failed checks, secrets, auth bypass, `eval`) are separate from suggestions. `passed` is true only when every check (configured, else the tickets') exited 0 and nothing blocking was found. A review that did not pass says why in its summary and lists its suggestions.
 
 `/push` requires that review and a publish confirmation. It pushes the integration branch and opens or updates one pull request through `gh`. It does not merge.
 

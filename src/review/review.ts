@@ -141,6 +141,10 @@ export async function reviewDiff(options: {
   const blocking = findings.filter((finding) => finding.severity === "blocking");
   const checksPassed = options.checks.length > 0 && checks.every((check) => check.ran && check.exitCode === 0);
   const passed = blocking.length === 0 && checksPassed;
+  // Say why, not just how many: a review that cannot pass for lack of checks must not look like a clean one.
+  const why: string[] = [];
+  if (blocking.length > 0) why.push(`${blocking.length} blocking finding(s): ${blocking.map((finding) => finding.message).join(" ")}`);
+  if (options.checks.length === 0) why.push("no checks ran, so there is no evidence of a test pass. Set `checks:` in .pi-workflows/config.yaml (for example npm test) or give the plan's tickets allowlisted checks, then run /review again");
   return {
     passed,
     claimedPass: passed,
@@ -148,8 +152,6 @@ export async function reviewDiff(options: {
     checks,
     worktreeDiffs: options.diffs.map((item) => ({ groupId: item.groupId, diff: redact(item.diff) })),
     integratedDiff: redact(options.integratedDiff),
-    summary: passed
-      ? `Review passed with ${checks.length} check(s) and no blocking findings.`
-      : `Review has ${blocking.length} blocking finding(s).`,
+    summary: passed ? `Review passed with ${checks.length} check(s) and no blocking findings.` : `Review did not pass: ${why.join("; ")}.`,
   };
 }

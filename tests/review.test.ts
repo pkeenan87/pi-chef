@@ -12,6 +12,22 @@ async function review(diff: string, checks: { name: string; command: string; arg
     runner: { run: async (c, a) => (run ? run(c, a) : { code: 0, stdout: "", stderr: "" }) },
   });
 }
+describe("review summary", () => {
+  it("says a review without checks cannot pass and how to fix it", async () => {
+    const report = await review("+const x = 1;\n");
+    expect(report.passed).toBe(false);
+    expect(report.summary).toContain("no checks ran");
+    expect(report.summary).toContain("checks:");
+    expect(report.summary).not.toMatch(/0 blocking finding/);
+  });
+
+  it("names the blocking findings and the failed check", async () => {
+    const report = await review("+const x = 1;\n", [{ name: "unit", command: "npm", args: ["test"] }], async () => ({ code: 1, stdout: "", stderr: "2 failing" }));
+    expect(report.passed).toBe(false);
+    expect(report.summary).toContain("1 blocking finding(s): unit failed.");
+  });
+});
+
 const categories = async (diff: string) => (await review(diff)).findings.filter((f) => f.severity === "blocking").map((f) => f.category);
 
 describe("review heuristics", () => {
