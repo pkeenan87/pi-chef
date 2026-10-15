@@ -1,4 +1,4 @@
-import type { ModelFinding, ModelReview, PlanDocument, ProviderId, TokenUsage } from "../domain.js";
+import { emptyUsage, type ModelFinding, type ModelReview, type ModelReviewPart, type PlanDocument, type ProviderId, type TokenUsage } from "../domain.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
 
@@ -95,70 +95,171 @@ export function parseModelFindings(text: string): ModelFinding[] | undefined {
 
 const RANK: Record<ModelFinding["severity"], number> = { high: 0, medium: 1, low: 2 };
 
-function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
-  const sum = (x: number | null, y: number | null) => (x === null || y === null ? null : x + y);
-  return { input: sum(a.input, b.input), output: sum(a.output, b.output), cacheRead: sum(a.cacheRead, b.cacheRead), cacheWrite: sum(a.cacheWrite, b.cacheWrite), requests: a.requests + b.requests };
+type Candidate = { provider: ProviderId; model: string };
+
+/** One model call of the pass, for the caller to ledger and count against that candidate. */
+export interface ModelReviewCall {
+  candidate: Candidate;
+  /** 1-based part index. */
+  part: number;
+  /** 0 for a part's first attempt, 1 for its retry. */
+  retry: number;
+  /** Unknown (nulls) when the call threw: it may or may not have been billed. */
+  usage: TokenUsage;
+  /** "success" when the answer parsed; "failure" when the call failed or the answer was not a findings list; "stopped" when the session was ending. */
+  outcome: "success" | "failure" | "stopped";
 }
+
+const label = (candidate: Candidate) => `${candidate.provider}/${candidate.model}`;
 
 /**
  * The review model's pass over the diff: one call per part of at most `maxDiffChars`, up to `maxChunks` parts (the
- * rest is reported as not reviewed), each under `timeoutMs`. Throws only when a call itself fails; an answer that is
- * not a JSON list is a result with `error`. `onProgress` gets a line per call.
+ * rest is reported as not reviewed), each under `timeoutMs`. `candidates` is the review tier in preference order. A
+ * part whose call throws (transport, stream end, timeout) is retried once on the next candidate, and later parts
+ * start on the candidate that has failed least in this pass, so one bad provider cannot sink the whole pass. An answer
+ * that is not a JSON list is a failed part, not retried. Never throws for a failed call; `onCall` gets every call as
+ * it finishes so the caller can ledger it and count it against that candidate only. `stop` is asked before each call
+ * and ends the pass with its reason (for example an exhausted budget).
  */
 export async function runModelReview(
   chat: ChatFn,
-  candidate: { provider: ProviderId; model: string },
-  input: { plan: PlanDocument; diff: string; maxDiffChars: number; maxChunks?: number; timeoutMs?: number; signal?: AbortSignal; onProgress?: (line: string) => void },
-): Promise<{ review: ModelReview; usage: TokenUsage }> {
+  candidates: Candidate[],
+  input: {
+    plan: PlanDocument;
+    diff: string;
+    maxDiffChars: number;
+    maxChunks?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onProgress?: (line: string) => void;
+    onCall?: (call: ModelReviewCall) => void | Promise<void>;
+    stop?: () => string | undefined;
+  },
+): Promise<ModelReview> {
+  if (candidates.length === 0) throw new Error("runModelReview needs at least one candidate.");
   const parts = splitDiff(redact(input.diff), input.maxDiffChars);
   const limit = Math.max(1, input.maxChunks ?? parts.length);
   const reviewed = parts.slice(0, limit);
-  let usage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };
   const findings: ModelFinding[] = [];
-  const errors: string[] = [];
+  const results: ModelReviewPart[] = [];
+  const failed = new Map<string, number>();
+  // Fewest failures in this pass first, then preference order.
+  const order = () => candidates.map((candidate, rank) => ({ candidate, rank, failures: failed.get(label(candidate)) ?? 0 })).sort((a, b) => a.failures - b.failures || a.rank - b.rank).map((row) => row.candidate);
+  let stopped: string | undefined;
   for (const [index, part] of reviewed.entries()) {
-    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length });
-    input.onProgress?.(`asking ${candidate.provider}/${candidate.model} to review part ${index + 1} of ${reviewed.length} (${Math.round(part.length / 1000)}k chars)`);
-    const timeout = input.timeoutMs !== undefined ? AbortSignal.timeout(input.timeoutMs) : undefined;
-    const signals = [input.signal, timeout].filter((item): item is AbortSignal => !!item);
-    const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-    const response = await chat(candidate, {
-      messages: [
-        { role: "system", content: MODEL_REVIEW_SYSTEM },
-        { role: "user", content: prompt.text },
-      ],
-      maxTokens: 4000,
-      signal,
-    });
-    usage = addUsage(usage, response.usage);
-    const parsed = parseModelFindings(response.text);
-    if (parsed === undefined) errors.push(`part ${index + 1}: the answer was not a JSON list of findings: ${redact(response.text).trim().slice(0, 200)}`);
-    else {
-      findings.push(...parsed.map((finding) => ({ ...finding, message: redact(finding.message), ...(finding.evidence ? { evidence: redact(finding.evidence) } : {}) })));
-      input.onProgress?.(`part ${index + 1}: ${parsed.length} finding(s)`);
+    const result: ModelReviewPart = { index: index + 1, findings: 0, failures: [] };
+    results.push(result);
+    if (stopped) {
+      result.failures.push(`not attempted: ${stopped}`);
+      continue;
     }
+    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length });
+    const [first, second] = order();
+    const attempts = second ? [first!, second] : [first!];
+    for (const [retry, candidate] of attempts.entries()) {
+      stopped = input.signal?.aborted ? "the session is ending" : input.stop?.();
+      if (stopped) {
+        result.failures.push(`not attempted: ${stopped}`);
+        break;
+      }
+      input.onProgress?.(
+        retry === 0
+          ? `asking ${label(candidate)} to review part ${index + 1} of ${reviewed.length} (${Math.round(part.length / 1000)}k chars)`
+          : `retrying part ${index + 1} of ${reviewed.length} on ${label(candidate)}`,
+      );
+      const timeout = input.timeoutMs !== undefined ? AbortSignal.timeout(input.timeoutMs) : undefined;
+      const signals = [input.signal, timeout].filter((item): item is AbortSignal => !!item);
+      const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+      let response: Awaited<ReturnType<ChatFn>>;
+      try {
+        response = await chat(candidate, {
+          messages: [
+            { role: "system", content: MODEL_REVIEW_SYSTEM },
+            { role: "user", content: prompt.text },
+          ],
+          maxTokens: 4000,
+          signal,
+        });
+      } catch (error) {
+        if (input.signal?.aborted) {
+          // The session ended under the call: not the model's fault, and nothing more runs.
+          stopped = "the session is ending";
+          await input.onCall?.({ candidate, part: index + 1, retry, usage: emptyUsage(), outcome: "stopped" });
+          result.failures.push(`${label(candidate)}: stopped because ${stopped}`);
+          break;
+        }
+        const why = timeout?.aborted ? `timed out after ${formatSeconds(input.timeoutMs!)}` : redact((error as Error).message || "unknown error");
+        failed.set(label(candidate), (failed.get(label(candidate)) ?? 0) + 1);
+        await input.onCall?.({ candidate, part: index + 1, retry, usage: emptyUsage(), outcome: "failure" });
+        result.failures.push(`${label(candidate)}: ${why}`);
+        input.onProgress?.(`part ${index + 1}: ${label(candidate)} failed: ${why.slice(0, 160)}`);
+        continue;
+      }
+      const parsed = parseModelFindings(response.text);
+      await input.onCall?.({ candidate, part: index + 1, retry, usage: response.usage, outcome: parsed === undefined ? "failure" : "success" });
+      if (parsed === undefined) {
+        failed.set(label(candidate), (failed.get(label(candidate)) ?? 0) + 1);
+        result.failures.push(`${label(candidate)}: the answer was not a JSON list of findings: ${redact(response.text).trim().slice(0, 200)}`);
+        break;
+      }
+      findings.push(...parsed.map((finding) => ({ ...finding, message: redact(finding.message), ...(finding.evidence ? { evidence: redact(finding.evidence) } : {}) })));
+      result.reviewedBy = label(candidate);
+      result.findings = parsed.length;
+      input.onProgress?.(`part ${index + 1}: ${parsed.length} finding(s) from ${label(candidate)}`);
+      break;
+    }
+  }
+  const errors: string[] = [];
+  const missed = results.filter((result) => !result.reviewedBy);
+  if (missed.length > 0) {
+    errors.push(
+      reviewed.length === 1
+        ? `the call failed: ${missed[0]!.failures.join("; ")}`
+        : `part(s) ${missed.map((result) => result.index).join(", ")} of ${reviewed.length} were not reviewed`,
+    );
   }
   if (parts.length > reviewed.length) errors.push(`${parts.length - reviewed.length} part(s) of the diff were not reviewed (review.maxChunks is ${limit}); raise it or review.maxDiffChars`);
   findings.sort((a, b) => RANK[a.severity] - RANK[b.severity]);
   return {
-    review: {
-      provider: candidate.provider,
-      model: candidate.model,
-      findings: findings.slice(0, MAX_FINDINGS * reviewed.length),
-      truncated: parts.length > reviewed.length || parts.some((part) => part.includes("was cut at")),
-      chunks: reviewed.length,
-      ...(errors.length ? { error: errors.join("; ") } : {}),
-    },
-    usage,
+    provider: candidates[0]!.provider,
+    model: candidates[0]!.model,
+    findings: findings.slice(0, MAX_FINDINGS * reviewed.length),
+    truncated: parts.length > reviewed.length || parts.some((part) => part.includes("was cut at")),
+    chunks: reviewed.length,
+    parts: results,
+    ...(errors.length ? { error: errors.join("; ") } : {}),
   };
 }
 
-/** The lines /ship prints for the model pass: a header with how it ran, then one line per finding, severity first. */
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** One line per part when there were several or any attempt failed: who reviewed it, or why nobody did. */
+function partLines(review: ModelReview): string[] {
+  const parts = review.parts ?? [];
+  if (parts.length <= 1 && !parts.some((part) => part.failures.length > 0 && part.reviewedBy)) return [];
+  const count = parts.length;
+  return parts.map((part) => {
+    const head = `- part ${part.index} of ${count}:`;
+    const failures = part.failures.join("; ");
+    if (!part.reviewedBy) return `${head} NOT reviewed — ${failures}`;
+    return `${head} ${part.reviewedBy}, ${part.findings} finding(s)${failures ? ` (after ${failures})` : ""}`;
+  });
+}
+
+/**
+ * The lines /ship prints for the model pass: a header with who reviewed and how it ran, one line per part when there
+ * were several or a retry, then one line per finding, severity first.
+ */
 export function modelReviewLines(review: ModelReview): string[] {
   const how = [review.chunks && review.chunks > 1 ? `${review.chunks} parts` : undefined, review.elapsedMs !== undefined ? `${(review.elapsedMs / 1000).toFixed(1)}s` : undefined, review.costUsd === null ? "cost unknown" : review.costUsd !== undefined ? `$${review.costUsd.toFixed(4)}` : undefined].filter(Boolean).join(", ");
-  const label = `Model review (${review.provider}/${review.model}${how ? `; ${how}` : ""})`;
-  if (review.error && review.findings.length === 0) return [`${label} produced no findings: ${review.error}`];
+  const reviewers = [...new Set((review.parts ?? []).flatMap((part) => (part.reviewedBy ? [part.reviewedBy] : [])))];
+  const who = reviewers.length > 0 ? reviewers.join(", ") : `${review.provider}/${review.model}`;
+  const label = `Model review (${who}${how ? `; ${how}` : ""})`;
+  const parts = partLines(review);
+  if (review.error && review.findings.length === 0) return [`${label} produced no findings: ${review.error}`, ...parts];
   const head = `${label}: ${review.findings.length} finding(s)${review.truncated ? " (part of the diff was not reviewed)" : ""}.`;
   const lines = review.findings.map((finding) => `- ${finding.severity.toUpperCase().padEnd(6)} ${finding.file ? `${finding.file} — ` : ""}${finding.message}${finding.evidence ? ` (evidence: ${finding.evidence})` : ""}`);
-  return [head, ...lines, ...(review.error ? [`- note: ${review.error}`] : [])];
+  return [head, ...parts, ...lines, ...(review.error ? [`- note: ${review.error}`] : [])];
 }

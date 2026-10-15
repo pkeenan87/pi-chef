@@ -234,8 +234,11 @@ describe("model review", () => {
     await adHocChange(cwd);
     const review = await app.ship();
     expect(review.ok).toBe(true);
-    expect(reportText(app)).toContain("produced no findings: the call failed: rate limited");
-    expect(app.store.readLedger().find((item) => item.reason === "model review")).toMatchObject({ actualUsd: null, outcome: "failure" });
+    // Both review candidates were tried; each failed call is an unknown charge, never zero.
+    expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: rate limited; \S+\/\S+: rate limited/);
+    const calls = app.store.readLedger().filter((item) => item.reason === "model review");
+    expect(calls).toHaveLength(2);
+    for (const entry of calls) expect(entry).toMatchObject({ actualUsd: null, outcome: "failure" });
   });
 
   it("runs setup commands in the repo root before the checks, and hints at setup when tooling is missing", async () => {
@@ -336,6 +339,6 @@ describe("verbose output", () => {
     await adHocChange(cwd);
     const review = await app.ship();
     expect(review.ok).toBe(true);
-    expect(reportText(app)).toContain("produced no findings: the call failed: aborted by signal");
+    expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: timed out after 1\.0s; \S+\/\S+: timed out after 1\.0s/);
   }, 15_000);
 });
