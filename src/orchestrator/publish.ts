@@ -1,10 +1,27 @@
-import type { CommandResult, TaskState } from "../domain.js";
+import type { CommandResult, PlanDocument, ReviewReport, TaskState } from "../domain.js";
 import { reviewDiff } from "../review/review.js";
 import { redact } from "../redact.js";
 import { gateBudget } from "./budget.js";
 import { done, fail, guard, handoff, iso, PUBLISHED_PHASES, requireActive, transition, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { announce, decide } from "./routing.js";
+import { splitCheckLine } from "./tickets.js";
+
+/**
+ * The checks a review runs on the integration branch: the configured ones, else every distinct check the plan's tickets
+ * carry (already validated against the allowlist at plan time), so a project without `checks:` still gets tool evidence.
+ */
+export function reviewChecks(ctx: WorkflowContext, plan: PlanDocument): { name: string; command: string; args: string[] }[] {
+  if (ctx.config.checks.length > 0) return ctx.config.checks.map((check) => ({ name: check.name, command: check.command, args: check.args }));
+  const lines = [...new Set((plan.tickets ?? []).flatMap((ticket) => ticket.checks ?? []))];
+  return lines.map((line) => ({ name: line, ...splitCheckLine(line) }));
+}
+
+/** The summary plus the suggestions, so a review that did not pass says what to do. */
+function reviewText(report: ReviewReport): string {
+  const suggestions = report.findings.filter((finding) => finding.severity === "suggestion").slice(0, 5);
+  return suggestions.length ? `${report.summary}\nSuggestions:\n${suggestions.map((finding) => `- ${finding.message}`).join("\n")}` : report.summary;
+}
 
 /** Completes a task and stops its autopilot watcher. */
 export async function finish(ctx: WorkflowContext, state: TaskState, reason: string): Promise<TaskState> {
@@ -31,7 +48,7 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     const report = await reviewDiff({
       diffs,
       integratedDiff: integrated,
-      checks: ctx.config.checks,
+      checks: reviewChecks(ctx, plan),
       cwd: integration.path ?? ctx.git.repoRoot,
       runner: ctx.checkRunner,
       allowlist: ctx.config.commandAllowlist,
@@ -41,10 +58,10 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     const at = iso(ctx);
     if (report.passed) {
       await ctx.store.update(state.taskId, "review passed", (task) => move({ ...task, review: report }, "AWAITING_PUBLISH_APPROVAL", at));
-      return done(report.summary, report);
+      return done(reviewText(report), report);
     }
     await ctx.store.update(state.taskId, "review blocking", (task) => move({ ...task, review: report }, "IMPLEMENTING", at, "blocking review findings"));
-    return { ok: false, code: "REVIEW_BLOCKING", text: report.summary, data: report };
+    return { ok: false, code: "REVIEW_BLOCKING", text: reviewText(report), data: report };
   });
 }
 
