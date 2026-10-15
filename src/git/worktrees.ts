@@ -93,6 +93,19 @@ export class GitWorkspace {
     return result.stdout.trim();
   }
 
+  /** Why worktrees cannot be made here (not a repository, or no commit yet), or undefined when they can. */
+  async preflight(): Promise<string | undefined> {
+    const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
+    if (inside.code !== 0 || inside.stdout.trim() !== "true") {
+      return `${this.repoRoot} is not a git repository. Run \`git init\` and make a first commit, then /implement again.`;
+    }
+    const head = await this.git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    if (head.code !== 0) {
+      return `The repository at ${this.repoRoot} has no commits yet, so there is nothing to branch worktrees from. Make a first commit (for example \`git commit --allow-empty -m "Initial commit"\`), then /implement again.`;
+    }
+    return undefined;
+  }
+
   async createWorktree(spec: WorktreeSpec): Promise<CreatedWorktree> {
     mkdirSync(path.dirname(spec.dir), { recursive: true });
     const existing = (await this.listWorktrees()).find((item) => samePath(item.path, spec.dir));
