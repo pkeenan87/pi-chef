@@ -506,6 +506,8 @@ export function validateResolvedConfig(config: WorkflowConfig, where = "config")
       }
     });
   }
+  // With no provider configured nothing routes, as with no config file at all.
+  if (Object.keys(config.providers).length === 0) return;
   for (const key of MODEL_KEYS) {
     if (config.tiers[key]) continue;
     const provider = config.models[key];
@@ -658,7 +660,11 @@ export function layerConfigs(
     const u = isRecord(user.providers) ? user.providers : {};
     const p = isRecord(project.providers) ? project.providers : {};
     for (const name of new Set([...Object.keys(u), ...Object.keys(p)])) {
-      providers[name] = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
+      const entry = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
+      // A user entry with no type only adjusts a provider defined elsewhere (for example apiKeyFallback). With
+      // nothing under it, it is not a provider of its own.
+      if (isRecord(entry) && entry.type === undefined) continue;
+      providers[name] = entry;
     }
     merged.providers = providers;
   }

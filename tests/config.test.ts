@@ -168,8 +168,16 @@ describe("loadConfig layering", () => {
     // project overlay merges field-wise, so the user's model name survives
     expect(loadConfig(project).providers.openai?.model).toBe("gpt-5.4");
     writeUser("routing: { maxEscalations: 1 }\n");
-    writeProject("routing: { maxEscalations: 2 }\n");
+    writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\nmodels: { cheap: foundry }\n");
     expect(() => loadConfig(project)).toThrow(/models\./);
+  });
+
+  it("treats a user entry with no type as an adjustment, not a provider", () => {
+    writeUser("providers:\n  anthropic:\n    apiKeyFallback: true\n");
+    // No project file: nothing is configured, as with no config at all.
+    expect(loadConfig(project).providers).toEqual({});
+    writeProject("providers:\n  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }\nmodels: { classifier: anthropic, cheap: anthropic, standard: anthropic, premium: anthropic }\n");
+    expect(loadConfig(project).providers.anthropic).toMatchObject({ type: "anthropic", apiKeyFallback: true });
   });
 
   it("S2: project credential and location fields are ignored with a warning unless they are the default for an undefined provider", () => {

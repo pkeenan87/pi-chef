@@ -97,12 +97,24 @@ async function pick(ctx: WorkflowContext, state: TaskState, ticket: Ticket, fail
   return decision;
 }
 
+/** The lines of a child's stderr that say what went wrong (error and fatal lines), else its last non-trace lines. */
+export function stderrSummary(stderr: string): string {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  const errors = lines.filter((line) => /^(?:[A-Za-z]*Error|fatal|error)\b[:\s]/.test(line));
+  const picked = errors.length ? errors.slice(-3) : lines.filter((line) => !/^at\s|^Node\.js v|^\^+$/.test(line)).slice(-3);
+  return picked.join(" | ").slice(0, 600);
+}
+
 function failureReason(result: TicketRunResult | undefined, thrown: string | undefined, checks: CheckEvidence[]): string | undefined {
   if (thrown) return thrown;
   if (!result) return "The ticket runner returned nothing.";
   if (result.aborted) return "Cancelled.";
   if (result.timedOut) return "The child pi process exceeded its deadline.";
-  if (!result.ok) return result.error ?? `pi exited with code ${result.exitCode}${result.stderrTail.trim() ? `: ${result.stderrTail.trim().split("\n").slice(-3).join(" | ")}` : ""}`;
+  if (!result.ok) {
+    if (result.error) return result.error;
+    const detail = stderrSummary(result.stderrTail);
+    return `pi exited with code ${result.exitCode}${result.modelCalled === false ? " before calling the model" : ""}${detail ? `: ${detail}` : ""}`;
+  }
   const failed = checks.filter((item) => item.exitCode !== 0);
   return failed.length ? `Checks failed: ${failed.map((item) => `${item.name} exited ${item.exitCode}`).join("; ")}` : undefined;
 }
@@ -232,11 +244,13 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
       const ok = reason === undefined;
       finalText = result?.finalText ?? "";
       const usage = result?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: null, turns: 0 };
+      // A child that exited before any model request billed nothing and says nothing about the model.
+      const noModelCall = result?.modelCalled === false;
       // The parent ledgers the child's usage exactly once, here; the child records none of its own model calls.
-      const entry = recordTicketUsage(ctx, requireActive(ctx), { tier: decision.tier, provider: decision.provider, model: decision.model, usage, outcome: ok ? "success" : "failure", retries: escalations, reason: `ticket ${ticket.id}` });
+      const entry = recordTicketUsage(ctx, requireActive(ctx), { tier: decision.tier, provider: decision.provider, model: decision.model, usage, outcome: ok ? "success" : "failure", retries: escalations, reason: `ticket ${ticket.id}`, noModelCall });
       ctx.inflight.release(flight);
       if (budgetReason) budgetStop = true;
-      await ctx.store.bumpMetric(taskType(), decision.tier, ok, ctx.now(), decision.candidate);
+      if (!noModelCall) await ctx.store.bumpMetric(taskType(), decision.tier, ok, ctx.now(), decision.candidate);
       await patchRun(ctx, taskId, ticket, (run) => ({
         ...run,
         status: "in-progress",
