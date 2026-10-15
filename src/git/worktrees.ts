@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, realpathSync, writeFileSync, type Stats } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { WorkflowError } from "../domain.js";
@@ -27,6 +27,13 @@ export interface IntegrateResult {
   conflicts: { branch: string; files: string[] }[];
 }
 
+export interface RemoveWorktreeResult {
+  ok: boolean;
+  worktreeRemoved: boolean;
+  branchDeleted: boolean;
+  error?: string;
+}
+
 async function runGit(cwd: string, args: string[]): Promise<GitResult> {
   try {
     const { stdout, stderr } = await exec("git", ["-c", "user.email=pi-cost@localhost", "-c", "user.name=pi-cost", "-c", "commit.gpgsign=false", ...args], {
@@ -40,6 +47,37 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
     const failed = error as { code?: number; stdout?: string; stderr?: string };
     return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? String(error) };
   }
+}
+
+const NO_HOOKS = "/dev/null";
+const DISABLED_PUSH_URL = "disabled-by-pi-cost-router://";
+
+/** The GIT_CONFIG_* variables that make `git push` fail for the given remotes and for any other URL. See `GitWorkspace.childGitEnv`. */
+export function pushDisabledGitEnv(remotes: string[]): Record<string, string> {
+  const config: [string, string][] = [
+    ...remotes.map((name): [string, string] => [`remote.${name}.pushurl`, DISABLED_PUSH_URL]),
+    // An empty pushInsteadOf matches every URL, so pushes to a new remote or a literal URL go to the disabled scheme too.
+    [`url.${DISABLED_PUSH_URL}.pushInsteadOf`, ""],
+    ["credential.helper", ""],
+    ["core.hooksPath", NO_HOOKS],
+  ];
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(config.length), GIT_TERMINAL_PROMPT: "0" };
+  config.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  });
+  return env;
+}
+
+function samePath(a: string, b: string): boolean {
+  const resolve = (value: string) => {
+    try {
+      return realpathSync(value);
+    } catch {
+      return path.resolve(value);
+    }
+  };
+  return resolve(a) === resolve(b);
 }
 
 export class GitWorkspace {
@@ -57,7 +95,18 @@ export class GitWorkspace {
 
   async createWorktree(spec: WorktreeSpec): Promise<CreatedWorktree> {
     mkdirSync(path.dirname(spec.dir), { recursive: true });
-    const result = await this.git(["worktree", "add", "-b", spec.branch, spec.dir, spec.baseSha]);
+    const existing = (await this.listWorktrees()).find((item) => samePath(item.path, spec.dir));
+    if (existing) {
+      // Reuse a worktree left by a crashed run, but only if it is for the expected branch.
+      if (existing.branch !== spec.branch) {
+        throw new WorkflowError("GIT", `Worktree ${spec.dir} already exists on branch ${existing.branch || "(detached)"}, expected ${spec.branch}.`);
+      }
+      return { ...spec, headSha: await this.head(spec.dir) };
+    }
+    const branchExists = (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${spec.branch}`])).code === 0;
+    const result = branchExists
+      ? await this.git(["worktree", "add", spec.dir, spec.branch])
+      : await this.git(["worktree", "add", "-b", spec.branch, spec.dir, spec.baseSha]);
     if (result.code !== 0) {
       throw new WorkflowError("GIT", `Could not create worktree ${spec.branch}: ${result.stderr || result.stdout}`);
     }
@@ -83,7 +132,7 @@ export class GitWorkspace {
 
   writeOwned(worktree: string, file: string, content: string, allowed: string[]): void {
     const relative = file.replaceAll("\\", "/").replace(/^\.\//, "");
-    if (relative.startsWith("/") || relative.includes("..")) {
+    if (relative.startsWith("/") || relative.split("/").includes("..")) {
       throw new WorkflowError("PATH_DENIED", `Refusing path ${file}`);
     }
     if (!allowed.includes(relative)) {
@@ -94,14 +143,60 @@ export class GitWorkspace {
     if (!absolute.startsWith(`${root}${path.sep}`) && absolute !== root) {
       throw new WorkflowError("PATH_DENIED", `Refusing path ${file}`);
     }
-    mkdirSync(path.dirname(absolute), { recursive: true });
-    writeFileSync(absolute, content);
+    // Walk each component between the root and the target with lstat, so a symlinked directory is
+    // refused before mkdir can create anything through it.
+    let cursor = root;
+    for (const part of path.relative(root, path.dirname(absolute)).split(path.sep).filter(Boolean)) {
+      cursor = path.join(cursor, part);
+      let stat: Stats | undefined;
+      try {
+        stat = lstatSync(cursor);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (!stat) {
+        mkdirSync(cursor);
+      } else if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new WorkflowError("PATH_DENIED", `Refusing path ${file}: ${part} is a symlink or not a directory.`);
+      }
+    }
+    // Defense in depth: the resolved parent must still sit inside the worktree.
+    const realRoot = realpathSync(root);
+    const realParent = realpathSync(path.dirname(absolute));
+    if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${path.sep}`)) {
+      throw new WorkflowError("PATH_DENIED", `Refusing path ${file}: resolves outside the worktree.`);
+    }
+    // lstat (not existsSync) so a dangling symlink is seen too.
+    try {
+      if (lstatSync(absolute).isSymbolicLink()) throw new WorkflowError("PATH_DENIED", `Refusing to write through symlink ${file}.`);
+    } catch (error) {
+      if (error instanceof WorkflowError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    // O_NOFOLLOW closes the race between the lstat above and the open.
+    let fd: number;
+    try {
+      fd = openSync(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o666);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new WorkflowError("PATH_DENIED", `Refusing to write through symlink ${file}.`);
+      throw error;
+    }
+    try {
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
   }
 
+  /**
+   * Commits everything in `cwd`. A worktree may hold hooks or config a ticket child wrote (hooks live in the shared
+   * .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
+   */
   async commitAll(cwd: string, message: string): Promise<string> {
-    const add = await this.git(["add", "-A"], cwd);
+    const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
+    const add = await this.git([...safe, "add", "-A"], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
-    const commit = await this.git(["commit", "-m", message], cwd);
+    const commit = await this.git([...safe, "commit", "--no-verify", "-m", message], cwd);
     if (commit.code !== 0 && !/nothing to commit/i.test(commit.stdout + commit.stderr)) {
       throw new WorkflowError("GIT", commit.stderr || commit.stdout);
     }
@@ -109,18 +204,18 @@ export class GitWorkspace {
   }
 
   async diff(cwd: string, base: string): Promise<string> {
-    const result = await this.git(["diff", `${base}...HEAD`], cwd);
+    const result = await this.git(["diff", `${base}...HEAD`, "--"], cwd);
     if (result.code !== 0) {
-      const fallback = await this.git(["diff", base], cwd);
+      const fallback = await this.git(["diff", base, "--"], cwd);
       return fallback.stdout;
     }
     return result.stdout;
   }
 
   async ensureBranch(branch: string, base: string): Promise<void> {
-    const exists = await this.git(["rev-parse", "--verify", "--quiet", branch]);
+    const exists = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
     if (exists.code === 0) return;
-    const created = await this.git(["branch", branch, base]);
+    const created = await this.git(["branch", "--", branch, base]);
     if (created.code !== 0) throw new WorkflowError("GIT", created.stderr || `Could not create ${branch}`);
   }
 
@@ -136,16 +231,27 @@ export class GitWorkspace {
       if (added.code !== 0) throw new WorkflowError("GIT", added.stderr || added.stdout);
     }
     const conflicts: IntegrateResult["conflicts"] = [];
+    // All-or-nothing: remember where the (tool-owned) integration worktree started.
+    const startSha = await this.head(options.worktreePath);
+    const rollback = async () => {
+      await this.git(["merge", "--abort"], options.worktreePath);
+      await this.git(["reset", "--hard", startSha], options.worktreePath);
+    };
     for (const branch of options.branches) {
-      const merge = await this.git(["merge", "--no-ff", "--no-commit", branch], options.worktreePath);
+      const merge = await this.git(["merge", "--no-ff", "--no-commit", "--", branch], options.worktreePath);
       if (merge.code !== 0) {
         const files = await this.git(["diff", "--name-only", "--diff-filter=U"], options.worktreePath);
-        await this.git(["merge", "--abort"], options.worktreePath);
-        conflicts.push({ branch, files: files.stdout.split("\n").filter(Boolean) });
+        const conflicted = files.stdout.split("\n").filter(Boolean);
+        await rollback();
+        if (conflicted.length === 0) {
+          throw new WorkflowError("GIT", `Merge of ${branch} failed: ${merge.stderr || merge.stdout}`);
+        }
+        conflicts.push({ branch, files: conflicted });
         return { conflicts };
       }
       const commit = await this.git(["commit", "-m", `Integrate ${branch}`], options.worktreePath);
       if (commit.code !== 0 && !/nothing to commit/i.test(commit.stdout + commit.stderr)) {
+        await rollback();
         throw new WorkflowError("GIT", commit.stderr || commit.stdout);
       }
     }
@@ -157,12 +263,35 @@ export class GitWorkspace {
     return result.code === 0;
   }
 
-  async removeWorktree(dir: string, branch?: string): Promise<void> {
-    await this.git(["worktree", "remove", "--force", dir]);
-    if (branch) await this.git(["branch", "-D", branch]);
+  /**
+   * Removes the worktree and then (only if that succeeded) the branch. Never throws on git failure;
+   * callers must check `ok` before dropping state for the worktree.
+   */
+  async removeWorktree(dir: string, branch?: string): Promise<RemoveWorktreeResult> {
+    const removed = await this.git(["worktree", "remove", "--force", "--", dir]);
+    if (removed.code !== 0) {
+      return { ok: false, worktreeRemoved: false, branchDeleted: false, error: (removed.stderr || removed.stdout).trim() || "git worktree remove failed" };
+    }
+    if (!branch) return { ok: true, worktreeRemoved: true, branchDeleted: false };
+    const deleted = await this.git(["branch", "-D", "--", branch]);
+    if (deleted.code !== 0) {
+      return { ok: false, worktreeRemoved: true, branchDeleted: false, error: (deleted.stderr || deleted.stdout).trim() || "git branch -D failed" };
+    }
+    return { ok: true, worktreeRemoved: true, branchDeleted: true };
+  }
+
+  /**
+   * Environment for a ticket child so that git cannot publish from its worktree: every remote gets an unusable pushurl,
+   * any URL (including a remote the child adds, or a URL on the command line) is rewritten for pushes to the same
+   * unusable scheme, credential helpers and hooks are off, and git never prompts. Uses git's GIT_CONFIG_COUNT variables,
+   * which override every config file, so the child cannot undo it by editing config.
+   */
+  async childGitEnv(cwd: string): Promise<Record<string, string>> {
+    const remotes = await this.git(["remote"], cwd);
+    return pushDisabledGitEnv(remotes.code === 0 ? remotes.stdout.split("\n").map((name) => name.trim()).filter(Boolean) : []);
   }
 
   async push(branch: string, remote = "origin"): Promise<GitResult> {
-    return this.git(["push", "-u", remote, branch]);
+    return this.git(["push", "-u", "--", remote, branch]);
   }
 }

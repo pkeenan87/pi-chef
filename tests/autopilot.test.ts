@@ -114,4 +114,50 @@ describe("autopilot", () => {
     expect(capped.cursor.fixCycles).toBe(5);
     expect(capped.replies).toHaveLength(0);
   });
+
+  const limits = { maxFixCycles: 20, maxSpendUsd: 10, maxRuntimeMs: 3_600_000, backoffSeconds: 30 };
+  const failing = () => ({ verified: false, evidence: "", summary: "" });
+
+  it("grows backoff exponentially, caps it, and keeps it above the flat value", async () => {
+    let cursor = freshCursor("2026-10-14T00:00:00.000Z");
+    const seen: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const out = await autopilotCycle({
+        cursor, pr: pr({ threads: [] }), allowedFiles: [], limits: { ...limits, maxAttemptsPerItem: 99, maxBackoffSeconds: 200 },
+        now: new Date("2026-10-14T00:01:00.000Z"), headRelation: "same", fixer: async () => failing(), apply: async () => ({ sha: "x" }),
+      });
+      seen.push(out.cursor.backoffSeconds);
+      cursor = out.cursor;
+    }
+    expect(seen).toEqual([30, 60, 120, 200]);
+  });
+
+  it("retries an unverified fix and pauses after the attempt limit", async () => {
+    let cursor = freshCursor("2026-10-14T00:00:00.000Z");
+    let calls = 0;
+    const run = () =>
+      autopilotCycle({
+        cursor, pr: pr({ threads: [] }), allowedFiles: [], limits: { ...limits, maxAttemptsPerItem: 2 },
+        now: new Date("2026-10-14T00:01:00.000Z"), headRelation: "same",
+        fixer: async () => { calls += 1; return calls < 3 ? failing() : { verified: true, evidence: "ok", summary: "s", edits: [] }; },
+        apply: async () => ({ sha: "x" }),
+      });
+    const first = await run();
+    expect(first.action).toBe("continue");
+    expect(first.cursor.seen).toHaveLength(0);
+    cursor = first.cursor;
+    const second = await run();
+    expect(calls).toBe(2);
+    expect(second.action).toBe("pause");
+    expect(second.reason).toMatch(/not verified after 2 attempts/);
+  });
+
+  it("marks an item seen only after a verified fix", async () => {
+    const out = await autopilotCycle({
+      cursor: freshCursor("2026-10-14T00:00:00.000Z"), pr: pr({ threads: [] }), allowedFiles: [], limits,
+      now: new Date("2026-10-14T00:01:00.000Z"), headRelation: "same",
+      fixer: async () => ({ verified: true, evidence: "ok", summary: "s" }), apply: async () => ({ sha: "x" }),
+    });
+    expect(out.cursor.seen).toContain("check:ci:aaa");
+  });
 });

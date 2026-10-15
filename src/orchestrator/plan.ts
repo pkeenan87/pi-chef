@@ -106,6 +106,16 @@ export function materialChange(left: PlanDocument, right: PlanDocument): boolean
   return signature(left) !== signature(right);
 }
 
+/** Rejects duplicate group ids, missing dependencies, and cycles before any work starts. */
+export function assertGraph(groups: PlanGroup[]): void {
+  const ids = new Set<string>();
+  for (const group of groups) {
+    if (ids.has(group.id)) throw new WorkflowError("PLAN_INVALID", `Duplicate task group id ${group.id}.`);
+    ids.add(group.id);
+  }
+  waves(groups);
+}
+
 export function waves(groups: PlanGroup[]): PlanGroup[][] {
   const pending = groups.map((group) => ({ ...group }));
   const done = new Set<string>();

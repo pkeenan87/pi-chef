@@ -2,7 +2,7 @@
 
 Local Pi extension and TypeScript modules that keep a coding task cheap without dropping the review. A deterministic policy picks the provider, the budget, and the next phase. Models only advise. State stays in the workspace under `.pi-workflows/`. There is no hosted coordinator and no database.
 
-The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, implement, review, publish, then watch the pull request. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. A local OpenAI-compatible server is optional.
+The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, implement, review, publish, then watch the pull request. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
 
 ## Supported Pi version
 
@@ -182,6 +182,26 @@ npm test
 npm run typecheck
 ```
 
+## Configuration
+
+**Layering.** `~/.pi/agent/cost-workflow.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, `workers`, and `autopilot` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
+
+**User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `decisionsPath` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
+
+**Policy fields a project can only tighten.**
+
+| Field | Layering rule |
+|---|---|
+| `commandAllowlist` | A project entry is kept only if the user list covers it. With no user list, the built-in defaults are the ceiling. So the result is an intersection, and a project cannot grant itself new commands |
+| `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
+| `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
+| `approvals` | Plan approval stays required, merge stays `manual`, and publish is `auto` only if the user config says so |
+| `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier) |
+
+The YAML must not contain secrets, API keys, or tokens. `autopilot.autoMerge: true` is rejected.
+
+Provider setup: [Azure CLI and Foundry](#azure-cli-and-foundry-deployments) (`endpoint`, `audience: https://ai.azure.com`, `decisionsPath`) and [Vercel CLI and AI Gateway](#vercel-cli-and-ai-gateway) (`vercel login`, `vercel link`, `vercel env pull`, `projectDir`).
+
 ## Account login
 
 This extension does not implement OAuth and does not fall back to an API key.
@@ -190,7 +210,8 @@ This extension does not implement OAuth and does not fall back to an API key.
 |---|---|---|
 | OpenAI | Pi `/login openai`, then **Sign in with ChatGPT** | An `oauth` credential on `openai` or legacy `openai-codex`. `OPENAI_API_KEY` is rejected |
 | Anthropic | Pi `/login anthropic` (Claude Pro/Max) | An `oauth` credential. `ANTHROPIC_API_KEY` and the other Anthropic key env vars are rejected |
-| Foundry | `az login` (below) | An Azure CLI token for one request. Pi's built-in `azure` provider is API-key only and is not used |
+| Foundry | `az login` (below) | An Azure CLI token for one request, audience `https://ai.azure.com`. Pi's built-in `azure` provider is API-key only and is not used |
+| Vercel AI Gateway | `vercel login && vercel link` (below) | A `VERCEL_OIDC_TOKEN` from the environment or the pulled env file. No AI Gateway API key |
 | Local | Start your own server | `baseUrl` in config. A bearer is sent only if you set `apiKeyEnv` |
 
 `/auth status` prints provider, status, method, and a short detail. It reads `type` and `expires` from `~/.pi/agent/auth.json`. It does not copy access tokens, refresh tokens, or keys into the task, the prompt, or the log.
@@ -202,7 +223,7 @@ This extension does not implement OAuth and does not fall back to an API key.
 A subscription login is not proof of free API usage.
 
 - Pi marks both ChatGPT and Claude Pro/Max as `isSubscription: true`, then sends the token to an API. Confirm the account with a real request after `/login`. Tests in this repo do not make that call.
-- ChatGPT sign-in does not work with the Decisions API (`gpt-6-luna`). Pi filters those models out for oauth credentials.
+- ChatGPT sign-in keeps the chat models `gpt-6-luna`, `gpt-6-astra`, and `gpt-6.1-sol`. Pi filters out only classifier-type models for oauth credentials, which is why the classifier tier uses Foundry or Vercel instead.
 - Anthropic's own setting `warnings.anthropicExtraUsage` (default on) warns that subscription auth may bill extra usage. This tool does not turn that off and does not invent a different login.
 
 ### Session renewal
@@ -213,7 +234,7 @@ An oauth credential with `expires` in the past is `expired`. `/implement` moves 
 
 ```bash
 az login
-export AZURE_AI_ENDPOINT="https://<resource>.openai.azure.com"
+export AZURE_AI_ENDPOINT="https://<resource>.services.ai.azure.com"
 ```
 
 In `.pi-workflows/config.yaml`:
@@ -224,18 +245,119 @@ providers:
     type: azure-foundry
     auth: azure-cli
     endpointEnv: AZURE_AI_ENDPOINT
-    apiVersion: 2024-10-21
-    audience: https://cognitiveservices.azure.com
-    api: openai-completions   # or openai-responses, or azure-openai-responses
-    deployments:
-      classifier: classifier
-      reasoning: reasoning
-      cheap: classifier
+    routeStyle: v1                    # <endpoint>/openai/v1/..., deployment name in `model`, no api-version
+    audience: https://ai.azure.com    # az account get-access-token --resource https://ai.azure.com
+    api: openai-completions           # or openai-responses
+    # decisionsPath: /decisions       # Decisions API path under <endpoint>/openai/v1 (unverified, see below)
 ```
 
-`az account get-access-token` supplies the bearer for a single call. The token stays in memory. Endpoint, deployment name, API version, audience, and wire shape all come from config. Do not set `AZURE_OPENAI_API_KEY` for this workflow.
+The current Foundry route is the OpenAI-compatible v1 API at `https://<resource>.services.ai.azure.com/openai/v1/` (also `<resource>.openai.azure.com/openai/v1/`). The deployment name goes in `model`, there is no `api-version`, and the Entra token audience is `https://ai.azure.com`. A `tiers` entry for Foundry names a deployment, for example `{ provider: foundry, model: grok-4-7 }`.
 
-`/auth status` reports Foundry as unavailable until an Azure probe is configured in-process. A failed `az login` pauses Foundry calls.
+Configs written for the legacy deployments route keep working: set `apiVersion` (and the `cognitiveservices` audience) and omit `routeStyle`, and requests go to `/openai/deployments/<name>/chat/completions?api-version=...` as before. Set `routeStyle: v1` to opt in.
+
+`az account get-access-token` supplies the bearer for a call. The decisions client keeps it in memory until five minutes before expiry; chat models registered with Pi read it through an `!az account get-access-token ...` command. Do not set `AZURE_OPENAI_API_KEY` for this workflow.
+
+`Microsoft-Decision-1` is in the Foundry catalog (Direct from Azure, preview). It is a Decisions-API model, not a chat model, so the classifier tier calls `POST <endpoint>/openai/v1/decisions`. That path is an assumption: if your deployment exposes it elsewhere, set `providers.foundry.decisionsPath`. Decision-1 takes text only and has a 32K context, so the classifier input is truncated.
+
+## Vercel CLI and AI Gateway
+
+```bash
+vercel login
+vercel link          # once, in the directory named by providers.vercel.projectDir
+```
+
+```yaml
+providers:
+  vercel:
+    type: vercel-ai-gateway
+    auth: vercel-cli
+    baseUrl: https://ai-gateway.vercel.sh/v1   # default
+    projectDir: .                               # linked project; relative paths resolve from the repo root
+    envFile: .env.local                         # default
+```
+
+The gateway authenticates with `Authorization: Bearer <VERCEL_OIDC_TOKEN>`. The token comes from the `VERCEL_OIDC_TOKEN` environment variable or from `envFile` inside `projectDir`. The expiry is read from the token's `exp` claim (not verified; Vercel verifies it). If the token is missing or has less than 10 minutes left, the extension runs `vercel env pull .env.local --yes` in `projectDir` (an argument array, no shell) and reads the file again. Tokens last about 12 hours. The token is cached in memory until it nears expiry and is never logged, written to config, or put in a task file. Model ids are `creator/model`, for example `typesafe-ai/jev`.
+
+`/auth status` reports Vercel. `/auth login vercel` prints `vercel login && vercel link`. The ignore rules should already cover `.env.local`; check that yours do.
+
+## Tiers and who serves them
+
+Each tier lists candidate models under `tiers:` in the config. The runtime picks within a tier; the tier itself is still chosen by the deterministic policy.
+
+| Tier | Candidates (sample config) |
+|---|---|
+| deterministic / mechanical | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
+| classifier | `Microsoft-Decision-1` deployed in Azure Foundry, or `typesafe-ai/jev` on Vercel AI Gateway. Both use the Decisions API |
+| cheap | ChatGPT Luna `gpt-6-luna` (OpenAI account login), or Claude Haiku `claude-haiku-5-5` (Anthropic account login) |
+| standard | Claude Sonnet `claude-sonnet-5-5` (Anthropic), or Grok 4.7 deployed in Foundry |
+| premium | Claude Opus `claude-opus-5-5` (Anthropic), or Sol 6.1 `gpt-6.1-sol` (OpenAI) |
+| advisor (on demand) | Claude Fable `claude-fable-5-1` (Anthropic), or GPT Astra `gpt-6-astra` (OpenAI and/or a Foundry deployment) |
+
+```yaml
+tiers:
+  cheap:
+    - { provider: openai, model: gpt-6-luna }
+    - { provider: anthropic, model: claude-haiku-5-5 }
+  classifier:
+    - { provider: foundry, model: Microsoft-Decision-1, api: decisions }
+    - { provider: vercel, model: "typesafe-ai/jev", api: decisions }
+```
+
+The old `models: { classifier: local, cheap: foundry, ... }` map still works. Each entry becomes a one-candidate tier. A tier listed under `tiers` replaces its `models` entry. `deterministic` and `advisor` exist only under `tiers`.
+
+How a candidate is picked:
+
+1. Filter out candidates that the org allowlist or `proprietaryCode` excludes, whose own circuit breaker is open, whose expected cost exceeds the remaining task or daily budget, and whose provider is not signed in. For the deterministic tier an unreachable local server also excludes it (a cached `GET <baseUrl>/models` with a short timeout). If no provider is signed in for a tier, the choice ignores sign-in so the usual "run /login" pause appears instead of a silent escalation to a dearer tier.
+2. Score each remaining candidate as expected cost per success: its price times the expected token mix (`workers.tokenBudget`, 4:1 input to output) divided by its success probability. The probability is a Thompson sample from Beta(1 + successes, 1 + failures) for that task type and model, so a new or unlucky model still gets tried now and then.
+3. The lowest score wins. Ties go to config order. A candidate with no `pricing` row ranks after priced ones and the decision is flagged `price_unknown`.
+4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/implement` blocks the task with `NO_CANDIDATE`; it never falls back to literal edits for a model tier).
+
+Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. A classifier call counts as a success when its answer reaches `routing.minConfidence`.
+
+Subscription models (ChatGPT, Claude) are priced at 0 in the sample, so they tie on cost and the sampled success odds decide. That is a placeholder: every price in the sample config is a placeholder to replace from your rate cards.
+
+### Showing the chosen model
+
+Every routing decision (`/plan`, `/implement` and each escalation, `/review`, `/autopilot`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
+
+Chat turns on `cost-opt/auto` set no status line of their own: Pi's footer already shows `auto • level → model`. While a task is active they still add a `route` event to its log.
+
+### Chat routing (`cost-opt/auto`)
+
+`auto` is a stateful, cache-aware router (`src/router/virtual.ts`). Switching models mid-conversation loses the provider's prompt cache, so it moves as rarely as it can.
+
+- **First user turn.** The message is classified once, with the same selector-chosen Decisions classifier that planning uses (keyword fallback if it is unavailable or not confident). The policy picks a tier (budget, availability, circuit breakers, and the org allowlist apply) and the selector picks a model in it. A model the session already uses is kept if it is a candidate of that tier. The choice is stored as router state (`tier`, model, `phase`, classification, `switches`) on the session branch.
+- **Later turns and tool follow-ups.** They stay on the stored model. It is re-evaluated only when a message is longer than 2000 characters or contains an escalation cue ("this is hard", "think harder", "use a stronger model"), or when the thinking level rises to `high` or `xhigh`. Tiers only go up this way, never down.
+- **One switch to build.** If the first model is `standard` or `premium` (the plan phase) and a successful `edit` or `write` tool result appears, the router switches once to the `cheap` tier's candidate and the phase becomes `build`. It does not switch when the classification is security-sensitive or high complexity, and never twice in one user turn. A later escalation starts a new plan phase.
+- **Retries.** After an overload, rate-limit, 5xx, or auth error the router moves to another candidate of the same tier and counts a failure against the failed model (feeding the circuit breaker). After a context overflow it picks a candidate with a larger context window in the same or a higher tier. Other errors retry on the same model.
+- **Compaction and other direct calls** go to the `cheap` tier.
+- **Budget.** A hard limit stops routing with an error. A soft limit prefers the cheapest candidate in a tier and never moves up a tier.
+- Every returned model must be registered in Pi with credentials (OpenAI and Anthropic only through account login); unusable candidates are skipped, and the error names the tier if none is left.
+
+Thinking levels offered: `low`, `medium`, `high`, `xhigh`. They pass through as the physical thinking level (Pi clamps it to the model) and also steer the tier:
+
+| Level | Effect |
+|---|---|
+| `low` | Prefer cheaper: one tier below the classifier's choice, never below `cheap`, never for security-sensitive work |
+| `medium` | The classifier's choice |
+| `high` | At least `standard` |
+| `xhigh` | `premium` |
+
+The declared context window and max output are the smallest known across the configured chat candidates.
+
+### Advisor
+
+`/advisor <question>` asks the advisor tier one question. It checks the budget first, builds a redacted context of at most 8,000 characters (task request, plan summary, classification, last failure, diff stat), picks a candidate with the same selector, ledgers the call with reason `advisor`, and prints the answer. It never changes the task phase and never edits files. Pi only suggests it: after a security-sensitive plan, and when `/implement` runs out of escalations. The suggestion is a notification ("Consider /advisor ..."); the model is never called without the command.
+
+### Classifier
+
+The classifier tier sends one Decisions request with five questions (`task_type`, `complexity`, `risk`, `recommended_tier`, and a `security_sensitive` predicate). Answer confidences and probabilities become the classification confidence (the weakest of the first three). A refusal, a missing answer, or a confidence below `routing.minConfidence` uses the keyword fallback. Strong security keywords in the request still force a security classification when the model says otherwise. With no usable decisions candidate, the older chat classifier option, or the keyword fallback, applies.
+
+### Where model calls come from
+
+OpenAI, Anthropic, Foundry, Vercel, and local chat models are called through Pi's model registry, which owns authentication. OpenAI and Anthropic calls are refused unless the registry is using an account login. Foundry, Vercel, and local models are registered with `pi.registerProvider` at session start, with credentials from `!command` values (the Azure CLI token, or a read of the pulled Vercel env file), so no token is held in config.
+
+`/implement` calls the selected model only for plan groups that have no literal `edits`. The model returns whole-file edits for the group's own files, which are written through the same owned-file check as literal edits. Groups with approved literal edits keep applying exactly those edits.
 
 ## Local inference
 
@@ -247,7 +369,7 @@ providers:
     model: qwen2.5-coder:7b
 ```
 
-Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This process does not start that server. The classifier tier defaults to `local`.
+Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This process does not start that server. The deterministic tier uses it only while `<baseUrl>/models` answers.
 
 ## Sample workflow
 
@@ -273,11 +395,35 @@ The command must also be on `commandAllowlist` (prefix or exact). Destructive co
 /autopilot stop
 ```
 
-`/plan` classifies the request, writes a draft (`plan.md`, `plan.json`), and names parallel groups, file overlap, and a worktree allocation. It does not create a worktree and does not edit the repo.
+`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, allowlisted bash, `web_search`, `web_fetch`) plus three plan tools. It does not create a worktree and does not edit the repo.
+
+1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
+2. **Spec.** The model saves `spec.md` with `plan_spec` (summary, decisions, assumptions, out of scope, risks).
+3. **Tickets.** The model submits vertical, independently testable slices with `plan_tickets`. Code validates unique ids, existing blockers, no cycles, at least one acceptance criterion, and that each ticket fits `workers.ticketContextTokens` (default 150000; the larger of the model's estimate and a code estimate of chars/4 plus listed file sizes plus 20K overhead). An oversize ticket is sent back to be split. You then answer a short granularity question (approve, merge, split, edit dependencies; not counted in the 7). Each ticket is written to `tasks/<id>/tickets/NN-slug.md`, and each becomes a plan group (`NN-slug`, `dependsOn` from `blockedBy`) so the plan still goes through `/approve-plan`.
+
+`/plan --no-questions <request>` skips the interview: the model records the choices it would have recommended as assumptions in the spec. A request that contains a literal ```` ```tasks ```` block is drafted directly as before (`plan.md`, `plan.json`, no model turn).
+
+Ticket plans have no literal edits. In Pi, `/implement` runs each ticket in a child `pi` process (see Implement). Outside Pi, a workflow built without a `ticketRunner` fails with "ticket runner not configured" and applies nothing.
 
 `/approve-plan` freezes `plan.vN.approved.json`. That file is write-once. A material scope change needs a new approval. The command then writes a handoff and asks Pi for a new session (`newSession`). If the host cannot do that, it compacts, and the handoff file remains either way.
 
 `/implement` refuses while the plan is still a draft. It creates one worktree and branch per independent group (`cost/<task-id>/<group>`), records the base SHA, and runs up to `workers.concurrency` (default 2) at once. Overlapping files are serialized. Groups integrate one at a time onto `cost/<task-id>/integration`. A conflict aborts that merge. Security-sensitive plans (auth, permissions, secrets, production) wait for a person before any edit.
+
+**Tickets run in child pi processes.** For a plan with tickets, each ticket attempt starts a fresh `pi --mode json -p --no-session --model <provider>/<id> --tools read,bash,edit,write,grep,find,ls,web_search,web_fetch --no-extensions -e <this package's extension> --append-system-prompt <file> @<ticket prompt file>` with the ticket's worktree as its working directory (argv array, no shell). Tickets follow `blockedBy` in waves, at most `workers.concurrency` at once; each ticket's worktree branches from its blockers, and integration is unchanged. Per ticket:
+
+1. The ticket is routed with purpose `implement`. `suggestedTier` is a hint: it is capped by `routing.maxTier`, and a security-sensitive classification still forces the policy tier. The selector picks the model; the status line reads `ticket 01 → provider/model` and a `route` event is logged.
+2. The prompt holds the ticket (what to build, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by (truncated), the repo's `AGENTS.md` (truncated), and the instruction to implement only this ticket, add tests, run the checks, and close with each criterion marked met or not met plus the files changed.
+3. When the child exits, its changes are committed, then the configured checks and the ticket's own `checks` run through the caching runner and the command allowlist. The ticket is `done` only if the child exited cleanly and every check passed. The ticket file's `## Status:` goes `in-progress`, then `done` or `failed`, and criteria checkboxes are ticked from the child's summary (best effort).
+4. A failed ticket is retried in a fresh child on the same worktree at the next tier, up to `routing.maxEscalations`. After that the task is `BLOCKED` with an `/advisor` suggestion. Finished tickets stay done, and a later `/implement` runs only the rest.
+5. The budget is checked before every ticket attempt. A hard budget starts no new tickets and blocks the task.
+
+`workers.ticketContextTokens` (150K) is a soft target at run time. The child's own compaction continues. If a child's context crosses it, `/implement` warns, the ticket file gets a warning line, and `/status` marks it ("consider splitting"). `workers.deadlineMs` bounds each child attempt (SIGTERM, then SIGKILL after 5 seconds). Cancelling kills the child the same way.
+
+The parent ledgers each ticket attempt once from the child's JSON events: provider and model from the route, cost from Pi's `cost.total` when positive, otherwise priced from config, otherwise unknown. `/status` shows each ticket's state, model, tokens, cost and peak context; the status line shows `ticket 01 · turn 3 · ~52k ctx` while a child runs.
+
+**Child mode.** The child sets `PI_COST_ROUTER_CHILD=1` (plus `PI_COST_ROUTER_TASK`, `PI_COST_ROUTER_TICKET`, `PI_COST_ROUTER_ROOT`) and loads only this package's extension in a minimal form: our chat providers (foundry, vercel, local), `web_search` / `web_fetch`, and the bash deny hook below. No commands, no virtual router, no poller, no plan tools, no `message_end` ledgering. `web_search` checks the parent's task and daily budget from the parent's `.pi-workflows/` and ledgers under the parent task. `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are removed from the child's environment; the child uses Pi's account login.
+
+Limitations: the child's `bash` tool is not allowlisted, because a ticket must run builds and tests, so a child can still run other commands in its worktree. The `tool_call` hook that refuses `git push`, `gh` writes, and the sandbox deny rules is defense in depth only (see Limitations below). The real controls are the child's allowlisted environment and git config, the `--tools` list, and the post-run checks. Review the diff. The child gets its prompt from a file in the system temp directory that is deleted after the run.
 
 `/review` diffs each worktree and the integration branch against the plan. Blocking findings (failed checks, secrets, auth bypass, `eval`) are separate from suggestions. `passed` is true only when every configured check exited 0 and nothing blocking was found.
 
@@ -296,6 +442,13 @@ Budgets in the sample (`taskUsd: 20`, `autopilotPrUsd: 10`, `dailyUsd: 75`) are 
 `/cost json` is the dashboard source. `compareBaseline` in `src/cost/ledger.ts` diffs this workflow against a Cursor Auto sample you supply (cost per merged PR, time to merge-ready, success rate, retries, regressions, interventions). The repo does not invent a Cursor Auto number.
 
 Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. Implementation starts at the cheapest proven tier, or at deterministic for mechanical work, and escalates at most `maxEscalations` times (default 2), never past `maxTier`. The classifier tier is for decisions, so a failed deterministic step escalates to `cheap`, not to the classifier. Three failures and zero successes in a task class open the circuit breaker.
+
+## Web tools
+
+The extension registers two tools for the model to call.
+
+- `web_search` runs Anthropic's server-side `web_search_20250305` tool through Claude Haiku 5.5 (`claude-haiku-5-5`), using your Anthropic account login (`/login anthropic`). API keys are not accepted. It is refused when the task or daily budget is exhausted. Each call is written to the cost ledger (tier `web_search`, no query text) and the status line shows `anthropic/claude-haiku-5-5 · web_search`. Anthropic's per-search fee is not priced: `pricing:` rows only hold token prices, so only token cost is computed.
+- `web_fetch` runs locally. It fetches public http(s) pages only (private, loopback, and link-local addresses are refused), converts HTML to markdown, and caps response size, redirects, and time. See `src/tools/web-fetch.ts` for the exact limits.
 
 ## Autopilot safety
 
@@ -317,13 +470,14 @@ A failed check escalates within the cap and records the unknown or known charge.
 
 | Command | Effect |
 |---|---|
-| `/plan <request>` | Draft plan, risks, tests, cost, acceptance. No edits |
+| `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a draft plan. No edits |
 | `/approve-plan` | Freeze a version and reset context |
 | `/implement` | Approved plan only. Worktrees, tests, handoff |
 | `/review` | Independent diff and checks |
 | `/push` | Branch, commit is already on the integration branch, push, open or update the PR |
 | `/autopilot [stop\|status]` | One watch cycle, then a local poll |
 | `/route <task>` | Preview routing |
+| `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
 | `/status` | Phase, auth, worktrees, budget |
 | `/reset-phase` | Handoff and context reset. Files stay |
@@ -339,8 +493,8 @@ Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → REVIE
 ```text
 src/extension.ts          Pi commands and the virtual model cost-opt/auto
 src/orchestrator/         state machine, plans, workflow
-src/providers/            account-login gate, Foundry, local
-src/router/               classifier schema and policy
+src/providers/            account-login gate, Foundry, Vercel, Decisions client, Pi registry chat
+src/router/               classifier schema, policy, and per-tier candidate selector
 src/agents/               worker pool
 src/review/               diff and check evidence
 src/github/               gh client and autopilot cycle
@@ -369,7 +523,9 @@ Artifacts for a task:
 - No paid provider call is made by the tests. OpenAI and Anthropic transports throw unless a test injects one. Account login is verified by reading Pi 1.2.0's provider objects, not by completing a prompt.
 - The autopilot poll does not outlive the Pi process. There is no detached daemon.
 - Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked.
+- The ticket child's bash hook is defense in depth, not a boundary: it normalizes wrappers (`env`, `command`, `sudo`, `nohup`, ...), looks inside `sh -c` and `eval`, and refuses `git push` and `gh` writes, but shell can always hide a command (a script file, an alias, an encoded string). The real controls are (a) an environment allowlist, so the child never sees `GITHUB_TOKEN`, `GH_TOKEN`, `*_TOKEN`, `*_KEY`, `*_SECRET`, `AWS_*`, `VERCEL_OIDC_TOKEN`, `ANTHROPIC_*`, or `OPENAI_*`, and (b) git config injected through `GIT_CONFIG_COUNT` that disables pushing for every remote and any URL, turns credential helpers and hooks off, and sets `GIT_TERMINAL_PROMPT=0`. A child can still use credentials stored in files under your home directory (for example `~/.ssh` or a `gh` config file) for non-git tools, so run tickets from an account that holds nothing you would not give the model.
+- Ticket children run in their own process group. They are stopped with SIGTERM then SIGKILL on cancel, deadline, a budget stop, `session_shutdown`, and Pi exiting. A running child's spend is tracked as its messages arrive, and every concurrent child is stopped when ledger plus in-flight spend passes the task or daily limit (the overshoot is at most one model call).
 - Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). It is not a full allowlist of every other command, because that would break the host agent. Worker checks are allowlisted.
-- `cost-opt/auto` uses the deterministic classifier, not a live local model, so a virtual route cannot spend money by accident. Sub-agent edits in `/implement` come from the approved plan's edit list. The worker pool does not spawn further agents.
+- `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands. In `/implement`, groups with literal `edits` apply exactly those edits; only groups without them are written by the selected model. The worker pool does not spawn further agents.
 - The `gh` client is argument-array `gh` with no shell. Tests use an in-memory GitHub client. A live `gh auth status` is still required before `/push` against GitHub.
 - Context reset uses `newSession` from a command, then `compact` if that throws. Both leave the files in `.pi-workflows`. Whether the new session is empty of the old transcript depends on Pi; the handoff file is the durable copy.

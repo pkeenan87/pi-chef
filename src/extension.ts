@@ -1,17 +1,43 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRoute } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
-import { loadConfig } from "./config.js";
+import { statSync } from "node:fs";
+import { configPaths, loadConfig, type WorkflowConfig } from "./config.js";
+import { GhCli } from "./github/gh.js";
 import { isDeniedCommand } from "./sandbox.js";
-import { FileAuthProbe } from "./providers/auth.js";
+import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
+import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { Workflow, type SessionControl } from "./orchestrator/service.js";
-import { decideRoute } from "./router/policy.js";
+import { asResult } from "./orchestrator/context.js";
+import { declaredLimits, routeVirtual, VIRTUAL_THINKING_LEVELS, type RouterRegistry, type RouterRequest, type RouterState } from "./router/virtual.js";
 import { fallbackClassification } from "./router/classify.js";
-import type { TokenUsage } from "./domain.js";
+import type { Availability } from "./router/select.js";
+import type { CommandResult, TokenUsage } from "./domain.js";
+import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
+import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
+import { CHILD_ENV, runTicketInChild, type TicketRunner } from "./agents/pi-runner.js";
+import { registerChildMode } from "./child-mode.js";
+import { SEARCH_MODEL } from "./tools/web-search.js";
 
 let active: Workflow | undefined;
+let runtime: ProviderRuntime | undefined;
 let cwd = process.cwd();
 let cancelPoll: (() => void) | undefined;
+let piRef: Pick<ExtensionAPI, "registerProvider" | "sendUserMessage"> | undefined;
+/** Last config read for a project root, keyed by the files' mtime and size. */
+let loaded: { root: string; key: string; config: WorkflowConfig } | undefined;
+/** Active tools before /plan restricted them, so they can be restored when planning ends. */
+let toolsBeforePlan: string[] | undefined;
+const TOOLS_ENTRY = "cost-workflow-tools";
+const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
+/** Signature of the provider and tier settings last registered with Pi. */
+let registeredSignature: string | undefined;
+
+/** Production ticket runner: a fresh child pi per ticket attempt. Vercel's token file is refreshed first. */
+const childTicketRunner: TicketRunner = async (input) => {
+  if (input.model.provider === "vercel") await runtime?.vercel?.getToken();
+  return runTicketInChild(input);
+};
 
 function clearPoll(): void {
   cancelPoll?.();
@@ -26,32 +52,89 @@ function schedule(delayMs: number, run: () => void): () => void {
 }
 
 export function bindWorkflow(workflow: Workflow | undefined): void {
+  clearPoll();
   active = workflow;
+  loaded = undefined;
+  registeredSignature = undefined;
+  if (workflow) cwd = workflow.cwd;
 }
 
 export function currentWorkflow(): Workflow | undefined {
   return active;
 }
 
-function workflowFor(root: string, session?: SessionControl): Workflow {
-  if (!active || root !== cwd) {
-    cwd = root;
-    active = new Workflow({ cwd: root, auth: new FileAuthProbe(), session, schedule });
-    return active;
+function stamp(file: string): string {
+  try {
+    const stat = statSync(file);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "-";
   }
-  if (session) {
-    active = new Workflow({
-      cwd: root,
-      auth: new FileAuthProbe(),
-      session,
-      schedule,
-      config: active.config,
-      store: active.store,
-      git: active.git,
+}
+
+/**
+ * Config for a project root, reloaded when either config file changes. Throws the config error when the
+ * files are invalid; the previous good config is kept so a later fix applies without a restart.
+ */
+function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
+  const { projectPath, userPath } = configPaths(root);
+  const key = `${stamp(projectPath)}|${stamp(userPath)}`;
+  if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
+  const config = loadConfig(root);
+  const changed = !!loaded && loaded.root === root;
+  loaded = { root, key, config };
+  return { config, changed };
+}
+
+/** Registers Foundry, Vercel, and local chat models with Pi, once per distinct provider/tier configuration. */
+function syncProviders(config: WorkflowConfig): void {
+  if (!piRef || typeof piRef.registerProvider !== "function") return;
+  const signature = JSON.stringify([config.providers, config.tiers, config.models]);
+  if (signature === registeredSignature) return;
+  registeredSignature = signature;
+  registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel });
+}
+
+/**
+ * One Workflow per project root: the autopilot timer and its cancel handle live on the instance, so
+ * rebuilding it per command would orphan a running timer. Later commands only rebind session/UI hooks,
+ * and a changed config file is applied to the existing instance. Throws when the config is invalid.
+ */
+function workflowFor(root: string, ctx?: CommandContext): Workflow {
+  const { config, changed } = refreshConfig(root);
+  if (!active || root !== cwd) {
+    clearPoll();
+    active?.dispose();
+    cwd = root;
+    runtime = createRuntime(config, root);
+    active = new Workflow({ cwd: root, config, auth: runtime.auth, deciders: runtime.deciders, github: new GhCli(root), schedule, ticketRunner: childTicketRunner });
+    // A watcher that was running before a restart or session reset keeps watching.
+    active.resumeAutopilot();
+  } else if (changed) {
+    runtime = createRuntime(config, root);
+    active.reconfigure(config, { auth: runtime.auth, deciders: runtime.deciders });
+    try {
+      syncProviders(config);
+    } catch {
+      /* provider registration problems show up when the model is used */
+    }
+  }
+  if (ctx) {
+    const registry = (ctx as { modelRegistry?: PiRegistryLike }).modelRegistry;
+    active.bind({
+      chat: registry ? createRegistryChat(registry) : undefined,
+      status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-router", text) : undefined,
+      planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-plan", text) : undefined,
+      startTurn: piRef && typeof piRef.sendUserMessage === "function" ? (text) => piRef!.sendUserMessage(text) : undefined,
+      session: sessionFrom(ctx),
+      confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
+      notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
     });
   }
   return active;
 }
+
+type CommandContext = ExtensionContext & Parameters<typeof sessionFrom>[0];
 
 function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never : (options?: { withSession?: (next: { sendMessage: Function }) => Promise<void> }) => Promise<{ cancelled: boolean }>; compact: (options?: { customInstructions?: string }) => void }): SessionControl {
   return {
@@ -74,6 +157,55 @@ function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never :
   };
 }
 
+/**
+ * While /plan runs the model gets read-only tools plus the plan tools; otherwise the plan tools are hidden.
+ * Called at every agent start and end and after each command, so a restart or pause cannot leave it stuck.
+ */
+function syncPlanTools(pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools"> & Partial<Pick<ExtensionAPI, "getAllTools" | "appendEntry">>): void {
+  if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+  const planning = !!(active ?? tryWorkflowFor(cwd))?.planningStage();
+  const current = pi.getActiveTools();
+  if (planning) {
+    if (!toolsBeforePlan) {
+      // Plan tools already active with no saved set (a reload lost it): the current set is the restricted one, so add Pi's defaults back.
+      toolsBeforePlan = current.some((name) => PLAN_TOOL_NAMES.includes(name)) ? withDefaultTools(pi, current.filter((name) => !PLAN_TOOL_NAMES.includes(name))) : current;
+      // Persisted so a reload in the middle of /plan still knows what to give back.
+      pi.appendEntry?.(TOOLS_ENTRY, { tools: toolsBeforePlan });
+    }
+    const base = toolsBeforePlan.filter((name) => !PLANNING_DISABLED_TOOLS.includes(name));
+    const next = [...new Set([...base, ...PLANNING_TOOLS])];
+    if (next.length !== current.length || next.some((name) => !current.includes(name))) pi.setActiveTools(next);
+  } else {
+    const remembered = toolsBeforePlan;
+    let base = (remembered ?? current).filter((name) => !PLAN_TOOL_NAMES.includes(name));
+    // Plan tools still active with no record of the earlier set means the record was lost (a reload): give back the default tools Pi has.
+    if (!remembered && current.some((name) => PLAN_TOOL_NAMES.includes(name))) base = withDefaultTools(pi, base);
+    if (remembered) pi.appendEntry?.(TOOLS_ENTRY, { tools: null });
+    toolsBeforePlan = undefined;
+    if (base.length !== current.length || base.some((name) => !current.includes(name))) pi.setActiveTools(base);
+  }
+}
+
+/** `tools` plus whichever of Pi's default tools (read, bash, edit, write) Pi has registered. */
+function withDefaultTools(pi: Partial<Pick<ExtensionAPI, "getAllTools">>, tools: string[]): string[] {
+  const known = new Set((typeof pi.getAllTools === "function" ? pi.getAllTools() : []).map((tool) => tool.name));
+  return [...new Set([...tools, ...DEFAULT_TOOLS.filter((name) => known.has(name))])];
+}
+
+/** Reads the tool set saved when /plan began, from the session's own entries. */
+function restoreToolsBeforePlan(ctx: ExtensionContext): void {
+  try {
+    const entries = ctx.sessionManager?.getEntries?.() ?? [];
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.customType !== TOOLS_ENTRY) continue;
+      const tools = (entry.data as { tools?: unknown } | undefined)?.tools;
+      toolsBeforePlan = Array.isArray(tools) && tools.every((name) => typeof name === "string") ? (tools as string[]) : undefined;
+    }
+  } catch {
+    /* no saved set: syncPlanTools falls back to Pi's default tools */
+  }
+}
+
 export function registerWorkflow(pi: ExtensionAPI): void {
   for (const spec of COMMANDS) {
     pi.registerCommand(spec.name, {
@@ -84,8 +216,15 @@ export function registerWorkflow(pi: ExtensionAPI): void {
           ctx.ui.notify(spec.description, "info");
           return;
         }
-        const workflow = workflowFor(ctx.cwd, sessionFrom(ctx));
-        const result = await dispatch(workflow, spec.name, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
+        let result: CommandResult;
+        try {
+          const workflow = workflowFor(ctx.cwd, ctx as unknown as CommandContext);
+          result = await spec.run(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
+        } catch (error) {
+          // An invalid config must reach the user as a failed command, not as an exception inside Pi.
+          result = asResult(error);
+        }
+        syncPlanTools(pi);
         if (ctx.hasUI) {
           ctx.ui.setStatus("cost-workflow", result.ok ? result.text.split("\n")[0] : undefined);
           ctx.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
@@ -99,16 +238,44 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       if (ctx.hasUI) ctx.ui.notify(helpText(), "info");
     },
   });
+  piRef = pi;
   pi.on("session_start", (_event, ctx) => {
-    workflowFor(ctx.cwd);
+    // A new session may start with an empty provider registry, so register again.
+    registeredSignature = undefined;
+    try {
+      const workflow = workflowFor(ctx.cwd);
+      for (const warning of workflow.config.warnings ?? []) if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+    } catch (error) {
+      // The router and tools still register; each command reports the config error when it runs.
+      if (ctx.hasUI) ctx.ui.notify(`Cost workflow config problem: ${asResult(error).text}`, "warning");
+    }
     pi.appendEntry("cost-workflow", { cwd: ctx.cwd });
-    registerRouter(pi, ctx);
+    // A /plan that was running before a restart resumes with its tools and progress line.
+    toolsBeforePlan = undefined;
+    restoreToolsBeforePlan(ctx);
+    syncPlanTools(pi);
+    const progress = active?.planningStatus();
+    if (progress && ctx.hasUI) ctx.ui.setStatus("cost-plan", progress);
+    registerRouter(pi, { cwd: ctx.cwd, modelRegistry: ctx.modelRegistry });
   });
   pi.on("session_shutdown", () => {
     clearPoll();
+    active?.dispose();
     active = undefined;
   });
+  pi.on("before_agent_start", (event) => {
+    syncPlanTools(pi);
+    if (event.messageType !== "user") return undefined;
+    const prompt = active?.planningPrompt();
+    return prompt ? { message: { customType: "plan-interview-context", content: prompt, display: false } } : undefined;
+  });
+  pi.on("agent_end", () => {
+    syncPlanTools(pi);
+  });
   pi.on("tool_call", (event) => {
+    if (isToolCallEventType("bash", event) && active?.planningStage() && !isReadOnlyCommand(event.input.command, active.cwd)) {
+      return { block: true, reason: "Planning is read-only: this command is not on the read-only allowlist. Use read, grep, find, ls, or a plain read-only command." };
+    }
     if (isToolCallEventType("bash", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command. It stays blocked until a person runs an approved command." };
     }
@@ -126,6 +293,9 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   pi.on("message_end", (event) => {
     const message = event.message;
     if (message.role !== "assistant" || !("usage" in message) || !message.usage) return;
+    // A failed attempt that Pi retries (possibly on another model) bills nothing: the retry ledgers its own message.
+    const stop = "stopReason" in message ? message.stopReason : undefined;
+    if ((stop === "error" || stop === "aborted") && !message.usage.input && !message.usage.output && !message.usage.cacheRead && !message.usage.cacheWrite) return;
     const usage: TokenUsage = {
       input: typeof message.usage.input === "number" ? message.usage.input : null,
       output: typeof message.usage.output === "number" ? message.usage.output : null,
@@ -133,81 +303,120 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       cacheWrite: typeof message.usage.cacheWrite === "number" ? message.usage.cacheWrite : null,
       requests: 1,
     };
-    active?.observeUsage({ provider: message.provider, model: message.model, usage });
+    // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
+    (active ?? tryWorkflowFor(cwd))?.observeUsage({ provider: message.provider, model: message.model, usage });
   });
 }
 
-function registerRouter(pi: ExtensionAPI, fallback: ExtensionContext): void {
-  const config = loadConfig(fallback.cwd);
-  pi.registerVirtualModel({
+/** The workflow for a project root, or undefined when its config is invalid. */
+function tryWorkflowFor(root: string): Workflow | undefined {
+  try {
+    return workflowFor(root);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where the router resolves config and the workflow: the launch cwd until a session starts, then the session's. */
+type RouterHost = { cwd: string; modelRegistry?: ExtensionContext["modelRegistry"] };
+
+function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
+  try {
+    // Foundry, Vercel, and local models must be in Pi's registry before the router can return them.
+    syncProviders(refreshConfig(fallback.cwd).config);
+  } catch {
+    /* a bad config is reported by the commands; it must not stop the session from starting */
+  }
+  // Reloaded whenever either config file changes, so edits apply without restarting Pi.
+  const configFor = (): WorkflowConfig => {
+    const { config, changed } = refreshConfig(fallback.cwd);
+    if (changed) syncProviders(config);
+    return config;
+  };
+  let limits: { contextWindow?: number; maxTokens?: number } = {};
+  try {
+    limits = declaredLimits(refreshConfig(fallback.cwd).config, (provider, id) => fallback.modelRegistry?.find(provider, id) as { contextWindow?: number; maxTokens?: number } | undefined);
+  } catch {
+    /* limits stay unknown */
+  }
+  pi.registerVirtualModel<RouterState>({
     provider: "cost-opt",
     id: "auto",
     name: "Cost-optimized auto",
+    thinkingLevels: [...VIRTUAL_THINKING_LEVELS],
+    ...limits,
     async route(request, ctx) {
-      if (request.reason !== "user" && request.previous) {
-        return { model: request.previous.model, thinkingLevel: request.previous.thinkingLevel ?? "medium" };
-      }
-      const text = request.messages.map((message) => ("content" in message && typeof message.content === "string" ? message.content : "")).join("\n");
-      const classification = fallbackClassification(text, "virtual_route");
-      const decision = decideRoute(classification, config, {}, { purpose: "preview" });
-      const registry = ctx.modelRegistry;
-      if (decision.provider === "openai" || decision.provider === "anthropic") {
-        const exact = registry.find(decision.provider, decision.model);
-        const model = exact && registry.isUsingOAuth(exact) ? exact : registry.getAvailable().find((item) => item.provider === decision.provider && registry.isUsingOAuth(item));
-        if (!model) {
-          throw new Error(`No ${decision.provider} account login is available. Run /login ${decision.provider}. API keys are not accepted.`);
-        }
-        return { model, thinkingLevel: "medium" as const };
-      }
-      if (decision.provider === "foundry" || decision.provider === "local") {
-        const model = registry.find(decision.provider, decision.model);
-        if (!model) throw new Error(`Provider ${decision.provider} is not registered in this Pi session.`);
-        return { model, thinkingLevel: "medium" as const };
-      }
-      throw new Error("Deterministic tier does not select a Pi model. Use /implement for mechanical edits.");
+      type PiModel = (typeof request)["model"];
+      const registry = ctx.modelRegistry as unknown as RouterRegistry<PiModel>;
+      // Build the workflow if needed so the daily limit applies even before any task exists.
+      const workflow = currentWorkflow() ?? tryWorkflowFor(fallback.cwd);
+      const result = await routeVirtual<PiModel>(request as unknown as RouterRequest<PiModel>, {
+        registry,
+        now: () => workflow?.now() ?? new Date(),
+        classify: async (text) => (workflow ? workflow.classifyChat(text) : fallbackClassification(text, "virtual_route")),
+        async snapshot() {
+          const taskId = workflow?.activeTaskId();
+          // Provider readiness: the auth probe, with the registry as the truth for account-login providers.
+          const availability: Availability = workflow ? await workflow.availability() : {};
+          for (const provider of ["openai", "anthropic"] as const) {
+            availability[provider] = { ok: registry.getAvailable().some((item) => item.provider === provider && registry.isUsingOAuth?.(item)), detail: "no account login" };
+          }
+          return {
+            config: configFor(),
+            table: workflow?.store.readMetrics() ?? {},
+            availability,
+            budget: workflow ? workflow.checkBudget(taskId) : "ok",
+            budgetRemainingUsd: workflow?.budgetRemainingUsd(taskId),
+          };
+        },
+        recordFailure: (input) => workflow?.recordChatFailure(input),
+        // The footer shows the routed model natively; chat turns only add a route event to the active task's log.
+        onRoute: async (event) => {
+          const taskId = workflow?.activeTaskId();
+          if (workflow && taskId) await workflow.announce(taskId, event.purpose, event, () => undefined);
+        },
+        // Pi reads the Vercel token from the env file, so make sure the CLI has refreshed it first.
+        prepare: async (candidate) => {
+          if (candidate.provider === "vercel") await runtime?.vercel?.getToken();
+        },
+      });
+      return result as unknown as ModelRoute<RouterState>;
     },
   });
 }
 
-async function dispatch(
-  workflow: Workflow,
-  name: string,
-  args: string,
-  confirm: (title: string, message: string) => Promise<boolean>,
-): Promise<{ ok: boolean; text: string }> {
-  switch (name) {
-    case "plan":
-      return workflow.plan(args);
-    case "approve-plan":
-      return workflow.approvePlan();
-    case "implement":
-      return workflow.implement();
-    case "review":
-      return workflow.review();
-    case "push":
-      return workflow.push();
-    case "autopilot":
-      return workflow.autopilot(args);
-    case "route":
-      return workflow.route(args);
-    case "cost":
-      return workflow.cost(args);
-    case "status":
-      return workflow.status();
-    case "reset-phase":
-      return workflow.resetPhase();
-    case "worktrees": {
-      const wantsConfirm = args.includes("confirm");
-      const confirmed = wantsConfirm ? await confirm("Clean worktrees", "Delete unmerged worktrees that are not part of an active PR?") : false;
-      return workflow.worktrees(args.replace(/\s*confirm\s*/g, " ").trim(), confirmed);
-    }
-    case "auth":
-      return workflow.auth(args);
-    default:
-      return { ok: false, text: "Unknown command." };
-  }
+/** Registers web_search and web_fetch. Search is budget-gated and ledgered through the active workflow. */
+export function registerExtensionTools(pi: Pick<ExtensionAPI, "registerTool">, overrides: Partial<WebToolsDeps> = {}): void {
+  registerPlanTools(pi, currentWorkflow);
+  registerWebTools(pi, {
+    budgetCheck: () => {
+      const workflow = currentWorkflow();
+      if (!workflow) return;
+      workflow.showStatus(`anthropic/${SEARCH_MODEL} · web_search`);
+      if (workflow.checkBudget(workflow.activeTaskId()) === "hard") {
+        throw new Error("Task or daily budget is exhausted. web_search was not called. Run /cost for details.");
+      }
+    },
+    onUsage: (record) => {
+      currentWorkflow()?.recordWebSearch(record);
+    },
+    ...overrides,
+  });
 }
 
 export default function extension(pi: ExtensionAPI): void {
+  // A ticket child process loads providers and web tools only (see child-mode.ts).
+  if (process.env[CHILD_ENV] === "1") {
+    registerChildMode(pi);
+    return;
+  }
   registerWorkflow(pi);
+  registerExtensionTools(pi);
+  // Register cost-opt/auto at load time too, so `--model cost-opt/auto`, settings defaults, and `--list-models`
+  // resolve it before any session starts. session_start registers it again with the session's cwd and registry.
+  try {
+    registerRouter(pi, { cwd: process.cwd() });
+  } catch {
+    /* session_start retries; a bad config is reported by the commands */
+  }
 }

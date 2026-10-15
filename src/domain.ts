@@ -16,11 +16,37 @@ export const PHASES = [
 
 export type Phase = (typeof PHASES)[number];
 
-export const PROVIDERS = ["openai", "anthropic", "foundry", "local"] as const;
+export const PROVIDERS = ["openai", "anthropic", "foundry", "local", "vercel"] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 export const TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;
 export type Tier = (typeof TIERS)[number];
+
+/** Tiers a config can list candidates for. `advisor` is on-demand and never part of the escalation ladder. */
+export const TIER_KEYS = [...TIERS, "advisor"] as const;
+export type TierKey = (typeof TIER_KEYS)[number];
+
+/** One model that can serve a tier. `decisions` models answer structured questions instead of chatting. */
+export interface TierCandidate {
+  provider: ProviderId;
+  model: string;
+  api: "chat" | "decisions";
+  label?: string;
+}
+
+/** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */
+export interface ConsideredCandidate {
+  provider: ProviderId;
+  model: string;
+  score?: number;
+  excludedReason?: string;
+  priced?: boolean;
+}
+
+/** Metrics key for one model inside a tier (additive to the per-tier key the circuit breaker reads). */
+export function modelMetricKey(tier: string, provider: string, model: string): string {
+  return `model:${tier}:${provider}/${model}`;
+}
 
 export type Complexity = "low" | "medium" | "high";
 
@@ -52,6 +78,22 @@ export interface PlanGroup {
   edits: PlanEdit[];
 }
 
+/** One vertical slice of work that fits a single fresh context window. */
+export interface Ticket {
+  /** Two-digit ordinal such as "01". */
+  id: string;
+  slug: string;
+  title: string;
+  whatToBuild: string;
+  acceptanceCriteria: string[];
+  blockedBy: string[];
+  suggestedTier?: Tier;
+  /** Ownership hints, not a hard allowlist. */
+  files?: string[];
+  estimatedContextTokens: number;
+  checks?: string[];
+}
+
 export interface PlanDocument {
   version: number;
   createdAt: string;
@@ -62,6 +104,8 @@ export interface PlanDocument {
   groups: PlanGroup[];
   overlap: string[];
   securitySensitive: boolean;
+  /** Present when the plan came from the interview and ticket flow; each ticket is one group. */
+  tickets?: Ticket[];
 }
 
 export interface RoutingDecision {
@@ -76,6 +120,13 @@ export interface RoutingDecision {
   reviewTier: Tier;
   escalations: number;
   circuitOpen: boolean;
+  /** The selected candidate, when the tier has a model. Absent for the literal-edit path. */
+  candidate?: TierCandidate;
+  /** One line on why this candidate won (or why none could be used). */
+  selectionReason?: string;
+  considered?: ConsideredCandidate[];
+  /** Set when no model can serve the tier. Callers must stop instead of running literal edits. */
+  blocked?: string;
 }
 
 export interface TokenUsage {
@@ -177,9 +228,37 @@ export interface AttemptRecord {
   at: string;
 }
 
+/** Where an interview-driven /plan stands while the task is in PLANNING (or PAUSED from it). */
+export interface PlanningProgress {
+  stage: "interview" | "tickets";
+  /** True when /plan --no-questions skipped the interview. */
+  noQuestions: boolean;
+}
+
+/** Where one ticket stands during /implement (tickets run in child pi processes). */
+export interface TicketRun {
+  status: "in-progress" | "done" | "failed";
+  tier?: Tier;
+  provider?: string;
+  model?: string;
+  /** Attempts so far, one per tier tried. */
+  attempts: number;
+  turns: number;
+  /** All tokens the child reported across attempts (input, output, cache). */
+  tokens: number;
+  /** Known cost across attempts; null when any attempt's cost was unknown. */
+  costUsd: number | null;
+  maxContextTokens: number;
+  crossedTarget: boolean;
+  /** Redacted tail of the child's final message, passed to tickets this one blocks. */
+  summary?: string;
+  error?: string;
+}
+
 export interface TaskState {
   taskId: string;
   phase: Phase;
+  planning?: PlanningProgress;
   pausedFrom?: Phase;
   createdAt: string;
   updatedAt: string;
@@ -190,6 +269,8 @@ export interface TaskState {
   approvedVersion?: number;
   publishApproved: boolean;
   worktrees: WorktreeRecord[];
+  /** Per-ticket progress, keyed by ticket id. */
+  ticketRuns?: Record<string, TicketRun>;
   integration?: { branch: string; sha?: string; path?: string };
   review?: ReviewReport;
   pullRequest?: PullRequestRef;

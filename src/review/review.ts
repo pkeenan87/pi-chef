@@ -6,9 +6,35 @@ export interface CheckRunner {
   run(command: string, args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }>;
 }
 
-const SECRET_DIFF = /(?:sk-|AKIA|ghp_|password\s*[:=]|api[_-]?key\s*[:=]|BEGIN [A-Z ]*PRIVATE KEY)/i;
+const SECRET_DIFF = new RegExp(
+  [
+    String.raw`\bsk-[A-Za-z0-9_-]{20,}`,
+    String.raw`\bAKIA[0-9A-Z]{16}\b`,
+    String.raw`\bghp_[A-Za-z0-9]{20,}`,
+    // Quoted literal values only, so `password = process.env.X` or `apiKey: string` do not match.
+    String.raw`\bpassword\s*[:=]\s*["'][^"'\s]{4,}["']`,
+    String.raw`\bapi[_-]?key\s*[:=]\s*["'][^"'\s]{8,}["']`,
+    "BEGIN [A-Z ]*PRIVATE KEY",
+  ].join("|"),
+  "i",
+);
 const AUTH_BYPASS = /\b(skip(?:ped)?\s+auth|disable(?:d)?\s+auth|auth\s*[:=]\s*false|verify\s*[:=]\s*false)\b/i;
-const EVAL_CALL = /\beval\s*\(/;
+// Not a method call such as `model.eval(` or an identifier ending in eval.
+const EVAL_CALL = /(?<![.\w$])eval\s*\(/;
+const CHECK_CONCURRENCY = 4;
+
+async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 export async function reviewDiff(options: {
   diffs: { groupId: string; diff: string }[];
@@ -54,29 +80,21 @@ export async function reviewDiff(options: {
     });
   }
   const checks: CheckEvidence[] = [];
-  for (const check of options.checks) {
+  const outcomes = await mapBounded(options.checks, CHECK_CONCURRENCY, async (check) => {
     try {
       assertCommandAllowed(check.command, check.args, options.allowlist);
     } catch (error) {
-      checks.push({
-        name: check.name,
-        command: check.command,
-        args: check.args,
-        cwd: options.cwd,
-        exitCode: null,
-        stdout: "",
-        stderr: (error as Error).message,
-        ran: false,
-      });
-      findings.push({
-        severity: "blocking",
-        category: "checks",
-        message: `Check ${check.name} is not allowlisted.`,
-        evidence: (error as Error).message,
-      });
-      continue;
+      const message = (error as Error).message;
+      const evidence: CheckEvidence = { name: check.name, command: check.command, args: check.args, cwd: options.cwd, exitCode: null, stdout: "", stderr: message, ran: false };
+      const finding: Finding = { severity: "blocking", category: "checks", message: `Check ${check.name} is not allowlisted.`, evidence: message };
+      return { evidence, finding };
     }
-    const result = await options.runner.run(check.command, check.args, options.cwd);
+    let result: { code: number; stdout: string; stderr: string };
+    try {
+      result = await options.runner.run(check.command, check.args, options.cwd);
+    } catch (error) {
+      result = { code: 1, stdout: "", stderr: `Runner error: ${(error as Error).message}` };
+    }
     const evidence: CheckEvidence = {
       name: check.name,
       command: check.command,
@@ -87,15 +105,20 @@ export async function reviewDiff(options: {
       stderr: redact(result.stderr).slice(0, 4000),
       ran: true,
     };
-    checks.push(evidence);
-    if (result.code !== 0) {
-      findings.push({
-        severity: "blocking",
-        category: "tests",
-        message: `${check.name} failed.`,
-        evidence: redact(`${commandLine(check.command, check.args)} exited ${result.code}\n${result.stderr || result.stdout}`).slice(0, 2000),
-      });
-    }
+    const finding: Finding | undefined =
+      result.code !== 0
+        ? {
+            severity: "blocking",
+            category: "tests",
+            message: `${check.name} failed.`,
+            evidence: redact(`${commandLine(check.command, check.args)} exited ${result.code}\n${result.stderr || result.stdout}`).slice(0, 2000),
+          }
+        : undefined;
+    return { evidence, finding };
+  });
+  for (const outcome of outcomes) {
+    checks.push(outcome.evidence);
+    if (outcome.finding) findings.push(outcome.finding);
   }
   if (options.checks.length === 0) {
     findings.push({

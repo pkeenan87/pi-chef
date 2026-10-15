@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { WorkflowError, type ProviderId } from "../domain.js";
@@ -9,7 +9,7 @@ export type AuthStatus = "ready" | "missing" | "expired" | "blocked" | "unavaila
 export interface ProviderAuthView {
   provider: ProviderId;
   status: AuthStatus;
-  method: "oauth" | "azure-cli" | "local" | "api-key" | "none";
+  method: "oauth" | "azure-cli" | "vercel-cli" | "local" | "api-key" | "none";
   detail: string;
   expiresAt?: string;
 }
@@ -81,13 +81,40 @@ export function readAuthFile(file: string): Record<string, StoredCredential> {
   return meta;
 }
 
+/** How long a successful `az account show` is reused (ms). */
+export const AZURE_SESSION_TTL_MS = 60_000;
+
 export class FileAuthProbe implements AuthProbe {
+  private fileCache?: { file: string; mtimeMs: number; size: number; stored: Record<string, StoredCredential> };
+  private azureReady?: { at: number };
+
+  /** auth.json is re-read only when its mtime or size changes. */
+  private readStored(file: string): Record<string, StoredCredential> {
+    let stat: { mtimeMs: number; size: number } | undefined;
+    try {
+      stat = statSync(file);
+    } catch {
+      stat = undefined;
+    }
+    if (!stat) {
+      this.fileCache = undefined;
+      return readAuthFile(file);
+    }
+    const cached = this.fileCache;
+    if (cached && cached.file === file && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.stored;
+    const stored = readAuthFile(file);
+    this.fileCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, stored };
+    return stored;
+  }
+
   constructor(
     private readonly options: {
       authFile?: string;
       now?: () => number;
       azure?: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
       localReachable?: () => Promise<boolean>;
+      /** Passive Vercel token check (see createVercelTokenSource().status). */
+      vercel?: () => { status: "ready" | "expired" | "missing"; detail: string; expiresAt?: string; refreshable?: boolean };
     } = {},
   ) {}
 
@@ -97,7 +124,7 @@ export class FileAuthProbe implements AuthProbe {
       const file = this.options.authFile ?? path.join(homedir(), ".pi", "agent", "auth.json");
       let stored: Record<string, StoredCredential> = {};
       try {
-        stored = readAuthFile(file);
+        stored = this.readStored(file);
       } catch {
         return { provider, status: "unavailable", method: "none", detail: "auth.json could not be read." };
       }
@@ -114,8 +141,12 @@ export class FileAuthProbe implements AuthProbe {
       if (!this.options.azure) {
         return { provider, status: "unavailable", method: "azure-cli", detail: "Azure CLI probe is not configured." };
       }
+      if (this.azureReady && now - this.azureReady.at < AZURE_SESSION_TTL_MS) {
+        return { provider, status: "ready", method: "azure-cli", detail: "Azure CLI session is present." };
+      }
       const result = await this.options.azure(["account", "show", "-o", "json"]);
       if (result.code !== 0) {
+        this.azureReady = undefined;
         return {
           provider,
           status: "missing",
@@ -123,7 +154,23 @@ export class FileAuthProbe implements AuthProbe {
           detail: redact(result.stderr || "az account show failed. Run az login."),
         };
       }
+      this.azureReady = { at: now };
       return { provider, status: "ready", method: "azure-cli", detail: "Azure CLI session is present." };
+    }
+    if (provider === "vercel") {
+      if (!this.options.vercel) {
+        return { provider, status: "unavailable", method: "vercel-cli", detail: "Vercel is not configured. Add providers.vercel and run `vercel login && vercel link`." };
+      }
+      const view = this.options.vercel();
+      // An expired or missing token is refreshed by `vercel env pull` on the next call when a project is linked.
+      const refreshable = view.status !== "ready" && view.refreshable === true;
+      return {
+        provider,
+        status: view.status === "ready" || refreshable ? "ready" : view.status === "expired" ? "expired" : "missing",
+        method: "vercel-cli",
+        detail: view.detail,
+        expiresAt: view.expiresAt,
+      };
     }
     if (this.options.localReachable) {
       const ok = await this.options.localReachable();

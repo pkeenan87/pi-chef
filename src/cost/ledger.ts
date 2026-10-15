@@ -43,39 +43,164 @@ export function buildCostRecord(input: UsageInput, pricing: PricingRow[], at: Da
   };
 }
 
+export interface SpendBucket {
+  knownUsd: number;
+  unknown: number;
+  /** Estimated spend for unknown-cost entries in this bucket (additive field). */
+  estimatedUnknownUsd?: number;
+}
+
 export interface SpendSummary {
   knownUsd: number;
   unknownRecords: number;
-  byPhase: Record<string, { knownUsd: number; unknown: number }>;
-  byProvider: Record<string, { knownUsd: number; unknown: number }>;
-  byModel: Record<string, { knownUsd: number; unknown: number }>;
-  byTask: Record<string, { knownUsd: number; unknown: number }>;
+  /** Same as unknownRecords; named to match budget callers. */
+  unknownCount: number;
+  /** Worst-case estimate for unknown-cost entries: tokens x most expensive configured price for the provider. */
+  estimatedUnknownUsd: number;
+  /** Unknown entries that could not be estimated (no token counts or no configured price for the provider). */
+  unestimatedUnknownCount: number;
+  byPhase: Record<string, SpendBucket>;
+  byProvider: Record<string, SpendBucket>;
+  byModel: Record<string, SpendBucket>;
+  byTask: Record<string, SpendBucket>;
 }
 
-function bump(bucket: Record<string, { knownUsd: number; unknown: number }>, key: string, record: CostRecord): void {
-  const current = bucket[key] ?? { knownUsd: 0, unknown: 0 };
-  if (record.actualUsd === null) current.unknown += 1;
-  else current.knownUsd += record.actualUsd;
+const MICRO = 1_000_000;
+
+/** Integer micro-USD so repeated sums do not drift. */
+function toMicro(usd: number): number {
+  return Math.round(usd * MICRO);
+}
+
+function fromMicro(micro: number): number {
+  return Math.round(micro) / MICRO;
+}
+
+/** Worst-case micro-USD for an unknown record, or null when tokens or prices are unavailable. */
+function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number | null {
+  if (record.inputTokens === null && record.outputTokens === null) return null;
+  const rows = pricing.filter((row) => row.provider === record.provider);
+  if (rows.length === 0) return null;
+  let worst = 0;
+  for (const row of rows) {
+    const usd =
+      ((record.inputTokens ?? 0) * row.inputPerMillionUsd +
+        (record.outputTokens ?? 0) * row.outputPerMillionUsd +
+        (record.cacheReadTokens ?? 0) * (row.cacheReadPerMillionUsd ?? 0) +
+        (record.cacheWriteTokens ?? 0) * (row.cacheWritePerMillionUsd ?? 0)) /
+      MICRO;
+    worst = Math.max(worst, toMicro(usd));
+  }
+  return worst;
+}
+
+interface MicroBucket {
+  known: number;
+  unknown: number;
+  estimated: number;
+}
+
+function bump(bucket: Record<string, MicroBucket>, key: string, known: number, unknown: number, estimated: number): void {
+  const current = bucket[key] ?? { known: 0, unknown: 0, estimated: 0 };
+  current.known += known;
+  current.unknown += unknown;
+  current.estimated += estimated;
   bucket[key] = current;
 }
 
-export function summarize(records: CostRecord[]): SpendSummary {
-  const summary: SpendSummary = { knownUsd: 0, unknownRecords: 0, byPhase: {}, byProvider: {}, byModel: {}, byTask: {} };
-  for (const record of records) {
-    if (record.actualUsd === null) summary.unknownRecords += 1;
-    else summary.knownUsd += record.actualUsd;
-    bump(summary.byPhase, record.phase, record);
-    bump(summary.byProvider, record.provider, record);
-    bump(summary.byModel, record.model, record);
-    bump(summary.byTask, record.taskId, record);
+function finish(bucket: Record<string, MicroBucket>): Record<string, SpendBucket> {
+  const out: Record<string, SpendBucket> = {};
+  for (const [key, value] of Object.entries(bucket)) {
+    out[key] = { knownUsd: fromMicro(value.known), unknown: value.unknown, estimatedUnknownUsd: fromMicro(value.estimated) };
   }
-  return summary;
+  return out;
 }
 
-export function budgetStatus(knownUsd: number, limit: number, ratio: number): "ok" | "soft" | "hard" {
-  if (knownUsd >= limit) return "hard";
-  if (knownUsd >= limit * ratio) return "soft";
-  return "ok";
+/** Pass `pricing` to estimate unknown-cost entries from their token counts. */
+export function summarize(records: CostRecord[], options: { pricing?: PricingRow[] } = {}): SpendSummary {
+  const pricing = options.pricing ?? [];
+  let known = 0;
+  let unknown = 0;
+  let estimated = 0;
+  let unestimated = 0;
+  const phase: Record<string, MicroBucket> = {};
+  const provider: Record<string, MicroBucket> = {};
+  const model: Record<string, MicroBucket> = {};
+  const task: Record<string, MicroBucket> = {};
+  for (const record of records) {
+    let k = 0;
+    let u = 0;
+    let e = 0;
+    if (record.actualUsd === null) {
+      u = 1;
+      unknown += 1;
+      const guess = estimateUnknownMicro(record, pricing);
+      if (guess === null) unestimated += 1;
+      else e = guess;
+      estimated += e;
+    } else {
+      k = toMicro(record.actualUsd);
+      known += k;
+    }
+    bump(phase, record.phase, k, u, e);
+    bump(provider, record.provider, k, u, e);
+    bump(model, record.model, k, u, e);
+    bump(task, record.taskId, k, u, e);
+  }
+  return {
+    knownUsd: fromMicro(known),
+    unknownRecords: unknown,
+    unknownCount: unknown,
+    estimatedUnknownUsd: fromMicro(estimated),
+    unestimatedUnknownCount: unestimated,
+    byPhase: finish(phase),
+    byProvider: finish(provider),
+    byModel: finish(model),
+    byTask: finish(task),
+  };
+}
+
+/**
+ * Budget state. Estimated unknown spend counts as spend. Unknown charges that cannot be estimated
+ * (no token counts) raise the status to at least "soft" so they are never invisible to caps.
+ */
+export function budgetStatus(
+  knownUsd: number,
+  limit: number,
+  ratio: number,
+  unknown: { estimatedUnknownUsd?: number; unestimatedUnknownCount?: number } = {},
+): "ok" | "soft" | "hard" {
+  const spent = toMicro(knownUsd) + toMicro(unknown.estimatedUnknownUsd ?? 0);
+  const cap = toMicro(limit);
+  let status: "ok" | "soft" | "hard" = "ok";
+  if (spent >= cap) status = "hard";
+  else if (spent >= Math.round(cap * ratio)) status = "soft";
+  if (status === "ok" && (unknown.unestimatedUnknownCount ?? 0) > 0) status = "soft";
+  return status;
+}
+
+export function budgetStatusFor(summary: SpendSummary, limit: number, ratio: number): "ok" | "soft" | "hard" {
+  return budgetStatus(summary.knownUsd, limit, ratio, summary);
+}
+
+/**
+ * Day bucket key (YYYY-MM-DD). Default is the UTC date, matching the previous behavior.
+ * Pass an IANA timezone such as "America/New_York" for local-day budget windows.
+ */
+export function makeDayKey(timeZone?: string): (at: string | Date) => string {
+  if (!timeZone) return (at) => (typeof at === "string" ? at : at.toISOString()).slice(0, 10);
+  const format = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  return (at) => format.format(typeof at === "string" ? new Date(at) : at);
+}
+
+/** Records on the same day as `now` under `dayKey` (default UTC). */
+export function recordsForDay(
+  records: CostRecord[],
+  now: Date,
+  dayKey: (at: string | Date) => string = makeDayKey(),
+): CostRecord[] {
+  const today = dayKey(now);
+  return records.filter((record) => dayKey(record.at) === today);
 }
 
 export function toCsv(records: CostRecord[]): string {

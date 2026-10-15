@@ -5,9 +5,11 @@ import { azureProvider } from "@earendil-works/pi-ai/providers/azure";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { COMMANDS } from "../src/commands.js";
-import { registerWorkflow } from "../src/extension.js";
+import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
-import { tempRepo } from "./helpers.js";
+import { emptyPr, fakeTimer, MemoryGitHub, permissiveRegistry, publishedWorkflow, tempRepo } from "./helpers.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 describe("pi extension surface", () => {
   it("registers the spec commands with completions", async () => {
@@ -43,6 +45,100 @@ describe("pi extension surface", () => {
     expect(resets).toEqual([]);
   });
 
+  function fakePi() {
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    let virtual: { route: (request: unknown, ctx: unknown) => Promise<{ model: { provider: string; id: string } }> } | undefined;
+    const pi = {
+      registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+        commands.set(name, options);
+      },
+      on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+        handlers.set(event, handler);
+        return () => undefined;
+      },
+      appendEntry() {},
+      registerVirtualModel(model: typeof virtual) {
+        virtual = model;
+      },
+    };
+    registerWorkflow(pi as unknown as ExtensionAPI);
+    return { commands, handlers, route: () => virtual! };
+  }
+
+  const registry = permissiveRegistry();
+  const user = (content: string) => ({ role: "user", content });
+
+  it("keeps one workflow across commands so /autopilot stop reaches the live timer", async () => {
+    const timer = fakeTimer();
+    const github = new MemoryGitHub(emptyPr());
+    const { app, cwd } = await publishedWorkflow({ schedule: timer.schedule }, github);
+    const { commands } = fakePi();
+    bindWorkflow(app);
+    const ctx = {
+      cwd,
+      hasUI: true,
+      ui: { notify() {}, setStatus() {}, confirm: async () => true },
+      newSession: async () => ({ cancelled: false }),
+      compact() {},
+    };
+    await commands.get("autopilot")!.handler("", ctx);
+    expect(currentWorkflow()).toBe(app);
+    expect(timer.state.delays).toHaveLength(1);
+    await commands.get("autopilot")!.handler("stop", ctx);
+    expect(currentWorkflow()).toBe(app);
+    expect(timer.state.cancelled).toBe(1);
+    expect(timer.state.pending).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("routes the virtual model on the latest user message only", async () => {
+    const cwd = await tempRepo();
+    const { handlers, route } = fakePi();
+    handlers.get("session_start")!({}, { cwd });
+    const ctx = { modelRegistry: registry };
+    const old = "change auth and permissions for production secrets";
+    const latest = "add a retry counter to the parser";
+    const only = await route().route({ reason: "user", messages: [user(latest)] }, ctx);
+    const mixed = await route().route({ reason: "user", messages: [user(old), { role: "assistant", content: "ok" }, user(latest)] }, ctx);
+    expect(mixed.model).toEqual(only.model);
+    const security = await route().route({ reason: "user", messages: [user(old)] }, ctx);
+    expect(only.model.provider).toBe("anthropic");
+    expect(security.model.provider).toBe("openai");
+    bindWorkflow(undefined);
+  });
+
+  it("reloads config when the file changes and refuses to route once the budget is exhausted", async () => {
+    const { app, cwd } = await publishedWorkflow();
+    const { handlers, route } = fakePi();
+    bindWorkflow(app);
+    handlers.get("session_start")!({}, { cwd });
+    const ctx = { modelRegistry: registry };
+    const first = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
+    expect(first.model.provider).toBe("anthropic");
+    mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
+    writeFileSync(
+      path.join(cwd, ".pi-workflows", "config.yaml"),
+      [
+        "providers:",
+        "  openai: { type: openai, auth: account-login, model: gpt-5.4 }",
+        "  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet }",
+        "  foundry: { type: azure-foundry, auth: azure-cli, endpointEnv: X, deployments: { classifier: c, reasoning: r, cheap: c } }",
+        "  local: { type: openai-compatible, baseUrl: 'http://127.0.0.1:1/v1', model: m }",
+        "models: { classifier: local, cheap: local, standard: local, premium: openai }",
+        "",
+      ].join("\n"),
+    );
+    const second = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
+    expect(second.model.provider).toBe("local");
+    app.store.appendLedger({
+      id: "big", at: new Date().toISOString(), taskId: app.activeTaskId()!, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+    });
+    await expect(route().route({ reason: "user", messages: [user("add a retry counter")] }, ctx)).rejects.toThrow(/budget/i);
+    bindWorkflow(undefined);
+  });
+
   it("blocks destructive shell commands", () => {
     expect(isDeniedCommand("rm -rf /")).toBe(true);
     expect(isDeniedCommand("git push --force origin main")).toBe(true);
@@ -65,5 +161,59 @@ describe("installed Pi providers", () => {
     expect(codex.auth.apiKey).toBeUndefined();
     expect(azure.auth.oauth).toBeUndefined();
     expect(azure.auth.apiKey?.name).toMatch(/API key/);
+  });
+});
+
+describe("web tools", () => {
+  type Tool = { name: string; execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: unknown) => Promise<{ content: { text: string }[] }> };
+  const searchBody = {
+    stop_reason: "end_turn",
+    usage: { input_tokens: 100, output_tokens: 50, server_tool_use: { web_search_requests: 2 } },
+    content: [{ type: "web_search_tool_result", content: [{ type: "web_search_result", url: "https://a.example/1", title: "A" }] }],
+  };
+  const deps = {
+    getAuth: async () => ({ accessToken: "sk-ant-oat01-test" }),
+    searchTransport: async () => ({ status: 200, body: searchBody }),
+  };
+  function tools(overrides = deps) {
+    const registered = new Map<string, Tool>();
+    registerExtensionTools({ registerTool: (tool: unknown) => void registered.set((tool as Tool).name, tool as Tool) } as unknown as ExtensionAPI, overrides);
+    return registered;
+  }
+
+  it("registers the web and plan tools from the extension factory", () => {
+    const registered = new Map<string, unknown>();
+    const pi = { registerCommand() {}, on() { return () => undefined; }, appendEntry() {}, registerVirtualModel() {}, registerTool: (tool: { name: string }) => void registered.set(tool.name, tool) };
+    extension(pi as unknown as ExtensionAPI);
+    expect([...registered.keys()].sort()).toEqual(["plan_questions", "plan_spec", "plan_tickets", "web_fetch", "web_search"]);
+  });
+
+  it("ledgers search usage without the query text and shows the route status", async () => {
+    const { app } = await publishedWorkflow();
+    const statuses: string[] = [];
+    app.bind({ status: (text) => text && statuses.push(text) });
+    bindWorkflow(app);
+    const before = app.store.readLedger().length;
+    await tools().get("web_search")!.execute("1", { query: "secret-topic-xyz" }, undefined, undefined, {});
+    const added = app.store.readLedger().slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ provider: "anthropic", model: "claude-haiku-5-5", tier: "web_search", taskId: app.activeTaskId(), inputTokens: 100, outputTokens: 50, requests: 1 });
+    expect(JSON.stringify(added[0])).not.toContain("secret-topic-xyz");
+    expect(statuses).toContain("anthropic/claude-haiku-5-5 · web_search");
+    bindWorkflow(undefined);
+  });
+
+  it("denies web_search when the budget is hard-exhausted", async () => {
+    const { app } = await publishedWorkflow();
+    bindWorkflow(app);
+    app.store.appendLedger({
+      id: "big", at: new Date().toISOString(), taskId: app.activeTaskId()!, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+    });
+    let called = false;
+    const registered = tools({ ...deps, searchTransport: async () => ((called = true), { status: 200, body: searchBody }) });
+    await expect(registered.get("web_search")!.execute("1", { query: "q" }, undefined, undefined, {})).rejects.toThrow(/budget/i);
+    expect(called).toBe(false);
+    bindWorkflow(undefined);
   });
 });

@@ -1,9 +1,10 @@
-import { estimateUsd, modelNameFor, priceFor, type PricingRow, type WorkflowConfig } from "../config.js";
-import { TIERS, type AcceptedClassification, type ProviderId, type RoutingDecision, type Tier } from "../domain.js";
+import { tierCandidates, type WorkflowConfig } from "../config.js";
+import { modelMetricKey, TIERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
+import { selectCandidate, type Availability, type Selection } from "./select.js";
+import { circuitOpenFor, rate, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
 
-export interface SuccessTable {
-  [taskType: string]: { [tier: string]: { success: number; failure: number } } | undefined;
-}
+export { circuitOpenFor, DEFAULT_CIRCUIT_WINDOW_MS, EXPECTED_INPUT_SHARE, SUCCESS_PRIOR } from "./stats.js";
+export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
 
 const ORDER: Tier[] = [...TIERS];
 
@@ -14,60 +15,67 @@ export function nextTier(tier: Tier, maxTier: Tier): Tier | undefined {
   return ORDER[index + 1];
 }
 
-function rate(table: SuccessTable, taskType: string, tier: Tier): { rate: number; samples: number } {
-  const cell = table[taskType]?.[tier];
-  if (!cell) return { rate: 0.5, samples: 0 };
-  const samples = cell.success + cell.failure;
-  if (samples === 0) return { rate: 0.5, samples: 0 };
-  return { rate: cell.success / samples, samples };
+/** Tiers that share the same candidate list would repeat identical work when escalated between. */
+function signature(config: WorkflowConfig, tier: Tier): string {
+  const candidates = tierCandidates(config, tier);
+  return candidates.length === 0 ? "literal" : candidates.map((item) => `${item.provider}/${item.model}`).join(",");
 }
 
-function recentFailures(table: SuccessTable, taskType: string, limit: number): boolean {
-  const cells = table[taskType];
-  if (!cells) return false;
-  let failure = 0;
-  let success = 0;
-  for (const cell of Object.values(cells)) {
-    failure += cell.failure;
-    success += cell.success;
-  }
-  return success === 0 && failure >= limit;
-}
-
-function tierRate(pricing: PricingRow[], provider: ProviderId, model: string, at: Date): number | null {
-  const row = priceFor(pricing, provider, model, at);
-  if (!row) return null;
-  return estimateUsd(row, { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 });
-}
-
-export function providerForTier(config: WorkflowConfig, tier: Tier): ProviderId | "none" {
-  if (tier === "deterministic") return "none";
-  const provider = config.models[tier === "classifier" ? "classifier" : tier];
-  if (config.orgProviderAllowlist.length > 0 && !config.orgProviderAllowlist.includes(provider)) {
-    return "none";
-  }
-  return provider;
+export interface RouteOptions {
+  escalations?: number;
+  at?: Date;
+  failedTier?: Tier;
+  purpose?: "plan" | "implement" | "review" | "preview";
+  circuitWindowMs?: number;
+  /** Which providers are callable now. Omitted means all are. */
+  availability?: Availability;
+  /** Smaller of the task and daily budget left, in USD. */
+  budgetRemainingUsd?: number;
+  /** Planner's suggested tier for this unit of work. Ignored for sensitive work, after a failure, and above routing.maxTier. */
+  tierHint?: Tier;
+  /** Uniform [0, 1) for exploration. Defaults to Math.random. */
+  rng?: () => number;
 }
 
 export function decideRoute(
   classification: AcceptedClassification,
   config: WorkflowConfig,
   table: SuccessTable,
-  options: { escalations?: number; at?: Date; failedTier?: Tier; purpose?: "plan" | "implement" | "review" | "preview" } = {},
+  options: RouteOptions = {},
 ): RoutingDecision {
   const at = options.at ?? new Date();
   const escalations = options.escalations ?? 0;
   const purpose = options.purpose ?? "preview";
-  const sensitive =
-    classification.required_capabilities.some((cap) => config.routing.requirePremiumReviewFor.includes(cap)) ||
-    classification.risk === "high";
-  const circuitOpen = recentFailures(table, classification.task_type, config.routing.circuitBreakerFailures);
+  const categories = config.routing.requirePremiumReviewFor;
+  // Premium review applies only to the configured categories (capabilities or task type).
+  const premiumReview =
+    classification.required_capabilities.some((cap) => categories.includes(cap)) || categories.includes(classification.task_type);
+  // Human approval additionally covers any high-risk task.
+  const sensitive = premiumReview || classification.risk === "high";
+  const breaker = (tier: Tier) =>
+    circuitOpenFor(table, classification.task_type, tier, config.routing.circuitBreakerFailures, at, options.circuitWindowMs);
+  const select = (tier: Tier, rng: (() => number) | undefined = options.rng): Selection =>
+    selectCandidate({
+      tier,
+      taskType: classification.task_type,
+      config,
+      table,
+      availability: options.availability,
+      budgetRemainingUsd: options.budgetRemainingUsd,
+      rng,
+      at,
+      // A local model that is down must fall back to literal edits, not to a login prompt.
+      strictAvailability: tier === "deterministic",
+    });
+  // Whether a tier is blocked never depends on sampling, so probes use a constant and leave the caller's rng alone.
+  const probe = (tier: Tier): Selection => select(tier, () => 0.5);
   const cap = config.routing.maxTier;
+  const reasons = [...classification.reason_codes, `purpose_${purpose}`];
   let tier: Tier;
   if (options.failedTier) {
-    tier = escalateImplementation(options.failedTier, cap);
+    tier = escalateImplementation(options.failedTier, cap, config);
   } else if (purpose === "review") {
-    tier = sensitive ? "premium" : "standard";
+    tier = premiumReview ? "premium" : "standard";
   } else if (purpose === "plan") {
     tier = classification.complexity === "high" || sensitive ? "premium" : classification.recommended_tier;
   } else if (purpose === "implement") {
@@ -81,27 +89,60 @@ export function decideRoute(
         .sort((a, b) => a.expected - b.expected)[0]!.candidate;
     } else if (sensitive) {
       tier = "standard";
-    } else if (classification.complexity === "low" || classification.recommended_tier === "deterministic") {
+    } else if (classification.recommended_tier === "deterministic" || classification.task_type === "mechanical") {
+      // Only explicitly mechanical work skips a premium model.
       tier = "deterministic";
     } else {
       tier = "cheap";
+    }
+    // Security-sensitive work keeps the policy tier; otherwise the planner's hint decides (the cap is applied below).
+    if (options.tierHint && options.tierHint !== "classifier" && !sensitive) tier = options.tierHint;
+    if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
+      const escalated = escalateImplementation(tier, cap, config);
+      if (escalated !== tier) reasons.push(`circuit_escalated_from_${tier}`);
+      tier = escalated;
     }
   } else {
     tier = classification.recommended_tier;
   }
   if (ORDER.indexOf(tier) > ORDER.indexOf(cap)) tier = cap;
-  if (escalations > config.routing.maxEscalations && options.failedTier) tier = options.failedTier;
-  const provider = providerForTier(config, tier);
-  const model = provider === "none" ? "deterministic" : modelNameFor(config, provider, tier);
-  const rateUsdPerMillion = provider === "none" ? 0 : tierRate(config.pricing, provider, model, at);
-  const stat = rate(table, classification.task_type, tier);
-  const success = stat.samples === 0 ? 0.5 : stat.rate;
-  const expectedUsd = rateUsdPerMillion === null ? null : rateUsdPerMillion / Math.max(success, 0.05);
-  const reasons = [...classification.reason_codes, `purpose_${purpose}`];
-  if (stat.samples === 0) reasons.push("success_prior_0.5");
+  let selection = probe(tier);
+  // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
+  while (selection.blocked && tier !== "deterministic" && (selection.blocked.code === "excluded" || selection.blocked.code === "circuit_open")) {
+    const escalated = escalateImplementation(tier, cap, config);
+    if (escalated === tier) break;
+    reasons.push(`escalated_from_${tier}_${selection.blocked.code}`);
+    tier = escalated;
+    selection = probe(tier);
+  }
+  // Only the final choice draws from the rng, so a seeded run picks the same model however many tiers were probed.
+  selection = select(tier);
+  // Open only when the tier finally chosen is itself open: an escalation to a healthy tier is not a stall.
+  const circuitOpen = breaker(tier) || selection.blocked?.code === "circuit_open";
+  let candidate = selection.candidate;
+  let blocked: string | undefined;
+  let selectionReason = selection.reason;
+  if (!candidate) {
+    if (tier === "deterministic") {
+      // No local model configured or reachable: the plan's literal edits are the deterministic path.
+      selectionReason = selection.blocked?.code === "unavailable" ? "local model unreachable; applying the plan's literal edits" : "no model; applying the plan's literal edits";
+      if (selection.blocked?.code === "unavailable") reasons.push("local_unreachable");
+    } else {
+      blocked = selection.blocked?.message ?? "No model is available for this tier.";
+    }
+  }
+  const provider = candidate?.provider ?? "none";
+  const model = candidate ? candidate.model : blocked ? "blocked" : "deterministic";
+  const cost = blocked ? null : candidate ? tierCost(config.pricing, candidate.provider, candidate.model, at, config.workers.tokenBudget) : 0;
+  const rateUsdPerMillion = cost === null ? null : config.workers.tokenBudget > 0 ? (cost / config.workers.tokenBudget) * 1_000_000 : 0;
+  const modelStat = candidate ? rate(table, classification.task_type, modelMetricKey(tier, candidate.provider, candidate.model)) : undefined;
+  const stat = modelStat && modelStat.samples > 0 ? modelStat : rate(table, classification.task_type, tier);
+  const expectedUsd = cost === null ? null : cost / Math.max(stat.rate, 0.05);
+  if (stat.samples === 0) reasons.push(`success_prior_${SUCCESS_PRIOR}`);
   else reasons.push(`success_rate_${stat.rate.toFixed(2)}`);
   if (sensitive) reasons.push("security_sensitive");
   if (circuitOpen) reasons.push("circuit_open");
+  if (selection.unpriced) reasons.push("price_unknown");
   return {
     tier,
     provider,
@@ -111,29 +152,34 @@ export function decideRoute(
     expectedUsd,
     rateUsdPerMillion,
     requireHumanApproval: sensitive,
-    reviewTier: sensitive ? "premium" : purpose === "review" ? tier : "standard",
+    reviewTier: premiumReview ? "premium" : purpose === "review" ? tier : "standard",
     escalations,
     circuitOpen,
+    ...(candidate ? { candidate } : {}),
+    selectionReason,
+    considered: selection.considered,
+    ...(blocked ? { blocked } : {}),
   };
 }
 
-function escalateImplementation(failed: Tier, cap: Tier): Tier {
-  let cursor: Tier | undefined = failed;
+/** Next tier above `failed` whose candidate list differs; returns `failed` if none. */
+function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig): Tier {
+  const from = signature(config, failed);
+  let cursor: Tier | undefined = nextTier(failed, cap);
   while (cursor) {
-    const upcoming = nextTier(cursor, cap);
-    if (!upcoming) return failed;
-    if (upcoming !== "classifier") return upcoming;
-    cursor = upcoming;
+    if (cursor !== "classifier" && signature(config, cursor) !== from) return cursor;
+    cursor = nextTier(cursor, cap);
   }
   return failed;
 }
 
+/** Cheapest expected cost among a tier's priced candidates; unpriced tiers rank last. */
 function expectedFor(candidate: Tier, config: WorkflowConfig, table: SuccessTable, taskType: string, at: Date): number {
-  const provider = providerForTier(config, candidate);
-  if (provider === "none") return 0;
-  const model = modelNameFor(config, provider, candidate);
-  const price = tierRate(config.pricing, provider, model, at);
-  const stat = rate(table, taskType, candidate);
-  if (price === null) return Number.POSITIVE_INFINITY;
-  return price / Math.max(stat.rate, 0.05);
+  const candidates = tierCandidates(config, candidate);
+  if (candidates.length === 0) return 0;
+  const costs = candidates
+    .map((item) => tierCost(config.pricing, item.provider, item.model, at, config.workers.tokenBudget))
+    .filter((value): value is number => value !== null);
+  if (costs.length === 0) return Number.POSITIVE_INFINITY;
+  return Math.min(...costs) / Math.max(rate(table, taskType, candidate).rate, 0.05);
 }

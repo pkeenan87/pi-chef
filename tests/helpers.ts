@@ -111,3 +111,121 @@ export class MemoryGitHub implements GitHubClient {
     return true;
   }
 }
+
+export const singleTaskRequest = `
+Maintain Neo.
+\`\`\`tasks
+[{"id":"ingest","summary":"Guard ingest","files":["src/ingest.ts"],"edits":[{"path":"src/ingest.ts","content":"export const ingest = 1;\\n"}]}]
+\`\`\`
+`;
+
+export function emptyPr(): PullRequestSnapshot {
+  return { number: 0, url: "", branch: "", base: "main", headSha: "pending", baseSha: "base", mergeable: true, approved: false, protectionSatisfied: false, threads: [], checks: [] };
+}
+
+/** A fake timer: records every schedule() call and lets a test fire or inspect the pending callback. */
+export function fakeTimer() {
+  const state = { delays: [] as number[], cancelled: 0, pending: undefined as (() => void) | undefined };
+  const schedule = (delayMs: number, run: () => void) => {
+    state.delays.push(delayMs);
+    state.pending = run;
+    return () => {
+      state.cancelled += 1;
+      if (state.pending === run) state.pending = undefined;
+    };
+  };
+  return { state, schedule };
+}
+
+/** Drives a one-group task through plan, approve, implement, review, and push. */
+export async function publishedWorkflow(extras: Partial<WorkflowOptions> = {}, github: MemoryGitHub = new MemoryGitHub(emptyPr())) {
+  const cwd = await tempRepo();
+  const app = workflow(cwd, { github, ...extras });
+  await app.plan(singleTaskRequest);
+  await app.approvePlan();
+  if (!(await app.implement()).ok) throw new Error("implement failed in fixture");
+  if (!(await app.review()).ok) throw new Error("review failed in fixture");
+  const pushed = await app.push();
+  if (!pushed.ok) throw new Error(`push failed in fixture: ${pushed.text}`);
+  return { cwd, app, github };
+}
+
+/** A config that uses the multi-candidate `tiers` map (see .pi-workflows/config.yaml). Prices are test values. */
+export function tieredYaml(extraYaml = ""): string {
+  return `
+providers:
+  openai: { type: openai, auth: account-login }
+  anthropic: { type: anthropic, auth: account-login }
+  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", routeStyle: v1, audience: "https://ai.azure.com" }
+  vercel: { type: vercel-ai-gateway, auth: vercel-cli, projectDir: ".", envFile: .env.local }
+  local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b" }
+tiers:
+  deterministic:
+    - { provider: local, model: "qwen2.5-coder:7b" }
+  classifier:
+    - { provider: foundry, model: Microsoft-Decision-1, api: decisions }
+    - { provider: vercel, model: "typesafe-ai/jev", api: decisions }
+  cheap:
+    - { provider: openai, model: gpt-6-luna }
+    - { provider: anthropic, model: claude-haiku-5-5 }
+  standard:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+    - { provider: foundry, model: grok-4-7 }
+  premium:
+    - { provider: anthropic, model: claude-opus-5-5 }
+    - { provider: openai, model: "gpt-6.1-sol" }
+  advisor:
+    - { provider: anthropic, model: claude-fable-5-1 }
+    - { provider: foundry, model: gpt-6-astra }
+workers: { concurrency: 2, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 8000, deadlineMs: 60000 }
+checks:
+  - { name: unit, command: npm, args: ["test"] }
+pricing:
+  - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+  - { provider: foundry, model: Microsoft-Decision-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.1, outputPerMillionUsd: 0.1 }
+  - { provider: vercel, model: "typesafe-ai/jev", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.1, outputPerMillionUsd: 0.1 }
+  - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
+  - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 1, outputPerMillionUsd: 4 }
+  - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 15, outputPerMillionUsd: 75 }
+  - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 }
+  - { provider: anthropic, model: claude-fable-5-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 20, outputPerMillionUsd: 100 }
+  - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }
+${extraYaml}`;
+}
+
+export function tieredConfig(extraYaml = ""): WorkflowConfig {
+  return parseConfig(tieredYaml(extraYaml));
+}
+
+/** Small seeded generator (mulberry32) so Thompson sampling is reproducible in tests. */
+export function seededRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function unsignedJwt(expSeconds: number): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({ alg: "none" })}.${part({ exp: expSeconds })}.sig`;
+}
+
+/** A Pi registry fake in which every model asked for exists and has credentials. */
+export function permissiveRegistry() {
+  const seen: { provider: string; id: string }[] = [];
+  return {
+    find: (provider: string, id: string) => {
+      const model = { provider, id };
+      seen.push(model);
+      return model;
+    },
+    isUsingOAuth: () => true,
+    getAvailable: () => seen,
+  };
+}

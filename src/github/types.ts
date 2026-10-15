@@ -4,6 +4,9 @@ export interface ReviewThread {
   path?: string;
   sha: string;
   inReplyTo?: string;
+  /** GraphQL node id of the thread, when known. */
+  nodeId?: string;
+  outdated?: boolean;
 }
 
 export interface CheckRun {
@@ -13,6 +16,8 @@ export interface CheckRun {
   conclusion: "success" | "failure" | "cancelled" | "neutral" | "skipped" | null;
   sha: string;
   summary?: string;
+  url?: string;
+  runId?: string;
 }
 
 export interface PullRequestSnapshot {
@@ -36,6 +41,8 @@ export interface GitHubClient {
   fileAt(sha: string, file: string): Promise<string>;
   checkLog(checkId: string): Promise<string>;
   isAncestor(ancestor: string, descendant: string): Promise<boolean>;
+  /** True when a merged PR exists for the branch (findByBranch only sees open PRs). */
+  wasMerged?(branch: string): Promise<boolean>;
 }
 
 export type FindingClass = "actionable" | "informational" | "ambiguous" | "human";

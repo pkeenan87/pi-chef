@@ -6,34 +6,55 @@
 providers:
   openai:
     type: openai
-    auth: account-login
+    auth: account-login   # ChatGPT sign-in through Pi /login openai; no API key
     piProvider: openai
-    model: gpt-5.4
   anthropic:
     type: anthropic
-    auth: account-login
-    model: claude-sonnet
+    auth: account-login   # Claude Pro/Max sign-in through Pi /login anthropic; no API key
   foundry:
     type: azure-foundry
     auth: azure-cli
-    endpointEnv: AZURE_AI_ENDPOINT
-    apiVersion: 2024-10-21
-    audience: https://cognitiveservices.azure.com
+    endpointEnv: AZURE_AI_ENDPOINT   # https://<resource>.services.ai.azure.com (export it; not stored here)
+    routeStyle: v1                   # <endpoint>/openai/v1/..., deployment name in `model`, no api-version
+    audience: https://ai.azure.com   # az account get-access-token --resource https://ai.azure.com
     api: openai-completions
-    deployments:
-      classifier: classifier
-      reasoning: reasoning
-      cheap: classifier
+    # decisionsPath: /decisions      # UNVERIFIED for Microsoft-Decision-1 in Foundry; change if your deployment differs
+  vercel:
+    type: vercel-ai-gateway
+    auth: vercel-cli
+    baseUrl: https://ai-gateway.vercel.sh/v1
+    projectDir: .          # a directory you ran `vercel login && vercel link` in
+    envFile: .env.local    # written by `vercel env pull .env.local --yes`
   local:
     type: openai-compatible
     baseUrl: http://127.0.0.1:11434/v1
     model: qwen2.5-coder:7b
 
-models:
-  classifier: local
-  cheap: foundry
-  standard: anthropic
-  premium: openai
+# Candidates per tier. Within a tier the router picks by learned expected cost per success
+# (Thompson sampling over per-model successes and failures), breaking ties by the order here.
+# A candidate is skipped when its provider is not signed in, an org allowlist excludes it,
+# its circuit is open, or its expected cost exceeds the remaining budget.
+# Foundry `model` values are YOUR deployment names. The names below are placeholders.
+# `api: decisions` models answer structured questions; they are not chat models.
+tiers:
+  deterministic:        # used only when the local server answers; otherwise the plan's literal edits apply
+    - { provider: local, model: "qwen2.5-coder:7b" }
+  classifier:
+    - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
+    - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
+  cheap:
+    - { provider: openai, model: gpt-6-luna }
+    - { provider: anthropic, model: claude-haiku-5-5 }
+  standard:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+    - { provider: foundry, model: grok-4-7, label: "Grok 4.7 (Foundry)" }
+  premium:
+    - { provider: anthropic, model: claude-opus-5-5 }
+    - { provider: openai, model: "gpt-6.1-sol" }
+  advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
+    - { provider: anthropic, model: claude-fable-5-1 }
+    - { provider: openai, model: gpt-6-astra }
+    - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
 
 routing:
   minConfidence: 0.75
@@ -51,6 +72,7 @@ workers:
   isolatedWorktrees: true
   preserveUntilReviewed: true
   tokenBudget: 8000
+  ticketContextTokens: 150000
   deadlineMs: 600000
 
 worktrees:
@@ -80,46 +102,41 @@ autopilot:
 
 checks: []
 
+# Allowlist entries match the full command line exactly. An entry ending in " *"
+# also accepts extra arguments, which are rejected if they contain shell
+# metacharacters or code-execution flags (--config, --output, --exec, -e,
+# --eval, --require, -r, --import, --loader). A project allowlist can only
+# narrow a user-level one (~/.pi/agent/cost-workflow.yaml); it never widens it.
 commandAllowlist:
   - npm test
   - npm run typecheck
   - npm run lint
   - npx vitest
+  - npx vitest run *
   - git status
   - git diff
 
 orgProviderAllowlist: []
 proprietaryCode: false
 
+# PLACEHOLDER PRICES. Replace every row from your provider's current rate card before trusting
+# cost-per-success ranking. A candidate with no row is ranked after priced ones and flagged.
+# Subscription models (ChatGPT, Claude Pro/Max) have no per-token marginal cost, so they are
+# listed at 0 on purpose; keep the rows so the candidates are explicit. A subscription can still
+# bill extra usage, which this file cannot see.
 pricing:
-  - provider: local
-    model: qwen2.5-coder:7b
-    effectiveFrom: "2026-01-01"
-    inputPerMillionUsd: 0
-    outputPerMillionUsd: 0
-    cacheReadPerMillionUsd: 0
-    cacheWritePerMillionUsd: 0
-  - provider: foundry
-    model: classifier
-    effectiveFrom: "2026-01-01"
-    inputPerMillionUsd: 0.15
-    outputPerMillionUsd: 0.60
-  - provider: foundry
-    model: reasoning
-    effectiveFrom: "2026-01-01"
-    inputPerMillionUsd: 1.25
-    outputPerMillionUsd: 5.00
-  - provider: anthropic
-    model: claude-sonnet
-    effectiveFrom: "2026-01-01"
-    inputPerMillionUsd: 3
-    outputPerMillionUsd: 15
-    cacheReadPerMillionUsd: 0.30
-    cacheWritePerMillionUsd: 3.75
-  - provider: openai
-    model: gpt-5.4
-    effectiveFrom: "2026-01-01"
-    inputPerMillionUsd: 2.50
-    outputPerMillionUsd: 15
-    cacheReadPerMillionUsd: 0.25
-    cacheWritePerMillionUsd: 2.50
+  - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  # Decisions models (placeholders)
+  - { provider: foundry, model: Microsoft-Decision-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
+  - { provider: vercel, model: "typesafe-ai/jev", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
+  # Subscription-backed (0 marginal; placeholder)
+  - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-fable-5-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: openai, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  # Per-token Foundry deployments (placeholders)
+  - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
+  - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }

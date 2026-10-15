@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
-import { WorkflowError, type ProviderId, type Tier } from "./domain.js";
+import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
+import { allowlistEntryCovers } from "./sandbox.js";
 
 export interface ProviderConfig {
   type: string;
@@ -17,7 +18,20 @@ export interface ProviderConfig {
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
+  /** Foundry: literal resource endpoint (not a secret) used when `endpointEnv` is unset. */
+  endpoint?: string;
+  /** Foundry: "v1" uses `<endpoint>/openai/v1/...` (no api-version); "deployments" is the legacy route. Defaults to deployments when apiVersion is set, else v1. */
+  routeStyle?: "v1" | "deployments";
+  /** Path of the Decisions API under the provider base URL. Defaults to /decisions. */
+  decisionsPath?: string;
+  /** Vercel: directory that has been `vercel link`ed (relative paths resolve from the project root). */
+  projectDir?: string;
+  /** Vercel: env file `vercel env pull` writes. Defaults to .env.local. */
+  envFile?: string;
 }
+
+export const DEFAULT_VERCEL_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1";
+export const DEFAULT_FOUNDRY_AUDIENCE = "https://ai.azure.com";
 
 export interface PricingRow {
   provider: string;
@@ -39,7 +53,10 @@ export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
   providers: Partial<Record<ProviderId, ProviderConfig>>;
+  /** Legacy one-provider-per-tier map. Used for any tier that `tiers` does not list. */
   models: Record<"classifier" | "cheap" | "standard" | "premium", ProviderId>;
+  /** Candidate models per tier, in preference order for ties. Overrides `models` for the tiers it lists. */
+  tiers: Partial<Record<TierKey, TierCandidate[]>>;
   routing: {
     minConfidence: number;
     maxEscalations: number;
@@ -53,6 +70,8 @@ export interface WorkflowConfig {
     preserveUntilReviewed: boolean;
     tokenBudget: number;
     deadlineMs: number;
+    /** Soft context-window target for one ticket, in tokens. Planning rejects a ticket estimated above it. */
+    ticketContextTokens: number;
   };
   worktrees: {
     strategy: "per-independent-task";
@@ -79,6 +98,8 @@ export interface WorkflowConfig {
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
+  /** Notes from loading, for example project settings that were ignored. Shown by /status. */
+  warnings?: string[];
 }
 
 const DEFAULTS: WorkflowConfig = {
@@ -86,6 +107,7 @@ const DEFAULTS: WorkflowConfig = {
   workspaceDir: ".pi-workflows",
   providers: {},
   models: { classifier: "local", cheap: "foundry", standard: "anthropic", premium: "openai" },
+  tiers: {},
   routing: {
     minConfidence: 0.75,
     maxEscalations: 2,
@@ -99,6 +121,7 @@ const DEFAULTS: WorkflowConfig = {
     preserveUntilReviewed: true,
     tokenBudget: 8000,
     deadlineMs: 600000,
+    ticketContextTokens: 150000,
   },
   worktrees: {
     strategy: "per-independent-task",
@@ -110,7 +133,7 @@ const DEFAULTS: WorkflowConfig = {
   approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
   autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
   checks: [],
-  commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "git status", "git diff"],
+  commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "npx vitest run *", "git status", "git diff"],
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -127,10 +150,122 @@ function assertNoSecrets(value: unknown, where: string): void {
   }
 }
 
-function mergeConfig(raw: unknown, where: string): WorkflowConfig {
+function invalid(where: string, field: string, message: string): never {
+  throw new WorkflowError("CONFIG_INVALID", `${where}: ${field} ${message}`);
+}
+
+function checkNumber(
+  section: Record<string, unknown>,
+  key: string,
+  where: string,
+  rule: { min?: number; max?: number; exclusiveMin?: number; integer?: boolean },
+  prefix: string,
+): void {
+  const value = section[key];
+  if (value === undefined) return;
+  const field = `${prefix}.${key}`;
+  if (typeof value !== "number" || !Number.isFinite(value)) invalid(where, field, "must be a finite number");
+  if (rule.integer && !Number.isInteger(value)) invalid(where, field, "must be an integer");
+  if (rule.min !== undefined && value < rule.min) invalid(where, field, `must be >= ${rule.min}`);
+  if (rule.exclusiveMin !== undefined && value <= rule.exclusiveMin) invalid(where, field, `must be > ${rule.exclusiveMin}`);
+  if (rule.max !== undefined && value > rule.max) invalid(where, field, `must be <= ${rule.max}`);
+}
+
+function checkBoolean(section: Record<string, unknown>, key: string, where: string, prefix: string): void {
+  if (section[key] !== undefined && typeof section[key] !== "boolean") invalid(where, `${prefix}.${key}`, "must be a boolean");
+}
+
+function section(raw: Record<string, unknown>, key: string, where: string): Record<string, unknown> | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) invalid(where, key, "must be a mapping");
+  return value;
+}
+
+function stringArray(value: unknown, field: string, where: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+    invalid(where, field, "must be a list of non-empty strings");
+  }
+  return value as string[];
+}
+
+/** Normalizes a YAML date (string or Date) to YYYY-MM-DD, or returns undefined if invalid. */
+export function normalizeEffectiveFrom(value: unknown): string | undefined {
+  let text: string;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return undefined;
+    text = value.toISOString().slice(0, 10);
+  } else if (typeof value === "string") {
+    text = value.trim();
+  } else {
+    return undefined;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return undefined;
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== text) return undefined;
+  return text;
+}
+
+function normalizePricing(value: unknown, where: string): PricingRow[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) invalid(where, "pricing", "must be a list");
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const field = `pricing[${index}]`;
+    if (!isRecord(item)) invalid(where, field, "must be a mapping");
+    if (typeof item.provider !== "string" || item.provider === "") invalid(where, `${field}.provider`, "must be a non-empty string");
+    if (typeof item.model !== "string" || item.model === "") invalid(where, `${field}.model`, "must be a non-empty string");
+    const effectiveFrom = normalizeEffectiveFrom(item.effectiveFrom);
+    if (!effectiveFrom) invalid(where, `${field}.effectiveFrom`, "must be a valid date in YYYY-MM-DD format");
+    for (const key of ["inputPerMillionUsd", "outputPerMillionUsd"] as const) {
+      if (typeof item[key] !== "number" || !Number.isFinite(item[key]) || item[key] < 0) {
+        invalid(where, `${field}.${key}`, "must be a finite number >= 0");
+      }
+    }
+    for (const key of ["cacheReadPerMillionUsd", "cacheWritePerMillionUsd"] as const) {
+      if (item[key] !== undefined && (typeof item[key] !== "number" || !Number.isFinite(item[key]) || item[key] < 0)) {
+        invalid(where, `${field}.${key}`, "must be a finite number >= 0");
+      }
+    }
+    const key = `${item.provider}\u0000${item.model}\u0000${effectiveFrom}`;
+    if (seen.has(key)) {
+      invalid(where, field, `duplicates another row for ${item.provider}/${item.model} effective ${effectiveFrom}`);
+    }
+    seen.add(key);
+    return { ...(item as unknown as PricingRow), effectiveFrom };
+  });
+}
+
+function parseUrl(value: string): URL | undefined {
+  if (/\s/.test(value)) return undefined;
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function isHttpsUrl(value: string): boolean {
+  const url = parseUrl(value);
+  return !!url && url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "";
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "[::1]" || /^127(\.\d{1,3}){3}$/.test(hostname);
+}
+
+function isLoopbackHttpUrl(value: string): boolean {
+  const url = parseUrl(value);
+  return !!url && url.protocol === "http:" && url.username === "" && url.password === "" && isLoopbackHost(url.hostname);
+}
+
+/** Validates and normalizes one raw YAML document. Returns a shallow copy with normalized fields. */
+function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   if (!isRecord(raw)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
   assertNoSecrets(raw, where);
-  const providers = isRecord(raw.providers) ? (raw.providers as WorkflowConfig["providers"]) : {};
+  const out: Record<string, unknown> = { ...raw };
+
+  const providers = section(raw, "providers", where) ?? {};
   for (const [name, provider] of Object.entries(providers)) {
     if (!isRecord(provider)) continue;
     if (typeof provider.apiKey === "string" || typeof provider.key === "string" || typeof provider.token === "string") {
@@ -145,46 +280,216 @@ function mergeConfig(raw: unknown, where: string): WorkflowConfig {
     if (name === "foundry" && provider.auth && provider.auth !== "azure-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Foundry auth must be azure-cli.");
     }
+    if (name === "vercel" && provider.auth && provider.auth !== "vercel-cli") {
+      throw new WorkflowError("CONFIG_INVALID", "Vercel auth must be vercel-cli.");
+    }
+    for (const key of ["endpoint", "decisionsPath", "projectDir", "envFile", "baseUrl", "model"] as const) {
+      if (provider[key] !== undefined && (typeof provider[key] !== "string" || provider[key] === "")) {
+        invalid(where, `providers.${name}.${key}`, "must be a non-empty string");
+      }
+    }
+    if (provider.apiKeyEnv !== undefined && (typeof provider.apiKeyEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(provider.apiKeyEnv))) {
+      invalid(where, `providers.${name}.apiKeyEnv`, "must be an environment variable name");
+    }
+    for (const key of ["endpoint", "audience"] as const) {
+      if (typeof provider[key] === "string" && !isHttpsUrl(provider[key])) invalid(where, `providers.${name}.${key}`, "must be an https URL");
+    }
+    if (typeof provider.baseUrl === "string" && !isHttpsUrl(provider.baseUrl) && !(name === "local" && isLoopbackHttpUrl(provider.baseUrl))) {
+      invalid(where, `providers.${name}.baseUrl`, name === "local" ? "must be an https URL, or http only for localhost" : "must be an https URL");
+    }
+    if (provider.routeStyle !== undefined && provider.routeStyle !== "v1" && provider.routeStyle !== "deployments") {
+      invalid(where, `providers.${name}.routeStyle`, 'must be "v1" or "deployments"');
+    }
+    if (typeof provider.decisionsPath === "string" && !provider.decisionsPath.startsWith("/")) {
+      invalid(where, `providers.${name}.decisionsPath`, 'must start with "/"');
+    }
+    if (typeof provider.envFile === "string" && (provider.envFile.startsWith("-") || provider.envFile.includes(".."))) {
+      invalid(where, `providers.${name}.envFile`, "must be a plain file name or relative path without ..");
+    }
   }
-  if (raw.autopilot && isRecord(raw.autopilot) && raw.autopilot.autoMerge === true) {
+  for (const name of Object.keys(providers)) {
+    if (!isProviderId(name)) invalid(where, `providers.${name}`, `is not a known provider (${PROVIDERS.join(", ")})`);
+  }
+  const autopilot = section(raw, "autopilot", where);
+  if (autopilot?.autoMerge === true) {
     throw new WorkflowError("CONFIG_INVALID", "autopilot.autoMerge cannot be true.");
   }
-  if (raw.approvals && isRecord(raw.approvals) && raw.approvals.merge && raw.approvals.merge !== "manual") {
+  const approvals = section(raw, "approvals", where);
+  if (approvals?.merge && approvals.merge !== "manual") {
     throw new WorkflowError("CONFIG_INVALID", "approvals.merge must stay manual.");
   }
+  if (approvals?.publish !== undefined && approvals.publish !== "required" && approvals.publish !== "auto") {
+    invalid(where, "approvals.publish", 'must be "required" or "auto"');
+  }
+
+  const models = section(raw, "models", where);
+  if (models) {
+    for (const [key, value] of Object.entries(models)) {
+      if (!MODEL_KEYS.includes(key as (typeof MODEL_KEYS)[number])) invalid(where, `models.${key}`, "is not a known tier");
+      if (typeof value !== "string" || !isProviderId(value)) {
+        invalid(where, `models.${key}`, `must be one of ${PROVIDERS.join(", ")}`);
+      }
+    }
+  }
+
+  const tiers = section(raw, "tiers", where);
+  if (tiers) {
+    for (const [key, list] of Object.entries(tiers)) {
+      if (!(TIER_KEYS as readonly string[]).includes(key)) invalid(where, `tiers.${key}`, `is not a known tier (${TIER_KEYS.join(", ")})`);
+      if (!Array.isArray(list) || list.length === 0) invalid(where, `tiers.${key}`, "must be a non-empty list of candidates");
+      list.forEach((item, index) => {
+        const field = `tiers.${key}[${index}]`;
+        if (!isRecord(item)) invalid(where, field, "must be a mapping");
+        if (typeof item.provider !== "string" || !isProviderId(item.provider)) {
+          invalid(where, `${field}.provider`, `must be one of ${PROVIDERS.join(", ")}`);
+        }
+        if (typeof item.model !== "string" || item.model.trim() === "") invalid(where, `${field}.model`, "must be a non-empty string");
+        if (item.api !== undefined && item.api !== "chat" && item.api !== "decisions") invalid(where, `${field}.api`, 'must be "chat" or "decisions"');
+        if (item.api === "decisions" && key !== "classifier") invalid(where, `${field}.api`, '"decisions" models can only serve the classifier tier');
+        if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
+      });
+    }
+  }
+
+  const routing = section(raw, "routing", where);
+  if (routing) {
+    checkNumber(routing, "minConfidence", where, { min: 0, max: 1 }, "routing");
+    checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
+    checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
+    if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier))) {
+      invalid(where, "routing.maxTier", `must be one of ${TIERS.join(", ")}`);
+    }
+    if (routing.requirePremiumReviewFor !== undefined) stringArray(routing.requirePremiumReviewFor, "routing.requirePremiumReviewFor", where);
+  }
+  const workers = section(raw, "workers", where);
+  if (workers) {
+    checkNumber(workers, "concurrency", where, { min: 1, integer: true }, "workers");
+    checkNumber(workers, "tokenBudget", where, { exclusiveMin: 0 }, "workers");
+    checkNumber(workers, "deadlineMs", where, { exclusiveMin: 0 }, "workers");
+    checkNumber(workers, "ticketContextTokens", where, { min: 20000, integer: true }, "workers");
+    checkBoolean(workers, "isolatedWorktrees", where, "workers");
+    checkBoolean(workers, "preserveUntilReviewed", where, "workers");
+  }
+  const budgets = section(raw, "budgets", where);
+  if (budgets) {
+    for (const key of ["taskUsd", "autopilotPrUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
+    checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
+  }
+  if (autopilot) {
+    checkNumber(autopilot, "pollSeconds", where, { exclusiveMin: 0 }, "autopilot");
+    checkNumber(autopilot, "maxFixCycles", where, { min: 0, integer: true }, "autopilot");
+    checkNumber(autopilot, "maxRuntimeMs", where, { exclusiveMin: 0 }, "autopilot");
+    checkNumber(autopilot, "backoffSeconds", where, { min: 0 }, "autopilot");
+  }
+  if (raw.checks !== undefined) {
+    if (!Array.isArray(raw.checks)) invalid(where, "checks", "must be a list");
+    raw.checks.forEach((check, index) => {
+      const field = `checks[${index}]`;
+      if (!isRecord(check)) invalid(where, field, "must be a mapping");
+      if (typeof check.name !== "string" || typeof check.command !== "string" || check.command === "") {
+        invalid(where, field, "needs string name and command");
+      }
+      if (check.args !== undefined) stringArray(check.args, `${field}.args`, where);
+    });
+  }
+  if (raw.commandAllowlist !== undefined) stringArray(raw.commandAllowlist, "commandAllowlist", where);
+  if (raw.orgProviderAllowlist !== undefined) {
+    const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
+    for (const id of list) if (!isProviderId(id)) invalid(where, "orgProviderAllowlist", `contains unknown provider ${id}`);
+  }
+  if (raw.proprietaryCode !== undefined && typeof raw.proprietaryCode !== "boolean") {
+    invalid(where, "proprietaryCode", "must be a boolean");
+  }
+  out.pricing = normalizePricing(raw.pricing, where);
+  return out;
+}
+
+const MODEL_KEYS = ["classifier", "cheap", "standard", "premium"] as const;
+
+/**
+ * Cross-checks a resolved config: tier models must reference configured providers, and each
+ * referenced provider must name a model so pricing and calls never use an empty id.
+ */
+export function validateResolvedConfig(config: WorkflowConfig, where = "config"): void {
+  for (const [key, list] of Object.entries(config.tiers)) {
+    list?.forEach((candidate, index) => {
+      if (!config.providers[candidate.provider]) {
+        invalid(where, `tiers.${key}[${index}].provider`, `references provider "${candidate.provider}" which is not defined under providers`);
+      }
+    });
+  }
+  for (const key of MODEL_KEYS) {
+    if (config.tiers[key]) continue;
+    const provider = config.models[key];
+    if (!config.providers[provider]) {
+      invalid(where, `models.${key}`, `references provider "${provider}" which is not defined under providers`);
+    }
+    const tier: Tier = key;
+    if (!modelNameFor(config, provider, tier)) {
+      const hint = provider === "foundry" ? "providers.foundry.deployments" : `providers.${provider}.model`;
+      invalid(where, hint, `must name a model because models.${key} uses ${provider}`);
+    }
+  }
+}
+
+function build(norm: Record<string, unknown>): WorkflowConfig {
+  const obj = (key: string): Record<string, unknown> => (isRecord(norm[key]) ? (norm[key] as Record<string, unknown>) : {});
   return {
     ...DEFAULTS,
-    ...raw,
-    providers: { ...DEFAULTS.providers, ...providers },
-    models: { ...DEFAULTS.models, ...(isRecord(raw.models) ? raw.models : {}) } as WorkflowConfig["models"],
-    routing: { ...DEFAULTS.routing, ...(isRecord(raw.routing) ? raw.routing : {}) } as WorkflowConfig["routing"],
-    workers: { ...DEFAULTS.workers, ...(isRecord(raw.workers) ? raw.workers : {}) } as WorkflowConfig["workers"],
-    worktrees: { ...DEFAULTS.worktrees, ...(isRecord(raw.worktrees) ? raw.worktrees : {}) } as WorkflowConfig["worktrees"],
-    budgets: { ...DEFAULTS.budgets, ...(isRecord(raw.budgets) ? raw.budgets : {}) } as WorkflowConfig["budgets"],
+    providers: { ...DEFAULTS.providers, ...obj("providers") } as WorkflowConfig["providers"],
+    models: { ...DEFAULTS.models, ...obj("models") } as WorkflowConfig["models"],
+    tiers: normalizeTiers(obj("tiers")),
+    routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
+    workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
+    worktrees: { ...DEFAULTS.worktrees, ...obj("worktrees") } as WorkflowConfig["worktrees"],
+    budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
     approvals: {
       ...DEFAULTS.approvals,
-      ...(isRecord(raw.approvals) ? raw.approvals : {}),
+      ...obj("approvals"),
       plan: "required",
       merge: "manual",
       securitySensitiveFix: "required",
     } as WorkflowConfig["approvals"],
-    autopilot: {
-      ...DEFAULTS.autopilot,
-      ...(isRecord(raw.autopilot) ? raw.autopilot : {}),
-      autoMerge: false,
-    } as WorkflowConfig["autopilot"],
-    checks: Array.isArray(raw.checks) ? (raw.checks as CheckConfig[]) : DEFAULTS.checks,
-    commandAllowlist: Array.isArray(raw.commandAllowlist)
-      ? (raw.commandAllowlist as string[])
-      : DEFAULTS.commandAllowlist,
-    orgProviderAllowlist: Array.isArray(raw.orgProviderAllowlist)
-      ? (raw.orgProviderAllowlist as ProviderId[])
-      : [],
-    proprietaryCode: raw.proprietaryCode === true,
-    pricing: Array.isArray(raw.pricing) ? (raw.pricing as PricingRow[]) : [],
+    autopilot: { ...DEFAULTS.autopilot, ...obj("autopilot"), autoMerge: false } as WorkflowConfig["autopilot"],
+    checks: Array.isArray(norm.checks)
+      ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
+      : DEFAULTS.checks,
+    commandAllowlist: Array.isArray(norm.commandAllowlist) ? (norm.commandAllowlist as string[]) : DEFAULTS.commandAllowlist,
+    orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
+    proprietaryCode: norm.proprietaryCode === true,
+    pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
     schemaVersion: 1,
-    workspaceDir: typeof raw.workspaceDir === "string" ? raw.workspaceDir : DEFAULTS.workspaceDir,
+    workspaceDir: typeof norm.workspaceDir === "string" ? norm.workspaceDir : DEFAULTS.workspaceDir,
   };
+}
+
+function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
+  const out: WorkflowConfig["tiers"] = {};
+  for (const [key, list] of Object.entries(raw)) {
+    if (!Array.isArray(list)) continue;
+    out[key as TierKey] = list.map((item) => {
+      const entry = item as Record<string, unknown>;
+      const candidate: TierCandidate = {
+        provider: entry.provider as ProviderId,
+        model: String(entry.model),
+        api: entry.api === "decisions" ? "decisions" : "chat",
+      };
+      if (typeof entry.label === "string") candidate.label = entry.label;
+      return candidate;
+    });
+  }
+  return out;
+}
+
+function mergeConfig(raw: unknown, where: string): WorkflowConfig {
+  const norm = normalizeRaw(raw, where);
+  const config = build(norm);
+  // A standalone document that spells out both providers and models must be self-consistent.
+  // Partial overlays are cross-checked after layering in loadConfig.
+  if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
+    validateResolvedConfig(config, where);
+  }
+  return config;
 }
 
 export function parseConfig(text: string, where = "config"): WorkflowConfig {
@@ -192,17 +497,143 @@ export function parseConfig(text: string, where = "config"): WorkflowConfig {
   return mergeConfig(raw, where);
 }
 
+function mergeSection(user: unknown, project: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(user) && !isRecord(project)) return undefined;
+  return { ...(isRecord(user) ? user : {}), ...(isRecord(project) ? project : {}) };
+}
+
+/**
+ * Provider fields that choose where credentials go or which local files are read. A project file is
+ * untrusted (it ships with a cloned repo), so these come from the user config only. The one exception
+ * is a provider the user did not define, where a project may repeat the built-in default.
+ */
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "decisionsPath"] as const;
+
+function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (field === "baseUrl") return provider === "vercel" ? value === DEFAULT_VERCEL_GATEWAY_URL : provider === "local" && isLoopbackHttpUrl(value);
+  if (field === "audience") return provider === "foundry" && value === DEFAULT_FOUNDRY_AUDIENCE;
+  if (field === "decisionsPath") return value === "/decisions";
+  if (field === "projectDir") return provider === "vercel" && value === ".";
+  if (field === "envFile") return provider === "vercel" && value === ".env.local";
+  return false;
+}
+
+function restrictProject(name: string, user: unknown, project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const out: Record<string, unknown> = { ...project };
+  for (const field of USER_ONLY_PROVIDER_FIELDS) {
+    if (!(field in out)) continue;
+    const userDefines = isRecord(user);
+    const harmless = !userDefines && isBuiltinDefault(name, field, out[field]);
+    if (harmless) continue;
+    // A user-defined provider that already matches the built-in default needs no warning.
+    if (!(userDefines && name !== "local" && isBuiltinDefault(name, field, out[field]))) {
+      warnings.push(`Ignored project providers.${name}.${field}: credential and location settings are read from the user config (~/.pi/agent/cost-workflow.yaml) only.`);
+    }
+    delete out[field];
+  }
+  return out;
+}
+
+/**
+ * Layers a project document over a user document. Policy fields follow "user wins / most
+ * restrictive"; everything else is merged field-wise with the project overriding.
+ */
+export function layerConfigs(
+  userRaw: Record<string, unknown> | undefined,
+  projectRaw: Record<string, unknown> | undefined,
+  warnings: string[] = [],
+): Record<string, unknown> {
+  const user = userRaw ?? {};
+  const project = projectRaw ?? {};
+  const merged: Record<string, unknown> = { ...user, ...project };
+
+  for (const key of ["models", "tiers", "routing", "workers", "worktrees", "autopilot"]) {
+    const value = mergeSection(user[key], project[key]);
+    if (value) merged[key] = value;
+    else delete merged[key];
+  }
+  if (isRecord(user.providers) || isRecord(project.providers)) {
+    const providers: Record<string, unknown> = {};
+    const u = isRecord(user.providers) ? user.providers : {};
+    const p = isRecord(project.providers) ? project.providers : {};
+    for (const name of new Set([...Object.keys(u), ...Object.keys(p)])) {
+      providers[name] = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
+    }
+    merged.providers = providers;
+  }
+
+  // Budgets: the lower (stricter) of user and project.
+  const ub = isRecord(user.budgets) ? user.budgets : {};
+  const pb = isRecord(project.budgets) ? project.budgets : {};
+  if (isRecord(user.budgets) || isRecord(project.budgets)) {
+    const budgets: Record<string, unknown> = { ...ub, ...pb };
+    for (const key of Object.keys(budgets)) {
+      if (key === "softWarningRatio") continue;
+      if (typeof ub[key] === "number" && typeof pb[key] === "number") budgets[key] = Math.min(ub[key], pb[key]);
+    }
+    // A lower ratio warns earlier, which is the more restrictive choice.
+    if (typeof ub.softWarningRatio === "number" && typeof pb.softWarningRatio === "number") {
+      budgets.softWarningRatio = Math.min(ub.softWarningRatio, pb.softWarningRatio);
+    }
+    merged.budgets = budgets;
+  }
+
+  // Approvals: a project can never relax them. Publishing is automatic only if the user opts in.
+  const ua = isRecord(user.approvals) ? user.approvals : {};
+  merged.approvals = {
+    plan: "required",
+    publish: ua.publish === "auto" ? "auto" : "required",
+    merge: "manual",
+    securitySensitiveFix: "required",
+  };
+
+  // commandAllowlist: keep only project entries that the user list covers. Without a user list the
+  // built-in defaults are the ceiling, so a project file cannot grant itself new commands.
+  const projectList = Array.isArray(project.commandAllowlist) ? (project.commandAllowlist as string[]) : undefined;
+  const ceiling = Array.isArray(user.commandAllowlist) ? (user.commandAllowlist as string[]) : DEFAULTS.commandAllowlist;
+  if (projectList) {
+    const kept = projectList.filter((entry) => ceiling.some((outer) => allowlistEntryCovers(outer, entry)));
+    if (kept.length < projectList.length) warnings.push(`Ignored project commandAllowlist entries that the ${Array.isArray(user.commandAllowlist) ? "user" : "built-in"} allowlist does not cover: ${projectList.filter((entry) => !kept.includes(entry)).join(", ")}.`);
+    merged.commandAllowlist = kept;
+  } else if (Array.isArray(user.commandAllowlist)) {
+    merged.commandAllowlist = user.commandAllowlist;
+  }
+  // orgProviderAllowlist: an empty list means "all providers", so a project list can only restrict that.
+  // Once the user names providers, the user's list is final.
+  if (Array.isArray(user.orgProviderAllowlist) && user.orgProviderAllowlist.length > 0) {
+    merged.orgProviderAllowlist = user.orgProviderAllowlist;
+  }
+  merged.proprietaryCode = user.proprietaryCode === true || project.proprietaryCode === true;
+
+  // Pricing: project rows override user rows for the same provider/model/date.
+  const rows = new Map<string, PricingRow>();
+  for (const row of [...((user.pricing as PricingRow[] | undefined) ?? []), ...((project.pricing as PricingRow[] | undefined) ?? [])]) {
+    rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}`, row);
+  }
+  merged.pricing = [...rows.values()];
+  return merged;
+}
+
+/** Config files that loadConfig reads, so callers can watch them for changes. */
+export function configPaths(cwd: string): { projectPath: string; userPath: string } {
+  return {
+    projectPath: path.join(cwd, ".pi-workflows", "config.yaml"),
+    userPath: path.join(homedir(), ".pi", "agent", "cost-workflow.yaml"),
+  };
+}
+
 export function loadConfig(cwd: string): WorkflowConfig {
-  const projectPath = path.join(cwd, ".pi-workflows", "config.yaml");
-  const userPath = path.join(homedir(), ".pi", "agent", "cost-workflow.yaml");
-  let config = { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
-  if (existsSync(userPath)) {
-    config = parseConfig(readFileSync(userPath, "utf8"), userPath);
-  }
-  if (existsSync(projectPath)) {
-    const project = parseConfig(readFileSync(projectPath, "utf8"), projectPath);
-    config = mergeConfig({ ...config, ...project, providers: { ...config.providers, ...project.providers }, pricing: project.pricing.length ? project.pricing : config.pricing }, projectPath);
-  }
+  const { projectPath, userPath } = configPaths(cwd);
+  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath) : undefined;
+  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath) : undefined;
+  if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
+  const where = projectRaw ? projectPath : userPath;
+  const warnings: string[] = [];
+  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
+  validateResolvedConfig(config, where);
+  if (warnings.length > 0) config.warnings = warnings;
   if (config.proprietaryCode && config.orgProviderAllowlist.length === 0) {
     throw new WorkflowError(
       "CONFIG_INVALID",
@@ -212,17 +643,69 @@ export function loadConfig(cwd: string): WorkflowConfig {
   return config;
 }
 
+interface PriceIndex {
+  length: number;
+  byKey: Map<string, { day: string; row: PricingRow }[]>;
+}
+const priceIndexes = new WeakMap<PricingRow[], PriceIndex>();
+
+function priceKey(provider: string, model: string): string {
+  return `${provider}\u0000${model}`;
+}
+
+function priceIndex(pricing: PricingRow[]): PriceIndex {
+  const cached = priceIndexes.get(pricing);
+  if (cached && cached.length === pricing.length) return cached;
+  const byKey: PriceIndex["byKey"] = new Map();
+  pricing.forEach((row) => {
+    const day = normalizeEffectiveFrom(row.effectiveFrom);
+    if (!day) return;
+    const key = priceKey(row.provider, row.model);
+    const list = byKey.get(key);
+    if (list) list.push({ day, row });
+    else byKey.set(key, [{ day, row }]);
+  });
+  // Array.prototype.sort is stable, so among equal dates the later row in the file stays last and wins.
+  for (const list of byKey.values()) list.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  const index = { length: pricing.length, byKey };
+  priceIndexes.set(pricing, index);
+  return index;
+}
+
+/**
+ * Newest row for provider+model whose effectiveFrom is on or before `at` (UTC day).
+ * Equal effective dates resolve to the later row in the list. The index is built once per array.
+ */
 export function priceFor(
   pricing: PricingRow[],
   provider: string,
   model: string,
   at: Date,
 ): PricingRow | undefined {
+  if (Number.isNaN(at.getTime())) return undefined;
+  const list = priceIndex(pricing).byKey.get(priceKey(provider, model));
+  if (!list) return undefined;
   const day = at.toISOString().slice(0, 10);
-  const matches = pricing
-    .filter((row) => row.provider === provider && row.model === model && row.effectiveFrom <= day)
-    .sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? 1 : -1));
-  return matches[0];
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (list[mid].day <= day) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === 0 ? undefined : list[lo - 1].row;
+}
+
+const MICRO = 1_000_000;
+
+/** USD to integer micro-USD. */
+export function toMicroUsd(usd: number): number {
+  return Math.round(usd * MICRO);
+}
+
+/** Integer micro-USD to a USD number (exactly 6 decimal places of precision). */
+export function fromMicroUsd(micro: number): number {
+  return micro / MICRO;
 }
 
 export function estimateUsd(
@@ -233,14 +716,27 @@ export function estimateUsd(
   if (usage.input === null || usage.output === null) return null;
   const cachePriced = (row.cacheReadPerMillionUsd ?? 0) > 0 || (row.cacheWritePerMillionUsd ?? 0) > 0;
   if (cachePriced && (usage.cacheRead === null || usage.cacheWrite === null)) return null;
-  const million = 1_000_000;
-  return (
-    (usage.input * row.inputPerMillionUsd +
-      usage.output * row.outputPerMillionUsd +
-      (usage.cacheRead ?? 0) * (row.cacheReadPerMillionUsd ?? 0) +
-      (usage.cacheWrite ?? 0) * (row.cacheWritePerMillionUsd ?? 0)) /
-    million
-  );
+  // A row without cache rates bills cache tokens at the input rate, never free.
+  // Prices become integer micro-USD per million tokens, so tokens * price is an exact integer
+  // sum and dividing by one million yields micro-USD for the call.
+  const scaled =
+    usage.input * toMicroUsd(row.inputPerMillionUsd) +
+    usage.output * toMicroUsd(row.outputPerMillionUsd) +
+    (usage.cacheRead ?? 0) * toMicroUsd(row.cacheReadPerMillionUsd ?? row.inputPerMillionUsd) +
+    (usage.cacheWrite ?? 0) * toMicroUsd(row.cacheWritePerMillionUsd ?? row.inputPerMillionUsd);
+  return fromMicroUsd(Math.round(scaled / MICRO));
+}
+
+/**
+ * Candidates for a tier: the explicit `tiers` list when present, else the legacy `models` entry as a
+ * single candidate. `deterministic` and `advisor` have no legacy entry, so they are empty unless listed.
+ */
+export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
+  const explicit = config.tiers[tier];
+  if (explicit) return explicit;
+  if (tier === "deterministic" || tier === "advisor") return [];
+  const provider = config.models[tier];
+  return [{ provider, model: modelNameFor(config, provider, tier), api: "chat" }];
 }
 
 /** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */
