@@ -3,7 +3,7 @@ import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier
 import { decideRoute } from "../router/policy.js";
 import type { Availability } from "../router/select.js";
 import { redact } from "../redact.js";
-import { budgetRemainingUsd } from "./budget.js";
+import { budgetRemainingUsd, quotaState } from "./budget.js";
 import { iso, type WorkflowContext } from "./context.js";
 
 /** Which providers can be called right now. Providers absent from the config are left out (treated as available). */
@@ -37,6 +37,7 @@ export async function decide(
     tierHint: extra.tierHint,
     availability: await availability(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, extra.taskId),
+    quota: quotaState(ctx),
     rng: ctx.rng,
   });
 }
@@ -54,7 +55,7 @@ export async function announce(
   setStatus(`${decision.tier} → ${target}${why ? ` · ${why}` : ""}`);
   if (!taskId) return;
   const considered = (decision.considered ?? []).map(
-    (item) => `${item.provider}/${item.model}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success` : "price unknown"}`,
+    (item) => `${item.provider}/${item.model}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
   );
   await ctx.store.appendRoute(taskId, { purpose, tier: decision.tier, provider: decision.provider, model: decision.model, reason: why, considered }, iso(ctx));
 }

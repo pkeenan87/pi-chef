@@ -1,6 +1,7 @@
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { CommandResult, CostRecord, Phase, TaskState, TokenUsage } from "../domain.js";
 import { budgetStatusFor, buildCostRecord, recordsForDay, summarize, type SpendSummary } from "../cost/ledger.js";
+import { quotaUsage, type QuotaUsage } from "../cost/quota.js";
 import type { ClassifierUsage } from "../router/classify.js";
 import { active, fail, type WorkflowContext } from "./context.js";
 import type { InFlightRun } from "./inflight.js";
@@ -50,6 +51,11 @@ export function budgetRemainingUsd(ctx: WorkflowContext, taskId?: string): numbe
   const { task, daily } = budgetState(ctx, taskId);
   const taskLeft = taskId ? ctx.config.budgets.taskUsd - task.knownUsd - task.estimatedUnknownUsd : Number.POSITIVE_INFINITY;
   return Math.max(0, Math.min(taskLeft, ctx.config.budgets.dailyUsd - daily.knownUsd - daily.estimatedUnknownUsd));
+}
+
+/** Subscription quota use per provider. Ranking only: it never feeds budgetState or the ledger. */
+export function quotaState(ctx: WorkflowContext, records = ctx.store.readLedger()): QuotaUsage {
+  return quotaUsage(records, ctx.config, ctx.now());
 }
 
 export function warnSoft(ctx: WorkflowContext, key: string): void {

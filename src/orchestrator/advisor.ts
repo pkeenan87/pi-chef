@@ -3,7 +3,7 @@ import { emptyUsage, WorkflowError, type CommandResult, type TaskState } from ".
 import { truncateForClassifier } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
-import { budgetRemainingUsd, budgetState, record, warnSoft } from "./budget.js";
+import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
 import { announce, availability } from "./routing.js";
 
@@ -52,6 +52,7 @@ export function advisor(ctx: WorkflowContext, question: string): Promise<Command
       table: ctx.store.readMetrics(),
       availability: await availability(ctx),
       budgetRemainingUsd: budgetRemainingUsd(ctx, taskId),
+      quota: quotaState(ctx),
       rng: ctx.rng,
       at: ctx.now(),
     });

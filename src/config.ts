@@ -43,6 +43,29 @@ export interface PricingRow {
   cacheWritePerMillionUsd?: number;
 }
 
+/**
+ * Ranking-only shadow price for a subscription model, in USD per million tokens. It steers the selector away
+ * from scarce quota (Opus, Sol, Fable) on easy work. It never reaches the ledger, `actualUsd`, or budgets.
+ */
+export interface QuotaWeight {
+  provider: string;
+  model: string;
+  perMillionTokensUsd: number;
+}
+
+/** Soft token caps for one subscription provider. Over a cap, its shadow prices are multiplied; nothing is blocked. */
+export interface QuotaCap {
+  dailyTokens?: number;
+  weeklyTokens?: number;
+}
+
+export interface QuotaConfig {
+  models: QuotaWeight[];
+  providers: Partial<Record<ProviderId, QuotaCap>>;
+  /** Factor applied to a provider's shadow prices once it is at or over a daily or weekly cap. */
+  overCapMultiplier: number;
+}
+
 export interface CheckConfig {
   name: string;
   command: string;
@@ -98,6 +121,8 @@ export interface WorkflowConfig {
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
+  /** Subscription quota shadow prices and soft caps. Ranking only; see QuotaConfig. */
+  quota: QuotaConfig;
   /** Notes from loading, for example project settings that were ignored. Shown by /status. */
   warnings?: string[];
 }
@@ -137,6 +162,7 @@ const DEFAULTS: WorkflowConfig = {
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
+  quota: { models: [], providers: {}, overCapMultiplier: 4 },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,6 +260,38 @@ function normalizePricing(value: unknown, where: string): PricingRow[] {
     seen.add(key);
     return { ...(item as unknown as PricingRow), effectiveFrom };
   });
+}
+
+function normalizeQuota(value: unknown, where: string): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) invalid(where, "quota", "must be a mapping");
+  const out: Record<string, unknown> = { ...value };
+  if (value.models !== undefined) {
+    if (!Array.isArray(value.models)) invalid(where, "quota.models", "must be a list");
+    const seen = new Set<string>();
+    out.models = value.models.map((item, index) => {
+      const field = `quota.models[${index}]`;
+      if (!isRecord(item)) invalid(where, field, "must be a mapping");
+      if (typeof item.provider !== "string" || item.provider === "") invalid(where, `${field}.provider`, "must be a non-empty string");
+      if (typeof item.model !== "string" || item.model === "") invalid(where, `${field}.model`, "must be a non-empty string");
+      checkNumber(item, "perMillionTokensUsd", where, { min: 0 }, field);
+      if (item.perMillionTokensUsd === undefined) invalid(where, `${field}.perMillionTokensUsd`, "is required");
+      const key = `${item.provider}\u0000${item.model}`;
+      if (seen.has(key)) invalid(where, field, `duplicates another row for ${item.provider}/${item.model}`);
+      seen.add(key);
+      return { provider: item.provider, model: item.model, perMillionTokensUsd: item.perMillionTokensUsd as number } satisfies QuotaWeight;
+    });
+  }
+  const providers = section(value, "providers", where);
+  if (providers) {
+    for (const [name, cap] of Object.entries(providers)) {
+      if (!isProviderId(name)) invalid(where, `quota.providers.${name}`, "is not a known provider");
+      if (!isRecord(cap)) invalid(where, `quota.providers.${name}`, "must be a mapping");
+      for (const key of ["dailyTokens", "weeklyTokens"]) checkNumber(cap, key, where, { exclusiveMin: 0, integer: true }, `quota.providers.${name}`);
+    }
+  }
+  checkNumber(value, "overCapMultiplier", where, { min: 1 }, "quota");
+  return out;
 }
 
 function parseUrl(value: string): URL | undefined {
@@ -401,6 +459,8 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     invalid(where, "proprietaryCode", "must be a boolean");
   }
   out.pricing = normalizePricing(raw.pricing, where);
+  const quota = normalizeQuota(raw.quota, where);
+  if (quota) out.quota = quota;
   return out;
 }
 
@@ -458,6 +518,12 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,
     pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
+    quota: {
+      ...DEFAULTS.quota,
+      ...obj("quota"),
+      models: Array.isArray(obj("quota").models) ? (obj("quota").models as QuotaWeight[]) : [],
+      providers: isRecord(obj("quota").providers) ? (obj("quota").providers as QuotaConfig["providers"]) : {},
+    },
     schemaVersion: 1,
     workspaceDir: typeof norm.workspaceDir === "string" ? norm.workspaceDir : DEFAULTS.workspaceDir,
   };
@@ -613,6 +679,21 @@ export function layerConfigs(
     rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}`, row);
   }
   merged.pricing = [...rows.values()];
+
+  // Quota: ranking preference only (never billing or a budget), so the project wins field by field.
+  const uq = isRecord(user.quota) ? user.quota : undefined;
+  const pq = isRecord(project.quota) ? project.quota : undefined;
+  if (uq || pq) {
+    const weights = new Map<string, QuotaWeight>();
+    for (const row of [...((uq?.models as QuotaWeight[] | undefined) ?? []), ...((pq?.models as QuotaWeight[] | undefined) ?? [])]) {
+      weights.set(`${row.provider}\u0000${row.model}`, row);
+    }
+    const up = isRecord(uq?.providers) ? uq.providers : {};
+    const pp = isRecord(pq?.providers) ? pq.providers : {};
+    const providers: Record<string, unknown> = {};
+    for (const name of new Set([...Object.keys(up), ...Object.keys(pp)])) providers[name] = mergeSection(up[name], pp[name]);
+    merged.quota = { ...uq, ...pq, models: [...weights.values()], providers };
+  }
   return merged;
 }
 

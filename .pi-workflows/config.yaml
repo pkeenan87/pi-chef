@@ -140,3 +140,27 @@ pricing:
   # Per-token Foundry deployments (placeholders)
   - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
   - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }
+
+# Subscription quota (ranking only). The subscription rows above are $0, so without this the selector
+# would rank Haiku and Opus the same on cost. A shadow price (USD per million tokens, any token kind)
+# is added to each model's expected cost per success when ranking candidates within a tier, so easy
+# work goes to quota-cheap models and Opus/Sol/Fable quota is saved for hard tasks. Shadow prices
+# NEVER reach the ledger's actualUsd, budgets, or the over-budget filter. PLACEHOLDER weights: tune them
+# to how scarce each model's quota is on your plan.
+quota:
+  models:
+    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 0.4 }
+    - { provider: anthropic, model: claude-haiku-5-5, perMillionTokensUsd: 1 }
+    - { provider: anthropic, model: claude-sonnet-5-5, perMillionTokensUsd: 3 }
+    - { provider: anthropic, model: claude-opus-5-5, perMillionTokensUsd: 10 }
+    - { provider: openai, model: "gpt-6.1-sol", perMillionTokensUsd: 8 }
+    - { provider: anthropic, model: claude-fable-5-1, perMillionTokensUsd: 20 }
+    - { provider: openai, model: gpt-6-astra, perMillionTokensUsd: 15 }
+  # Optional soft caps per provider, in tokens (input + output + cache, as reported). Daily uses the
+  # budget day (UTC); weekly is the rolling 7 days. At or over a cap, that provider's shadow prices are
+  # multiplied by overCapMultiplier, which pushes work to the other provider or to metered models.
+  # Nothing is ever blocked by a quota cap. /cost shows usage per provider.
+  # providers:
+  #   anthropic: { dailyTokens: 20000000, weeklyTokens: 100000000 }
+  #   openai: { dailyTokens: 20000000, weeklyTokens: 100000000 }
+  overCapMultiplier: 4

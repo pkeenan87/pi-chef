@@ -219,6 +219,17 @@ describe("routeVirtual", () => {
     expect(high.state!.tier).toBe("standard");
   });
 
+  it("under a soft budget breaks a real-price tie by quota shadow price, never trading real money for quota", async () => {
+    const t = setup({ tier: "cheap", budget: "soft" });
+    // luna and haiku are both $0; haiku is quota-cheaper.
+    t.snapshot.config.quota = { models: [{ provider: "openai", model: "gpt-6-luna", perMillionTokensUsd: 5 }, { provider: "anthropic", model: "claude-haiku-5-5", perMillionTokensUsd: 1 }], providers: {}, overCapMultiplier: 4 };
+    expect((await routeVirtual(t.request(), { ...t.deps, rng: seededRng(1) })).model.id).toBe("claude-haiku-5-5");
+    // Sonnet ($3/$15) vs Grok ($1/$4): a huge Grok shadow price does not make the soft budget pick the dearer Sonnet.
+    const s = setup({ tier: "standard", budget: "soft" });
+    s.snapshot.config.quota = { models: [{ provider: "foundry", model: "grok-4-7", perMillionTokensUsd: 1000 }], providers: {}, overCapMultiplier: 4 };
+    expect((await routeVirtual(s.request(), { ...s.deps, rng: seededRng(1) })).model.id).toBe("grok-4-7");
+  });
+
   it("throws on a hard budget", async () => {
     const t = setup({ budget: "hard" });
     await expect(routeVirtual(t.request(), t.deps)).rejects.toThrow(/budget is exhausted/);

@@ -41,6 +41,8 @@ export interface ConsideredCandidate {
   score?: number;
   excludedReason?: string;
   priced?: boolean;
+  /** Quota shadow cost (USD per task) included in `score`. Ranking only; never billed. */
+  quotaUsd?: number;
 }
 
 /** Metrics key for one model inside a tier (additive to the per-tier key the circuit breaker reads). */

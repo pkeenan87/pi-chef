@@ -1,4 +1,5 @@
-import { estimateUsd, priceFor, type PricingRow } from "../config.js";
+import { estimateUsd, fromMicroUsd, priceFor, toMicroUsd, type PricingRow, type WorkflowConfig } from "../config.js";
+import type { QuotaUsage } from "../cost/quota.js";
 
 /** One recorded attempt. Optional; lets the circuit breaker look at recent attempts in a time window. */
 export interface AttemptOutcome {
@@ -64,4 +65,22 @@ export function tierCost(pricing: PricingRow[], provider: string, model: string,
   if (!row) return null;
   const input = Math.round(tokenBudget * EXPECTED_INPUT_SHARE);
   return estimateUsd(row, { input, output: Math.max(0, tokenBudget - input), cacheRead: 0, cacheWrite: 0 });
+}
+
+/**
+ * Ranking-only quota shadow cost for one task (workers.tokenBudget tokens) on a subscription model: its
+ * `quota.models` weight, times the provider's over-cap multiplier. 0 for models without a weight.
+ * Never use this for budgets or the ledger.
+ */
+export function shadowCost(config: WorkflowConfig, provider: string, model: string, quota?: QuotaUsage): number {
+  const row = config.quota.models.find((item) => item.provider === provider && item.model === model);
+  if (!row || row.perMillionTokensUsd === 0) return 0;
+  const micro = Math.round((toMicroUsd(row.perMillionTokensUsd) * config.workers.tokenBudget) / 1_000_000);
+  return fromMicroUsd(micro * (quota?.[provider]?.multiplier ?? 1));
+}
+
+/** Real expected cost plus the quota shadow cost, for ranking only. Null when the model has no pricing row. */
+export function rankingCost(config: WorkflowConfig, provider: string, model: string, at: Date, quota?: QuotaUsage): number | null {
+  const real = tierCost(config.pricing, provider, model, at, config.workers.tokenBudget);
+  return real === null ? null : real + shadowCost(config, provider, model, quota);
 }

@@ -1,9 +1,10 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
+import type { QuotaUsage } from "../cost/quota.js";
 import { modelMetricKey, type AcceptedClassification, type Tier, type TierCandidate } from "../domain.js";
 import { decideRoute } from "./policy.js";
 import { circuitOpenFor } from "./stats.js";
 import { selectCandidate, type Availability } from "./select.js";
-import { tierCost, type SuccessTable } from "./stats.js";
+import { shadowCost, tierCost, type SuccessTable } from "./stats.js";
 
 /**
  * The cost-opt/auto virtual model. Stateful and cache-aware: the first user request is classified once,
@@ -73,6 +74,8 @@ export interface RouterSnapshot {
   availability?: Availability;
   budget: "ok" | "soft" | "hard";
   budgetRemainingUsd?: number;
+  /** Subscription quota use for shadow-price ranking. */
+  quota?: QuotaUsage;
 }
 
 export interface RouteEvent {
@@ -325,9 +328,11 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
       });
       if (soft && list.length > 1) {
         const price = (c: TierCandidate): number => tierCost(snapshot.config.pricing, c.provider, c.model, deps.now(), snapshot.config.workers.tokenBudget) ?? Number.POSITIVE_INFINITY;
+        // Near the money limit real price decides; the quota shadow price only breaks ties (for example between $0 subscriptions).
+        const shadow = (c: TierCandidate): number => shadowCost(snapshot.config, c.provider, c.model, snapshot.quota);
         // A candidate whose circuit is open is not the cheapest usable one.
         const healthy = list.filter((c) => !circuitOpenFor(snapshot.table, state?.classification.taskType ?? "general", modelMetricKey(tier, c.provider, c.model), snapshot.config.routing.circuitBreakerFailures, deps.now()));
-        list = [[...(healthy.length > 0 ? healthy : list)].sort((a, b) => price(a) - price(b))[0]!];
+        list = [[...(healthy.length > 0 ? healthy : list)].sort((a, b) => price(a) - price(b) || shadow(a) - shadow(b))[0]!];
       }
       tiers[tier] = list;
     }
@@ -349,6 +354,7 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
       table: snapshot.table,
       availability: snapshot.availability,
       budgetRemainingUsd: snapshot.budgetRemainingUsd,
+      quota: snapshot.quota,
       rng: deps.rng,
       at: deps.now(),
     });
@@ -372,6 +378,7 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
       at: deps.now(),
       availability: snapshot.availability,
       budgetRemainingUsd: snapshot.budgetRemainingUsd,
+      quota: snapshot.quota,
       rng: deps.rng,
     });
     if (decision.blocked || !decision.candidate) {

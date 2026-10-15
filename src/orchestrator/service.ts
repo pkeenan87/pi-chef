@@ -8,7 +8,8 @@ import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
 import { advisor } from "./advisor.js";
 import { autopilot, onPoll, resumeWatcher } from "./autopilot-service.js";
-import { budgetRemainingUsd, checkBudget, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
+import type { QuotaUsage } from "../cost/quota.js";
+import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
 import { InFlightSpend } from "./inflight.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
@@ -131,6 +132,11 @@ export class Workflow {
   /** Smaller of the task and daily budget left (USD), counting only known spend. */
   budgetRemainingUsd(taskId?: string): number {
     return budgetRemainingUsd(this.ctx, taskId);
+  }
+
+  /** Subscription quota use per provider, for shadow-price ranking. */
+  quotaUsage(): QuotaUsage {
+    return quotaState(this.ctx);
   }
 
   /** decideRoute with live availability, remaining budget, and learned per-model metrics. Does not announce. */

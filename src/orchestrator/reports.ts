@@ -1,6 +1,7 @@
 import { PROVIDERS, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
 import { summarize, toCsv } from "../cost/ledger.js";
-import { budgetState, statusFor } from "./budget.js";
+import { quotaLines } from "../cost/quota.js";
+import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, handoff, iso, requireActive, type WorkflowContext } from "./context.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
@@ -57,6 +58,8 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
   const task = active(ctx);
   const summary = summarize(records, { pricing: ctx.config.pricing });
   const budget = budgetState(ctx, task?.taskId, records);
+  const quota = quotaState(ctx, records);
+  const quotaText = quotaLines(quota);
   const lines = [
     `Known spend $${summary.knownUsd.toFixed(4)} across ${records.length} record(s). Unknown usage records: ${summary.unknownRecords} (not counted as zero).`,
     `Task budget: ${budget.task.knownUsd.toFixed(4)} / ${ctx.config.budgets.taskUsd} (${statusFor(ctx, budget.task, ctx.config.budgets.taskUsd)}).`,
@@ -65,10 +68,12 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
     `By provider: ${JSON.stringify(summary.byProvider)}`,
     `By model: ${JSON.stringify(summary.byModel)}`,
     ...modelBreakdown(ctx, records).map((line) => `  ${line}`),
+    quotaText.length > 0 ? "Subscription quota (ranking only; not billed, not counted toward budgets):" : "",
+    ...quotaText.map((line) => `  ${line}`),
     task?.routing ? `Last route: ${routeLine(task.routing)}` : "",
   ].filter(Boolean);
   if (format.trim() === "csv") return done(toCsv(records), records);
-  if (format.trim() === "json") return done(JSON.stringify({ summary, records }, null, 2), { summary, records });
+  if (format.trim() === "json") return done(JSON.stringify({ summary, quota, records }, null, 2), { summary, quota, records });
   return done(lines.join("\n"), summary);
 }
 

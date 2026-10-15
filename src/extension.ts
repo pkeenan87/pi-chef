@@ -367,6 +367,7 @@ function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
             availability,
             budget: workflow ? workflow.checkBudget(taskId) : "ok",
             budgetRemainingUsd: workflow?.budgetRemainingUsd(taskId),
+            quota: workflow?.quotaUsage(),
           };
         },
         recordFailure: (input) => workflow?.recordChatFailure(input),

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseConfig } from "../src/config.js";
-import { modelMetricKey } from "../src/domain.js";
+import { layerConfigs, parseConfig } from "../src/config.js";
+import { budgetStatusFor, buildCostRecord, summarize } from "../src/cost/ledger.js";
+import { quotaLines, quotaUsage } from "../src/cost/quota.js";
+import { modelMetricKey, type CostRecord } from "../src/domain.js";
 import { classificationFromAnswers, validateClassification } from "../src/router/classify.js";
 import { decideRoute } from "../src/router/policy.js";
 import { sampleBeta, selectCandidate } from "../src/router/select.js";
 import type { SuccessTable } from "../src/router/stats.js";
-import { seededRng, tieredConfig } from "./helpers.js";
+import { seededRng, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const at = new Date("2026-10-14T12:00:00.000Z");
 
@@ -232,5 +234,193 @@ describe("review fixes", () => {
       expect(routed.tier).toBe("standard");
       expect(routed.model).toBe(direct.candidate?.model);
     }
+  });
+});
+
+/** Two $0 subscription candidates in the standard tier with quota shadow prices: a on anthropic, b on openai. */
+function subscriptions(quota = "", tokenBudget = 8000) {
+  return parseConfig(`
+providers:
+  anthropic: { type: anthropic, auth: account-login }
+  openai: { type: openai, auth: account-login }
+tiers:
+  classifier: [ { provider: anthropic, model: a } ]
+  cheap: [ { provider: anthropic, model: a } ]
+  premium: [ { provider: anthropic, model: a } ]
+  standard:
+    - { provider: anthropic, model: a }
+    - { provider: openai, model: b }
+workers: { tokenBudget: ${tokenBudget} }
+pricing:
+  - { provider: anthropic, model: a, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+  - { provider: openai, model: b, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+${quota}`);
+}
+
+const weights = (a: number, b: number, extra = "") => `
+quota:
+  models:
+    - { provider: anthropic, model: a, perMillionTokensUsd: ${a} }
+    - { provider: openai, model: b, perMillionTokensUsd: ${b} }
+${extra}`;
+
+function ledgerRow(provider: string, model: string, when: string, tokens: number | null, actualUsd: number | null = 0): CostRecord {
+  return {
+    id: `${provider}-${when}`, at: when, taskId: "t", phase: "IMPLEMENTING", provider, model, tier: "standard", requests: 1,
+    inputTokens: tokens, outputTokens: tokens === null ? null : 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    estimatedUsd: null, actualUsd, usageKnown: actualUsd !== null, outcome: "success", retries: 0, reason: "test",
+  };
+}
+
+describe("subscription quota shadow prices", () => {
+  it("without weights two $0 candidates split on sampled success alone", () => {
+    const picks = { a: 0, b: 0 };
+    for (let seed = 1; seed <= 200; seed++) picks[run(subscriptions(), cells([10, 10], [10, 10]), {}, seed).candidate!.model as "a" | "b"] += 1;
+    expect(picks.a).toBeGreaterThan(60);
+    expect(picks.b).toBeGreaterThan(60);
+  });
+
+  it("prefers the quota-cheap candidate when success odds are similar", () => {
+    // a is the scarce model (10/M), b is quota-cheap (1/M); same history.
+    const config = subscriptions(weights(10, 1));
+    const picks = { a: 0, b: 0 };
+    for (let seed = 1; seed <= 200; seed++) picks[run(config, cells([19, 1], [19, 1]), {}, seed).candidate!.model as "a" | "b"] += 1;
+    expect(picks.b).toBeGreaterThan(195);
+    const result = run(config, cells([19, 1], [19, 1]), {}, 3);
+    expect(result.reason).toMatch(/quota shadow/);
+    // 8000 tokens at $1/M = $0.008 shadow; the real price stays 0.
+    const b = result.considered.find((item) => item.model === "b")!;
+    expect(b.quotaUsd).toBeCloseTo(0.008, 10);
+    expect(b.score).toBeGreaterThan(0);
+  });
+
+  it("still pays for the scarce model when the cheap one keeps failing", () => {
+    const config = subscriptions(weights(4, 1));
+    // b fails almost always: a at 0.032 / ~0.95 per success beats b at 0.008 / ~0.05.
+    const picks = { a: 0, b: 0 };
+    for (let seed = 1; seed <= 200; seed++) picks[run(config, cells([38, 2], [1, 39]), {}, seed).candidate!.model as "a" | "b"] += 1;
+    expect(picks.a).toBeGreaterThan(190);
+  });
+
+  it("never counts the shadow price against the budget", () => {
+    // Shadow cost of a is 8000 * 10/M = $0.08, far above the remaining budget; its real price is 0.
+    const result = run(subscriptions(weights(10, 10)), {}, { budgetRemainingUsd: 0.000001 });
+    expect(result.candidate).toBeDefined();
+    expect(result.considered.every((item) => item.excludedReason === undefined)).toBe(true);
+    // and with nothing left a known-zero real price still passes, shadow or not
+    expect(run(subscriptions(weights(10, 10)), {}, { budgetRemainingUsd: 0 }).blocked).toBeUndefined();
+  });
+
+  it("never reaches the ledger's actualUsd or budget status", () => {
+    const config = subscriptions(weights(10, 10));
+    const entry = buildCostRecord(
+      { provider: "anthropic", model: "a", phase: "IMPLEMENTING", taskId: "t", tier: "standard", usage: { input: 900_000, output: 100_000, cacheRead: 0, cacheWrite: 0, requests: 1 }, outcome: "success", retries: 0, reason: "test" },
+      config.pricing,
+      at,
+      "id-1",
+    );
+    expect(entry.actualUsd).toBe(0);
+    const summary = summarize([entry], { pricing: config.pricing });
+    expect(summary.knownUsd).toBe(0);
+    expect(budgetStatusFor(summary, 0.01, 0.8)).toBe("ok");
+  });
+
+  it("raises a provider's shadow price once it is over a soft cap, which flips the choice", () => {
+    // a is cheaper on quota (1 vs 2) until anthropic is over its daily cap: 1 x 4 = 4 > 2.
+    const config = subscriptions(weights(1, 2, "  providers:\n    anthropic: { dailyTokens: 1000, weeklyTokens: 100000 }\n  overCapMultiplier: 4\n"));
+    const table = cells([19, 1], [19, 1]);
+    const under = quotaUsage([ledgerRow("anthropic", "a", "2026-10-14T08:00:00.000Z", 999)], config, at);
+    expect(under.anthropic).toMatchObject({ dailyTokens: 999, overCap: false, multiplier: 1 });
+    const over = quotaUsage([ledgerRow("anthropic", "a", "2026-10-14T08:00:00.000Z", 1000)], config, at);
+    expect(over.anthropic).toMatchObject({ dailyTokens: 1000, overCap: true, multiplier: 4 });
+    const picks = (quota: typeof under) => {
+      const out = { a: 0, b: 0 };
+      for (let seed = 1; seed <= 100; seed++) out[run(config, table, { quota }, seed).candidate!.model as "a" | "b"] += 1;
+      return out;
+    };
+    expect(picks(under).a).toBeGreaterThan(90);
+    expect(picks(over).b).toBeGreaterThan(90);
+    const flipped = run(config, table, { quota: over }, 4);
+    expect(flipped.considered.find((item) => item.model === "a")?.quotaUsd).toBeCloseTo(0.032, 10);
+    // the over-cap provider's model is flagged when it still wins
+    const lone = selectCandidate({ tier: "cheap", taskType: "general", config, table: {}, at, quota: over, rng: seededRng(1) });
+    expect(lone.candidate?.model).toBe("a");
+    expect(lone.reason).toMatch(/anthropic over quota cap/);
+  });
+
+  it("counts tokens per provider for the budget day and the rolling week", () => {
+    const config = subscriptions(weights(1, 1, "  providers:\n    openai: { weeklyTokens: 500 }\n"));
+    const records = [
+      ledgerRow("anthropic", "a", "2026-10-14T01:00:00.000Z", 100),
+      ledgerRow("anthropic", "a", "2026-10-13T23:00:00.000Z", 40), // yesterday: weekly only
+      ledgerRow("anthropic", "a", "2026-10-06T11:00:00.000Z", 1000), // more than 7 days ago
+      ledgerRow("anthropic", "a", "2026-10-14T13:00:00.000Z", 7), // after `at`
+      ledgerRow("anthropic", "a", "2026-10-14T02:00:00.000Z", null, null), // unknown tokens add nothing
+      ledgerRow("openai", "b", "2026-10-10T00:00:00.000Z", 600),
+      ledgerRow("foundry", "grok", "2026-10-14T01:00:00.000Z", 5000), // not a quota provider
+    ];
+    const usage = quotaUsage(records, config, at);
+    expect(Object.keys(usage).sort()).toEqual(["anthropic", "openai"]);
+    expect(usage.anthropic).toMatchObject({ dailyTokens: 100, weeklyTokens: 140, overCap: false });
+    expect(usage.openai).toMatchObject({ dailyTokens: 0, weeklyTokens: 600, weeklyCap: 500, overCap: true, multiplier: 4 });
+    const lines = quotaLines(usage);
+    expect(lines[0]).toBe("anthropic: 100 tokens today, 140 this week");
+    expect(lines[1]).toBe("openai: 0 tokens today, 600 this week / 500 cap (over cap: shadow prices x4)");
+    expect(quotaUsage(records, subscriptions(), at)).toEqual({});
+  });
+
+  it("sends easy work to the quota-cheap tier member and keeps hard work in premium", () => {
+    const yaml = `
+quota:
+  models:
+    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 0.4 }
+    - { provider: anthropic, model: claude-haiku-5-5, perMillionTokensUsd: 1 }
+`;
+    const config = tieredConfig(yaml);
+    const easy = { task_type: "general", complexity: "low" as const, risk: "low" as const, required_capabilities: [], recommended_tier: "cheap" as const, confidence: 1, reason_codes: [], source: "fallback" as const };
+    const proven = { general: { [modelMetricKey("cheap", "openai", "gpt-6-luna")]: { success: 19, failure: 1 }, [modelMetricKey("cheap", "anthropic", "claude-haiku-5-5")]: { success: 19, failure: 1 } } };
+    let luna = 0;
+    for (let seed = 1; seed <= 100; seed++) if (decideRoute(easy, config, proven, { purpose: "implement", at, rng: seededRng(seed) }).model === "gpt-6-luna") luna += 1;
+    expect(luna).toBeGreaterThan(80);
+    // The tier for hard work is policy, not price: planning a high-complexity task stays premium.
+    const hard = decideRoute({ ...easy, complexity: "high" }, config, proven, { purpose: "plan", at, rng: seededRng(1) });
+    expect(hard.tier).toBe("premium");
+    // decideRoute's expected cost is the real one, without the shadow price.
+    const cheap = decideRoute(easy, config, proven, { purpose: "implement", at, rng: seededRng(1) });
+    expect(cheap.expectedUsd).toBe(0);
+  });
+
+  it("validates the quota block", () => {
+    expect(() => subscriptions(weights(-1, 1))).toThrow(/perMillionTokensUsd/);
+    expect(() => subscriptions("quota:\n  models:\n    - { provider: openai, model: b }\n")).toThrow(/perMillionTokensUsd/);
+    expect(() => subscriptions(weights(1, 1, "  providers:\n    nobody: { dailyTokens: 5 }\n"))).toThrow(/known provider/);
+    expect(() => subscriptions(weights(1, 1, "  providers:\n    openai: { dailyTokens: 0 }\n"))).toThrow(/dailyTokens/);
+    expect(() => subscriptions(weights(1, 1, "  overCapMultiplier: 0.5\n"))).toThrow(/overCapMultiplier/);
+    expect(subscriptions().quota).toEqual({ models: [], providers: {}, overCapMultiplier: 4 });
+  });
+
+  it("layers project quota over the user's by model and by provider", () => {
+    const merged = layerConfigs(
+      { quota: { models: [{ provider: "openai", model: "b", perMillionTokensUsd: 1 }, { provider: "anthropic", model: "a", perMillionTokensUsd: 9 }], providers: { anthropic: { dailyTokens: 10, weeklyTokens: 50 } }, overCapMultiplier: 3 } },
+      { quota: { models: [{ provider: "anthropic", model: "a", perMillionTokensUsd: 5 }], providers: { anthropic: { dailyTokens: 20 } } } },
+    );
+    expect(merged.quota).toEqual({
+      models: [{ provider: "openai", model: "b", perMillionTokensUsd: 1 }, { provider: "anthropic", model: "a", perMillionTokensUsd: 5 }],
+      providers: { anthropic: { dailyTokens: 20, weeklyTokens: 50 } },
+      overCapMultiplier: 3,
+    });
+  });
+
+  it("/cost shows quota use per provider, apart from billed spend", async () => {
+    const config = tieredConfig("quota:\n  models:\n    - { provider: anthropic, model: claude-opus-5-5, perMillionTokensUsd: 10 }\n  providers:\n    anthropic: { dailyTokens: 1000 }\n");
+    config.pricing = config.pricing.map((row) => (row.provider === "anthropic" ? { ...row, inputPerMillionUsd: 0, outputPerMillionUsd: 0 } : row));
+    const app = workflow(await tempRepo(), { config });
+    app.store.appendLedger(ledgerRow("anthropic", "claude-opus-5-5", app.now().toISOString(), 1500));
+    const report = await app.cost();
+    expect(report.text).toContain("Known spend $0.0000");
+    expect(report.text).toContain("Subscription quota (ranking only; not billed, not counted toward budgets):");
+    expect(report.text).toContain("  anthropic: 1,500 tokens today / 1,000 cap, 1,500 this week (over cap: shadow prices x4)");
+    const json = (await app.cost("json")).data as { quota: Record<string, { dailyTokens: number; overCap: boolean }> };
+    expect(json.quota.anthropic).toMatchObject({ dailyTokens: 1500, overCap: true });
   });
 });

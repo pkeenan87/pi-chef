@@ -1,7 +1,8 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
 import { modelMetricKey, TIERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
 import { selectCandidate, type Availability, type Selection } from "./select.js";
-import { circuitOpenFor, rate, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
+import type { QuotaUsage } from "../cost/quota.js";
+import { circuitOpenFor, rankingCost, rate, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
 
 export { circuitOpenFor, DEFAULT_CIRCUIT_WINDOW_MS, EXPECTED_INPUT_SHARE, SUCCESS_PRIOR } from "./stats.js";
 export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
@@ -31,6 +32,8 @@ export interface RouteOptions {
   availability?: Availability;
   /** Smaller of the task and daily budget left, in USD. */
   budgetRemainingUsd?: number;
+  /** Subscription quota use for shadow-price ranking. Never affects budgets. */
+  quota?: QuotaUsage;
   /** Planner's suggested tier for this unit of work. Ignored for sensitive work, after a failure, and above routing.maxTier. */
   tierHint?: Tier;
   /** Uniform [0, 1) for exploration. Defaults to Math.random. */
@@ -62,6 +65,7 @@ export function decideRoute(
       table,
       availability: options.availability,
       budgetRemainingUsd: options.budgetRemainingUsd,
+      quota: options.quota,
       rng,
       at,
       // A local model that is down must fall back to literal edits, not to a login prompt.
@@ -85,7 +89,7 @@ export function decideRoute(
     });
     if (proven.length > 0) {
       tier = proven
-        .map((candidate) => ({ candidate, expected: expectedFor(candidate, config, table, classification.task_type, at) }))
+        .map((candidate) => ({ candidate, expected: expectedFor(candidate, config, table, classification.task_type, at, options.quota) }))
         .sort((a, b) => a.expected - b.expected)[0]!.candidate;
     } else if (sensitive) {
       tier = "standard";
@@ -173,12 +177,12 @@ function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig)
   return failed;
 }
 
-/** Cheapest expected cost among a tier's priced candidates; unpriced tiers rank last. */
-function expectedFor(candidate: Tier, config: WorkflowConfig, table: SuccessTable, taskType: string, at: Date): number {
+/** Cheapest expected ranking cost (real plus quota shadow) among a tier's priced candidates; unpriced tiers rank last. */
+function expectedFor(candidate: Tier, config: WorkflowConfig, table: SuccessTable, taskType: string, at: Date, quota?: QuotaUsage): number {
   const candidates = tierCandidates(config, candidate);
   if (candidates.length === 0) return 0;
   const costs = candidates
-    .map((item) => tierCost(config.pricing, item.provider, item.model, at, config.workers.tokenBudget))
+    .map((item) => rankingCost(config, item.provider, item.model, at, quota))
     .filter((value): value is number => value !== null);
   if (costs.length === 0) return Number.POSITIVE_INFINITY;
   return Math.min(...costs) / Math.max(rate(table, taskType, candidate).rate, 0.05);
