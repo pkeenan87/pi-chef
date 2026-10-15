@@ -182,7 +182,7 @@ describe("/implement git preflight", () => {
     const { mkdtempSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { execFileSync } = await import("node:child_process");
-    const { GitWorkspace } = await import("../src/git/worktrees.js");
+    const { GitWorkspace } = await import("../src/git/workspace.js");
     const plain = mkdtempSync(path.join(tmpdir(), "pi-cost-nogit-"));
     const git = new GitWorkspace(plain);
     expect(await git.preflight()).toMatch(/is not a git repository/);
@@ -191,11 +191,11 @@ describe("/implement git preflight", () => {
     expect(await new GitWorkspace(await tempRepo()).preflight()).toBeUndefined();
   });
 
-  it("stops /implement with a clear message and leaves the task approved", async () => {
+  it("stops /build with a clear message and leaves the task approved", async () => {
     const { app } = await drafted();
     expect((await app.approveDraft()).ok).toBe(true);
     (app.git as { preflight: () => Promise<string | undefined> }).preflight = async () => "not a git repository";
-    const result = await app.implement();
+    const result = await app.startBuild();
     expect(result).toMatchObject({ ok: false, code: "GIT_NOT_READY" });
     const task = app.store.load(app.activeTaskId()!)!;
     expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");

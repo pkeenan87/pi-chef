@@ -169,7 +169,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
   return { tickets, errors };
 }
 
-/** Maps tickets to plan groups so the existing worktree and wave machinery can schedule them. */
+/** Maps tickets to plan groups so plan.ts `waves` can order them. */
 export function ticketsToGroups(tickets: Ticket[]): PlanGroup[] {
   const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   return tickets.map((ticket) => ({
@@ -281,7 +281,7 @@ export type TicketStatus = "ready-for-agent" | "in-progress" | "done" | "failed"
 const norm = (text: string) => text.toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
 
 /**
- * Best-effort read of a child's closing summary: for each acceptance criterion, true when a line that
+ * Best-effort read of a ticket's closing summary: for each acceptance criterion, true when a line that
  * mentions it is ticked ("- [x]") or says "met" (and not "not met"/"unmet"). Unmatched criteria are not met.
  */
 export function parseCriteriaMet(finalText: string, criteria: string[]): boolean[] {

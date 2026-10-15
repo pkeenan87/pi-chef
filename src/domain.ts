@@ -170,15 +170,6 @@ export interface CostRecord {
   reason: string;
 }
 
-export interface WorktreeRecord {
-  groupId: string;
-  branch: string;
-  path: string;
-  baseSha: string;
-  headSha: string;
-  abandoned?: boolean;
-}
-
 export interface CheckEvidence {
   name: string;
   command: string;
@@ -253,14 +244,6 @@ export interface PullRequestRef {
   baseSha: string;
 }
 
-export interface ContextReset {
-  boundary: "post-approval" | "post-implementation" | "post-publish" | "manual";
-  at: string;
-  mode: "new-session" | "compact" | "handoff-only";
-  cancelled: boolean;
-  handoffFile: string;
-}
-
 export interface AttemptRecord {
   tier: Tier;
   provider: string;
@@ -278,7 +261,7 @@ export interface PlanningProgress {
   revision?: string;
 }
 
-/** Where one ticket stands during /implement (tickets run in child pi processes). */
+/** Where one ticket stands during /build. */
 export interface TicketRun {
   status: "in-progress" | "done" | "failed";
   tier?: Tier;
@@ -287,13 +270,13 @@ export interface TicketRun {
   /** Attempts so far, one per tier tried. */
   attempts: number;
   turns: number;
-  /** All tokens the child reported across attempts (input, output, cache). */
+  /** All tokens the model used across attempts (input, output, cache). */
   tokens: number;
   /** Known cost across attempts; null when any attempt's cost was unknown. */
   costUsd: number | null;
   maxContextTokens: number;
   crossedTarget: boolean;
-  /** Redacted tail of the child's final message, passed to tickets this one blocks. */
+  /** Redacted tail of the model's final message, passed to tickets this one blocks. */
   summary?: string;
   error?: string;
   /** When the first attempt started. */
@@ -347,19 +330,14 @@ export interface TaskState {
   plan?: PlanDocument;
   approvedVersion?: number;
   publishApproved: boolean;
-  worktrees: WorktreeRecord[];
   /** Per-ticket progress, keyed by ticket id. */
   ticketRuns?: Record<string, TicketRun>;
   build?: BuildRecord;
-  integration?: { branch: string; sha?: string; path?: string };
   review?: ReviewReport;
   pullRequest?: PullRequestRef;
   attempts: AttemptRecord[];
   blockedReason?: string;
-  contextResets: ContextReset[];
   phaseEnteredAt: string;
-  mergeReadyAt?: string;
-  autopilot?: import("./github/autopilot.js").AutopilotCursor;
 }
 
 export interface CommandResult {

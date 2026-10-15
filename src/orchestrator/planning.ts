@@ -4,11 +4,10 @@ import { classifyTaskWithUsage, type ClassifierUsage, type Decider } from "../ro
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, recordClassifier, remember } from "./budget.js";
-import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireActive, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireActive, transition, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
-import { finish } from "./publish.js";
 import { announce, availability, decide, suggestAdvisor } from "./routing.js";
 
 /** Classifies with the tier's Decisions model when one is selected and reachable, else the chat classifier, else keywords. */
@@ -68,15 +67,40 @@ export function blank(taskId: string, request: string, at: string): TaskState {
     phaseEnteredAt: at,
     request,
     publishApproved: false,
-    worktrees: [],
     attempts: [],
-    contextResets: [],
   };
 }
 
 /** Moves a task back to AWAITING_PLAN_APPROVAL for a new draft; a paused task resumes through PLANNING first. */
 export function backToApproval(task: TaskState, at: string, note?: string): TaskState {
   return move(task.phase === "PAUSED" ? move(task, "PLANNING", at) : task, "AWAITING_PLAN_APPROVAL", at, note);
+}
+
+/**
+ * Closes a task whose pull request is published, so a new /plan can start (this replaces /complete). A merged PR closes it
+ * with a chat line; an unmerged one asks first. Returns a failure when the person declines or there is no UI, else undefined.
+ */
+export async function closePublished(ctx: WorkflowContext, task: TaskState): Promise<CommandResult | undefined> {
+  const pr = task.pullRequest;
+  let merged = false;
+  if (pr && ctx.github?.wasMerged) {
+    try {
+      merged = await ctx.github.wasMerged(pr.branch);
+    } catch {
+      /* cannot confirm the merge: ask the person */
+    }
+  }
+  if (merged) {
+    await transition(ctx, task.taskId, "pull request merged", "COMPLETE");
+    ctx.progress?.(`Closed ${task.taskId}: PR #${pr!.number} is merged.`);
+    return undefined;
+  }
+  const label = pr ? `PR #${pr.number}` : "its pull request";
+  const allowed = await ctx.confirm("Start a new task?", `${label} for ${task.taskId} is not merged. Close that task and start a new one?`);
+  if (!allowed) return fail("TASK_ACTIVE", `Task ${task.taskId} is still tracking ${label}, which is not merged. Merge it, or confirm to close the task and start a new one.`);
+  await transition(ctx, task.taskId, "closed by a new plan", "COMPLETE");
+  ctx.progress?.(`Closed ${task.taskId}: ${label} was not merged.`);
+  return undefined;
 }
 
 export function plan(ctx: WorkflowContext, request: string): Promise<CommandResult> {
@@ -91,9 +115,8 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     assertGraph(parsed.groups);
     let current = active(ctx);
     if (current && PUBLISHED_PHASES.includes(current.phase)) {
-      const allowed = await ctx.confirm("Start a new task", `Task ${current.taskId} has a published pull request. Mark it complete and start a new task?`);
-      if (!allowed) return fail("TASK_ACTIVE", `Task ${current.taskId} is still tracking its pull request. Run /complete once it is merged, or confirm to replace it.`);
-      await finish(ctx, current, "superseded by a new plan");
+      const blocked = await closePublished(ctx, current);
+      if (blocked) return blocked;
       current = active(ctx);
     }
     const terminal = !current || current.phase === "COMPLETE" || current.phase === "FAILED" || current.phase === "IDLE";

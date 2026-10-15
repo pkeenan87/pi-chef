@@ -7,7 +7,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
-import { emptyPr, fakeTimer, MemoryGitHub, permissiveRegistry, publishedWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
+import { emptyPr, MemoryGitHub, permissiveRegistry, publishedWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -28,6 +28,8 @@ describe("pi extension surface", () => {
     for (const spec of COMMANDS) {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
+    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "ship", "route", "advisor", "cost", "status", "auth"]);
+    expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "cost-help"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");
     expect(completions?.map((item) => item.value)).toContain("anthropic");
@@ -76,10 +78,9 @@ describe("pi extension surface", () => {
   const registry = permissiveRegistry();
   const user = (content: string) => ({ role: "user", content });
 
-  it("keeps one workflow across commands so /autopilot stop reaches the live timer", async () => {
-    const timer = fakeTimer();
+  it("keeps one workflow across commands", async () => {
     const github = new MemoryGitHub(emptyPr());
-    const { app, cwd } = await publishedWorkflow({ schedule: timer.schedule }, github);
+    const { app, cwd } = await publishedWorkflow({}, github);
     const { commands } = fakePi();
     bindWorkflow(app);
     const ctx = {
@@ -89,13 +90,10 @@ describe("pi extension surface", () => {
       newSession: async () => ({ cancelled: false }),
       compact() {},
     };
-    await commands.get("autopilot")!.handler("", ctx);
+    await commands.get("status")!.handler("", ctx);
     expect(currentWorkflow()).toBe(app);
-    expect(timer.state.delays).toHaveLength(1);
-    await commands.get("autopilot")!.handler("stop", ctx);
+    await commands.get("cost")!.handler("", ctx);
     expect(currentWorkflow()).toBe(app);
-    expect(timer.state.cancelled).toBe(1);
-    expect(timer.state.pending).toBeUndefined();
     bindWorkflow(undefined);
   });
 

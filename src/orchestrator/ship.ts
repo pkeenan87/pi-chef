@@ -183,7 +183,7 @@ export function ship(ctx: WorkflowContext): Promise<CommandResult> {
         );
       }
       if (!dirty) return fail("NOTHING_TO_SHIP", `Nothing to ship: you are on ${base} with no changes.`);
-      branch = `${ctx.config.worktrees.branchPrefix}/${state?.taskId ?? `ship-${stamp(ctx)}`}`;
+      branch = `${ctx.config.branchPrefix}/${state?.taskId ?? `ship-${stamp(ctx)}`}`;
       await ctx.git.switchCreate(branch);
       ctx.progress?.(`Ship: created branch ${branch} for the uncommitted changes`);
     }

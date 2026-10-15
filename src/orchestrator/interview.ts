@@ -4,8 +4,7 @@ import type { ClassifierUsage } from "../router/classify.js";
 import { budgetState, recordClassifier } from "./budget.js";
 import { active, done, fail, guard, iso, PUBLISHED_PHASES, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { blank, classify, plan } from "./planning.js";
-import { finish } from "./publish.js";
+import { blank, classify, closePublished, plan } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
@@ -157,9 +156,8 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     }
     let existing = current;
     if (existing && PUBLISHED_PHASES.includes(existing.phase)) {
-      const allowed = await ctx.confirm("Start a new task", `Task ${existing.taskId} has a published pull request. Mark it complete and start a new task?`);
-      if (!allowed) return fail("TASK_ACTIVE", `Task ${existing.taskId} is still tracking its pull request. Run /complete once it is merged, or confirm to replace it.`);
-      await finish(ctx, existing, "superseded by a new plan");
+      const blocked = await closePublished(ctx, existing);
+      if (blocked) return blocked;
       existing = active(ctx);
     }
     const terminal = !existing || ["COMPLETE", "FAILED", "IDLE"].includes(existing.phase);

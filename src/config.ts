@@ -112,20 +112,13 @@ export interface WorkflowConfig {
     circuitBreakerFailures: number;
   };
   workers: {
-    concurrency: number;
-    isolatedWorktrees: boolean;
-    preserveUntilReviewed: boolean;
+    /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
-    deadlineMs: number;
     /** Soft context-window target for one ticket, in tokens. Planning rejects a ticket estimated above it. */
     ticketContextTokens: number;
   };
-  worktrees: {
-    strategy: "per-independent-task";
-    integrationBranch: boolean;
-    cleanupRequiresConfirmation: boolean;
-    branchPrefix: string;
-  };
+  /** /build and /ship name the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
+  branchPrefix: string;
   budgets: { taskUsd: number; autopilotPrUsd: number; dailyUsd: number; softWarningRatio: number };
   approvals: {
     plan: "required";
@@ -168,19 +161,10 @@ const DEFAULTS: WorkflowConfig = {
     circuitBreakerFailures: 3,
   },
   workers: {
-    concurrency: 2,
-    isolatedWorktrees: true,
-    preserveUntilReviewed: true,
     tokenBudget: 8000,
-    deadlineMs: 600000,
     ticketContextTokens: 150000,
   },
-  worktrees: {
-    strategy: "per-independent-task",
-    integrationBranch: true,
-    cleanupRequiresConfirmation: true,
-    branchPrefix: "cost",
-  },
+  branchPrefix: "cost",
   budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 },
   approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
   autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
@@ -223,10 +207,6 @@ function checkNumber(
   if (rule.min !== undefined && value < rule.min) invalid(where, field, `must be >= ${rule.min}`);
   if (rule.exclusiveMin !== undefined && value <= rule.exclusiveMin) invalid(where, field, `must be > ${rule.exclusiveMin}`);
   if (rule.max !== undefined && value > rule.max) invalid(where, field, `must be <= ${rule.max}`);
-}
-
-function checkBoolean(section: Record<string, unknown>, key: string, where: string, prefix: string): void {
-  if (section[key] !== undefined && typeof section[key] !== "boolean") invalid(where, `${prefix}.${key}`, "must be a boolean");
 }
 
 function section(raw: Record<string, unknown>, key: string, where: string): Record<string, unknown> | undefined {
@@ -457,12 +437,11 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   }
   const workers = section(raw, "workers", where);
   if (workers) {
-    checkNumber(workers, "concurrency", where, { min: 1, integer: true }, "workers");
     checkNumber(workers, "tokenBudget", where, { exclusiveMin: 0 }, "workers");
-    checkNumber(workers, "deadlineMs", where, { exclusiveMin: 0 }, "workers");
     checkNumber(workers, "ticketContextTokens", where, { min: 20000, integer: true }, "workers");
-    checkBoolean(workers, "isolatedWorktrees", where, "workers");
-    checkBoolean(workers, "preserveUntilReviewed", where, "workers");
+  }
+  if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
+    invalid(where, "branchPrefix", "must be a plain branch-name prefix such as cost");
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
@@ -547,7 +526,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
-    worktrees: { ...DEFAULTS.worktrees, ...obj("worktrees") } as WorkflowConfig["worktrees"],
+    branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
     approvals: {
       ...DEFAULTS.approvals,
@@ -667,7 +646,7 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers", "worktrees", "autopilot"]) {
+  for (const key of ["models", "tiers", "routing", "workers", "autopilot"]) {
     const value = mergeSection(user[key], project[key]);
     if (value) merged[key] = value;
     else delete merged[key];
@@ -711,6 +690,21 @@ export function layerConfigs(
     securitySensitiveFix: "required",
   };
 
+  // worktrees.* and the worker pool settings are gone (/build runs tickets one at a time on one branch).
+  // An old worktrees.branchPrefix still names the branches while branchPrefix is unset.
+  if (user.worktrees !== undefined || project.worktrees !== undefined) {
+    const old = [project.worktrees, user.worktrees].map((item) => (isRecord(item) ? item.branchPrefix : undefined)).find((item) => typeof item === "string");
+    if (merged.branchPrefix === undefined && typeof old === "string") merged.branchPrefix = old;
+    warnings.push(`worktrees is no longer used${typeof old === "string" ? "; worktrees.branchPrefix is honored as branchPrefix, so move it to the top level" : ""}.`);
+  }
+  delete merged.worktrees;
+  if (isRecord(merged.workers)) {
+    const removed = ["concurrency", "deadlineMs", "isolatedWorktrees", "preserveUntilReviewed"].filter((key) => key in (merged.workers as Record<string, unknown>));
+    if (removed.length > 0) {
+      warnings.push(`workers.${removed.join("/")} are no longer used (only workers.tokenBudget and workers.ticketContextTokens remain).`);
+      merged.workers = Object.fromEntries(Object.entries(merged.workers).filter(([key]) => !removed.includes(key)));
+    }
+  }
   // commandAllowlist is gone: checks run any non-destructive command. Old files still load.
   if (user.commandAllowlist !== undefined || project.commandAllowlist !== undefined) {
     warnings.push("commandAllowlist is no longer used; checks run any non-destructive command.");

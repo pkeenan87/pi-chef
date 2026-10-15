@@ -1,36 +1,29 @@
 import path from "node:path";
 import { loadConfig, type WorkflowConfig } from "../config.js";
 import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type TokenUsage } from "../domain.js";
-import { GitWorkspace } from "../git/worktrees.js";
+import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
-import { redact } from "../redact.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
 import { advisor } from "./advisor.js";
-import { autopilot, onPoll, resumeWatcher } from "./autopilot-service.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild } from "./build.js";
 import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
-import { InFlightSpend } from "./inflight.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
-import { implement } from "./implementation.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
-import { Poller } from "./poller.js";
-import { complete } from "./publish.js";
 import { ship } from "./ship.js";
-import { auth, cost, resetPhase, status } from "./reports.js";
+import { auth, cost, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
-import { worktrees } from "./worktrees.js";
 
-export type { ExecutorInput, ExecutorResult, GroupExecutor, PlanReviewFn, PlanReviewRequest, SessionControl, WorkflowBinding, WorkflowOptions } from "./types.js";
+export type { PlanReviewFn, PlanReviewRequest, WorkflowBinding, WorkflowOptions } from "./types.js";
 
 /**
  * Public facade. Each command lives in its own module as a function of a shared WorkflowContext;
- * this class owns the context and keeps the long-lived pieces (the autopilot timer) on one instance.
+ * this class owns the context.
  */
 export class Workflow {
   readonly store: TaskStore;
@@ -54,10 +47,7 @@ export class Workflow {
       authProbe: options.auth,
       classifier: options.classifier,
       rng: options.rng,
-      executors: options.executors ?? {},
-      ticketRunner: options.ticketRunner,
       deciders: options.deciders ?? {},
-      fixer: options.fixer,
       pushBranch:
         options.push ??
         (async (branch) => {
@@ -65,17 +55,12 @@ export class Workflow {
           if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git push failed");
         }),
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
-      poller: new Poller(options.schedule, config.autopilot.pollSeconds, () => onPoll(ctx), (error) =>
-        ctx.notify(`Autopilot poll failed: ${redact((error as Error)?.message || "unknown error")}`),
-      ),
-      inflight: new InFlightSpend(),
       shutdown: new AbortController(),
       warned: new Set(),
       confirm: options.confirm ?? (async () => false),
       notify: options.notify ?? ((message) => this.store.notify(message)),
       progress: options.progress,
       report: options.report,
-      session: options.session,
       chat: options.chat,
       status: options.status,
       planStatus: options.planStatus,
@@ -89,20 +74,18 @@ export class Workflow {
     return this.ctx.config;
   }
 
-  /** Applies a reloaded config (and the providers built from it) without rebuilding the workflow or its timer. */
+  /** Applies a reloaded config (and the providers built from it) without rebuilding the workflow. */
   reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe; deciders: WorkflowOptions["deciders"] }): void {
     this.ctx.config = config;
-    this.ctx.poller.pollSeconds = config.autopilot.pollSeconds;
     if (providers) {
       this.ctx.authProbe = providers.auth;
       this.ctx.deciders = providers.deciders ?? {};
     }
   }
 
-  /** Rebinds per-command UI hooks without rebuilding the workflow (so the autopilot timer survives). */
+  /** Rebinds per-command UI hooks without rebuilding the workflow. */
   bind(binding: WorkflowBinding): void {
     const ctx = this.ctx;
-    ctx.session = binding.session;
     ctx.chat = binding.chat ?? ctx.chat;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
@@ -115,14 +98,8 @@ export class Workflow {
     ctx.show = binding.show ?? ctx.show;
   }
 
-  /** Re-arms the autopilot timer for a task that was being watched before a restart or session reset. */
-  resumeAutopilot(): boolean {
-    return resumeWatcher(this.ctx);
-  }
-
-  /** Stops the autopilot timer and aborts in-flight ticket children (SIGTERM, then SIGKILL). Call when the session ends. */
+  /** Aborts work still running for this workflow (the advisory model review). Call when the session ends. */
   dispose(): void {
-    this.ctx.poller.stop();
     this.ctx.shutdown.abort();
     // Re-armed so a workflow that is reused afterwards can run again.
     this.ctx.shutdown = new AbortController();
@@ -239,10 +216,6 @@ export class Workflow {
     return showPlan(this.ctx);
   }
 
-  implement(): Promise<CommandResult> {
-    return implement(this.ctx);
-  }
-
   /** `/build`: starts or resumes the build (branch, budget, approval). The session loop is in extension.ts. */
   startBuild(): Promise<CommandResult> {
     return startBuild(this.ctx);
@@ -284,15 +257,6 @@ export class Workflow {
     return ship(this.ctx);
   }
 
-  /** Marks a published task complete (after the PR is merged) so a new task can start. */
-  complete(): Promise<CommandResult> {
-    return complete(this.ctx);
-  }
-
-  autopilot(arg = ""): Promise<CommandResult> {
-    return autopilot(this.ctx, arg);
-  }
-
   route(task: string): Promise<CommandResult> {
     return route(this.ctx, task);
   }
@@ -307,14 +271,6 @@ export class Workflow {
 
   status(): Promise<CommandResult> {
     return status(this.ctx);
-  }
-
-  resetPhase(): Promise<CommandResult> {
-    return resetPhase(this.ctx);
-  }
-
-  worktrees(arg = "", confirmed = false): Promise<CommandResult> {
-    return worktrees(this.ctx, arg, confirmed);
   }
 
   auth(arg = ""): Promise<CommandResult> {

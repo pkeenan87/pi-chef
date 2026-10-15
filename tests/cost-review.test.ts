@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { runWorkerPool } from "../src/agents/pool.js";
 import { baselineFromRecords, budgetStatus, buildCostRecord, compareBaseline, summarize, toCsv } from "../src/cost/ledger.js";
 import { reviewDiff, type CheckRunner } from "../src/review/review.js";
 import { emptyUsage } from "../src/domain.js";
 
-describe("cost, review, and workers", () => {
+describe("cost and review", () => {
   it("keeps missing usage unknown and exports it as blank", () => {
     const pricing = [{ provider: "openai", model: "gpt-5.4", effectiveFrom: "2026-01-01", inputPerMillionUsd: 2, outputPerMillionUsd: 10 }];
     const known = buildCostRecord({
@@ -57,42 +56,5 @@ describe("cost, review, and workers", () => {
     expect(leak.passed).toBe(false);
     expect(JSON.stringify(leak)).not.toContain(secret);
     expect(leak.findings.some((finding) => finding.category === "secrets")).toBe(true);
-  });
-
-  it("runs two workers at once and refuses a shared file at the same time", async () => {
-    let inFlight = 0;
-    let max = 0;
-    const result = await runWorkerPool({
-      concurrency: 2,
-      jobs: [
-        { id: "a", files: ["a.ts"], summary: "a", tokenBudget: 10, deadlineMs: 1000 },
-        { id: "b", files: ["b.ts"], summary: "b", tokenBudget: 10, deadlineMs: 1000 },
-      ],
-      run: async () => {
-        inFlight += 1;
-        max = Math.max(max, inFlight);
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        inFlight -= 1;
-        return { summary: "done", changedFiles: [], testResults: [], unresolvedIssues: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, requests: 1 } };
-      },
-    });
-    expect(max).toBe(2);
-    expect(result.stopped).toBe("completed");
-
-    const order: string[] = [];
-    await runWorkerPool({
-      concurrency: 2,
-      jobs: [
-        { id: "a", files: ["same.ts"], summary: "a", tokenBudget: 10, deadlineMs: 1000 },
-        { id: "b", files: ["same.ts"], summary: "b", tokenBudget: 10, deadlineMs: 1000 },
-      ],
-      run: async (job) => {
-        order.push(`start ${job.id}`);
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        order.push(`end ${job.id}`);
-        return { summary: "done", changedFiles: ["same.ts"], testResults: [], unresolvedIssues: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 } };
-      },
-    });
-    expect(order.join(" ")).not.toMatch(/start a start b|start b start a/);
   });
 });

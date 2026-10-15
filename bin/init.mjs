@@ -13,10 +13,8 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const GITIGNORE_LINES = [
   ".pi-workflows/tasks/",
   ".pi-workflows/cost/",
-  ".pi-workflows/autopilot/",
   ".pi-workflows/metrics/",
   ".pi-workflows/reports/",
-  ".pi-workflows/worktrees/",
   ".pi-workflows/notifications.jsonl",
   ".pi-workflows/active-task.json",
   ".pi-workflows/*.local.yaml",

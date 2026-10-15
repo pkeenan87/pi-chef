@@ -74,18 +74,10 @@ routing:
   circuitBreakerFailures: 3
 
 workers:
-  concurrency: 2
-  isolatedWorktrees: true
-  preserveUntilReviewed: true
   tokenBudget: 8000
   ticketContextTokens: 150000
-  deadlineMs: 600000
 
-worktrees:
-  strategy: per-independent-task
-  integrationBranch: true
-  cleanupRequiresConfirmation: true
-  branchPrefix: cost
+branchPrefix: cost
 
 budgets:
   taskUsd: 20

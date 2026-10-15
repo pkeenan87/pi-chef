@@ -5,7 +5,7 @@ import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision,
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
-import { done, fail, guard, IMPLEMENTABLE, iso, requireActive, transition, type WorkflowContext } from "./context.js";
+import { done, fail, guard, iso, requireActive, transition, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
@@ -15,7 +15,7 @@ import { decide } from "./routing.js";
 import { groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, ticketsToGroups } from "./tickets.js";
 
 /** Phases /build may start or resume from. PUBLISHED: more tickets for the same pull request. */
-const BUILDABLE: Phase[] = [...IMPLEMENTABLE, "PUBLISHED"];
+const BUILDABLE: Phase[] = ["AWAITING_PLAN_APPROVAL", "FAILED", "REVIEWING", "IMPLEMENTING", "BLOCKED", "PUBLISHED"];
 
 const MAX_SUMMARY_CHARS = 3000;
 const OUTPUT_CHARS = 2000;
@@ -146,7 +146,7 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       let branch = current;
       if (current === "HEAD") return fail("GIT_NOT_READY", "HEAD is detached. Switch to a branch, then run /build again.");
       if (current === base) {
-        branch = `${ctx.config.worktrees.branchPrefix}/${state.taskId}`;
+        branch = `${ctx.config.branchPrefix}/${state.taskId}`;
         await ctx.git.switchCreate(branch);
       }
       let baseSha: string;

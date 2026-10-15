@@ -5,9 +5,8 @@ import type { ProviderAuthView } from "../src/providers/auth.js";
 import type { DecisionAnswer, DecisionsClient } from "../src/providers/clients.js";
 import type { ProviderId } from "../src/domain.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
-import type { GroupExecutor } from "../src/orchestrator/service.js";
 import { fallbackClassification } from "../src/router/classify.js";
-import { checkRunner, seededRng, singleTaskRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { seededRng, singleTaskRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"]>> = {}) {
   return {
@@ -20,8 +19,6 @@ function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 const fence = "```";
-const emptyGroupPlan = `rename a typo in README.md\n${fence}tasks\n[{"id":"docs","files":["README.md"],"edits":[]}]\n${fence}`;
-const literalPlan = `rename a typo in README.md\n${fence}tasks\n[{"id":"docs","files":["README.md"],"edits":[{"path":"README.md","content":"base\\nfixed\\n"}]}]\n${fence}`;
 const mechanical = fallbackClassification("rename a typo in README");
 
 function fakeChat(reply: (provider: string, model: string) => string) {
@@ -55,47 +52,6 @@ describe("deterministic tier", () => {
     expect(decision.selectionReason).toMatch(/literal edits/);
   });
 
-  it("uses the local model for a group with no literal edits, ledgers it, and learns per model", async () => {
-    const cwd = await tempRepo();
-    const { chat, calls } = fakeChat(() => JSON.stringify({ edits: [{ path: "README.md", content: "base\nfixed\n" }] }));
-    const statuses: string[] = [];
-    const app = workflow(cwd, { config: tieredConfig(), auth: authWith(), chat, status: (text) => text && statuses.push(text) });
-    await app.plan(emptyGroupPlan);
-    await app.approveDraft();
-    const result = await app.implement();
-    expect(result.ok, result.text).toBe(true);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ provider: "local", model: "qwen2.5-coder:7b" });
-    expect(calls[0]!.user).toContain("README.md");
-    expect(readFileSync(path.join(cwd, ".pi-workflows", "worktrees", app.activeTaskId()!, "docs", "README.md"), "utf8")).toBe("base\nfixed\n");
-    const records = app.store.readLedger().filter((r) => r.provider === "local");
-    expect(records.some((r) => r.inputTokens === 100 && r.tier === "deterministic")).toBe(true);
-    expect(app.store.readMetrics().mechanical?.["model:deterministic:local/qwen2.5-coder:7b"]).toMatchObject({ success: 1, failure: 0 });
-    expect(statuses.some((s) => s.startsWith("deterministic → local/qwen2.5-coder:7b"))).toBe(true);
-    const cost = await app.cost();
-    expect(cost.text).toContain("local/qwen2.5-coder:7b: ");
-    expect(cost.text).toMatch(/1 success \/ 0 failure/);
-    expect((await app.status()).text).toContain("Model stats: local/qwen2.5-coder:7b");
-  });
-
-  it("does not let a model write outside the group's files and records the failure", async () => {
-    const { chat } = fakeChat(() => JSON.stringify({ edits: [{ path: "src/other.ts", content: "x" }] }));
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat });
-    await app.plan(emptyGroupPlan);
-    await app.approveDraft();
-    const result = await app.implement();
-    expect(result.ok).toBe(false);
-    expect(app.store.readMetrics().mechanical?.["model:deterministic:local/qwen2.5-coder:7b"]).toMatchObject({ success: 0, failure: 1 });
-  });
-
-  it("keeps applying approved literal edits, with no model call, even when the local model is up", async () => {
-    const { chat, calls } = fakeChat(() => "{}");
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat });
-    await app.plan(literalPlan);
-    await app.approveDraft();
-    expect((await app.implement()).ok).toBe(true);
-    expect(calls).toHaveLength(0);
-  });
 });
 
 describe("classifier tier", () => {
@@ -253,42 +209,4 @@ describe("advisor", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("suggests the advisor once escalation is exhausted, and not when no advisor is configured", async () => {
-    const failing: GroupExecutor = async ({ write }) => {
-      write("README.md", "base\nstill broken\n");
-      return { usage };
-    };
-    const run = async (config = tieredConfig()) => {
-      const notes: string[] = [];
-      const app = workflow(await tempRepo(), {
-        config,
-        auth: authWith(),
-        notify: (m) => notes.push(m),
-        executors: { deterministic: failing, cheap: failing, standard: failing, premium: failing },
-        runner: checkRunner(async () => ({ code: 1, stdout: "", stderr: "nope" })),
-        rng: seededRng(6),
-      });
-      await app.plan(literalPlan);
-      await app.approveDraft();
-      const result = await app.implement();
-      return { result, notes };
-    };
-    const { result, notes } = await run();
-    expect(result.code).toBe("FAILED");
-    expect(notes.some((m) => /^Consider \/advisor/.test(m) && /escalation exhausted/.test(m))).toBe(true);
-    const legacy = await run(workflow(await tempRepo()).config);
-    expect(legacy.notes.some((m) => m.includes("/advisor"))).toBe(false);
-  });
-});
-
-describe("tier selection during implement", () => {
-  it("blocks with NO_CANDIDATE instead of running literal edits when policy leaves no model", async () => {
-    const config = tieredConfig("orgProviderAllowlist: [vercel]\nrouting: { maxTier: standard }\n");
-    const app = workflow(await tempRepo(), { config, auth: authWith() });
-    await app.plan(`add a feature\n${fence}tasks\n[{"id":"a","files":["src/a.ts"],"edits":[{"path":"src/a.ts","content":"export {};\\n"}]}]\n${fence}`);
-    await app.approveDraft();
-    const result = await app.implement();
-    expect(result).toMatchObject({ ok: false, code: "NO_CANDIDATE" });
-    expect((await app.status()).text).toContain("BLOCKED");
-  });
 });

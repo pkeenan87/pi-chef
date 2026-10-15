@@ -19,7 +19,7 @@ const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-cost-"));
-  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
+  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
   await exec("git", ["config", "user.email", "test@example.com"], { cwd });
@@ -42,7 +42,7 @@ providers:
   local: { type: openai-compatible, baseUrl: http://127.0.0.1:11434/v1, model: local-coder }
 models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0.75, maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
-workers: { concurrency: 2, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 8000, deadlineMs: 60000 }
+workers: { tokenBudget: 8000 }
 budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 }
 checks:
   - name: unit
@@ -72,7 +72,6 @@ export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Wo
     confirm: async () => true,
     runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
     push: async () => undefined,
-    session: { async reset() { return { mode: "new-session", cancelled: false }; } },
     ...extras,
   });
 }
@@ -122,20 +121,6 @@ Maintain Neo.
 
 export function emptyPr(): PullRequestSnapshot {
   return { number: 0, url: "", branch: "", base: "main", headSha: "pending", baseSha: "base", mergeable: true, approved: false, protectionSatisfied: false, threads: [], checks: [] };
-}
-
-/** A fake timer: records every schedule() call and lets a test fire or inspect the pending callback. */
-export function fakeTimer() {
-  const state = { delays: [] as number[], cancelled: 0, pending: undefined as (() => void) | undefined };
-  const schedule = (delayMs: number, run: () => void) => {
-    state.delays.push(delayMs);
-    state.pending = run;
-    return () => {
-      state.cancelled += 1;
-      if (state.pending === run) state.pending = undefined;
-    };
-  };
-  return { state, schedule };
 }
 
 /** A build driver whose "session" writes `src/ingest.ts` into the checkout, like a model finishing a ticket. */
@@ -194,7 +179,7 @@ tiers:
   advisor:
     - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra }
-workers: { concurrency: 2, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 8000, deadlineMs: 60000 }
+workers: { tokenBudget: 8000 }
 checks:
   - { name: unit, command: npm, args: ["test"] }
 pricing:

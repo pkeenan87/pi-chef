@@ -30,11 +30,6 @@ describe("parseConfig validation", () => {
     ["routing:\n  maxEscalations: -1\n", /routing\.maxEscalations/],
     ["routing:\n  maxEscalations: 1.5\n", /routing\.maxEscalations/],
     ["routing:\n  maxTier: ultra\n", /routing\.maxTier/],
-    ["workers:\n  concurrency: 0\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: 1.5\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: .nan\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: .inf\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: two\n", /workers\.concurrency/],
     ["budgets:\n  taskUsd: 0\n", /budgets\.taskUsd/],
     ["budgets:\n  dailyUsd: -5\n", /budgets\.dailyUsd/],
     ["budgets:\n  softWarningRatio: 2\n", /budgets\.softWarningRatio/],
@@ -62,7 +57,7 @@ describe("parseConfig validation", () => {
 models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0, maxEscalations: 0, maxTier: standard }
 budgets: { softWarningRatio: 1 }
-workers: { concurrency: 1 }
+workers: { tokenBudget: 1 }
 pricing:
   - { provider: local, model: m, effectiveFrom: 2026-01-05, inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
 `);
@@ -120,6 +115,30 @@ describe("loadConfig layering", () => {
     expect(loadConfig(project).warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
   });
 
+  it("old worktrees and worker pool keys load with one warning each and do not fail", () => {
+    writeUser(`${base}worktrees: { strategy: per-independent-task, integrationBranch: true }\nworkers: { concurrency: 4, deadlineMs: 5000, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 1000 }\n`);
+    writeProject("routing: { maxEscalations: 1 }\n");
+    const config = loadConfig(project);
+    expect(config.warnings).toContain("worktrees is no longer used.");
+    expect(config.warnings?.find((item) => item.startsWith("workers."))).toBe("workers.concurrency/deadlineMs/isolatedWorktrees/preserveUntilReviewed are no longer used (only workers.tokenBudget and workers.ticketContextTokens remain).");
+    expect(config.workers).toEqual({ tokenBudget: 1000, ticketContextTokens: 150000 });
+    expect("worktrees" in config).toBe(false);
+    expect(config.branchPrefix).toBe("cost");
+  });
+
+  it("branchPrefix is a top-level key; an old worktrees.branchPrefix is honored only while it is unset", () => {
+    writeUser(`${base}worktrees: { branchPrefix: legacy }\n`);
+    const old = loadConfig(project);
+    expect(old.branchPrefix).toBe("legacy");
+    expect(old.warnings?.join("\n")).toMatch(/worktrees\.branchPrefix is honored as branchPrefix/);
+    writeUser(`${base}worktrees: { branchPrefix: legacy }\nbranchPrefix: team\n`);
+    expect(loadConfig(project).branchPrefix).toBe("team");
+    writeProject("branchPrefix: feat\n");
+    expect(loadConfig(project).branchPrefix).toBe("feat");
+    writeProject("branchPrefix: '--bad'\n");
+    expect(() => loadConfig(project)).toThrow(/branchPrefix/);
+  });
+
   it("user org allowlist and proprietaryCode win", () => {
     writeUser(`${base}orgProviderAllowlist: [anthropic]\nproprietaryCode: true\n`);
     writeProject("orgProviderAllowlist: [openai, local]\nproprietaryCode: false\n");
@@ -137,15 +156,15 @@ describe("loadConfig layering", () => {
   });
 
   it("deep-merges sections, takes min budgets, and never lets the project relax approvals", () => {
-    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { concurrency: 4, tokenBudget: 1000 }\n`);
-    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { concurrency: 1 }\napprovals: { publish: auto }\n");
+    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
+    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { publish: auto }\n");
     const config = loadConfig(project);
     expect(config.routing.minConfidence).toBe(0.9);
     expect(config.routing.maxEscalations).toBe(1);
     expect(config.budgets.taskUsd).toBe(5);
     expect(config.budgets.dailyUsd).toBe(10);
     expect(config.budgets.autopilotPrUsd).toBe(10);
-    expect(config.workers.concurrency).toBe(1);
+    expect(config.workers.ticketContextTokens).toBe(60000);
     expect(config.workers.tokenBudget).toBe(1000);
     expect(config.approvals.publish).toBe("required");
     expect(config.approvals.merge).toBe("manual");

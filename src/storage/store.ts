@@ -553,10 +553,6 @@ export class TaskStore {
     writeFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), message })}\n`, { flag: "a" });
   }
 
-  removeWorktreeDir(dir: string): void {
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
-  }
-
   statAgeMs(file: string): number | undefined {
     if (!existsSync(file)) return undefined;
     return Date.now() - statSync(file).mtimeMs;
