@@ -1,6 +1,9 @@
 import { containsSecret } from "../redact.js";
 import { WorkflowError, type PlanDocument, type PlanGroup } from "../domain.js";
 
+/** The human-readable plan in the task folder: the document shown for review and approval. */
+export const PLAN_FILE = "plan.md";
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -93,6 +96,42 @@ export function renderPlan(plan: PlanDocument): string {
     lines.push("", `### ${group.id}`, group.summary, `Files: ${group.files.join(", ") || "(none)"}`, `Depends on: ${group.dependsOn.join(", ") || "(none)"}`);
   }
   lines.push("", "This draft does not edit the repository. Implementation waits for /approve-plan.");
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The full plan a person reviews before approval: the technical spec, then every ticket with its implementation
+ * notes, acceptance criteria, and dependencies, then the execution order. Plans without tickets use `renderPlan`.
+ */
+export function renderPlanReview(plan: PlanDocument, spec: string | undefined): string {
+  const tickets = plan.tickets ?? [];
+  if (tickets.length === 0) return renderPlan(plan);
+  const order = waves(plan.groups).map((wave, index) => `${index + 1}. ${wave.map((group) => group.id.split("-")[0]).join(", ")}`);
+  const lines = [
+    `# Plan v${plan.version}`,
+    "",
+    `${tickets.length} tickets · estimated charge ${plan.estimatedUsd === null ? "unknown" : `$${plan.estimatedUsd}`} · security sensitive: ${plan.securitySensitive ? "yes" : "no"}`,
+    "",
+  ];
+  // The spec's own title is replaced by the plan title; its sections follow as they are.
+  const body = (spec ?? "").replace(/^# Spec\s*\n/, "").trim();
+  lines.push(body ? `## Summary\n\n${body}` : `## Summary\n\n${plan.summary}`, "", "## Tickets");
+  for (const ticket of tickets) {
+    const meta = [
+      `Blocked by: ${ticket.blockedBy.join(", ") || "none"}`,
+      ...(ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
+      `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`,
+    ];
+    lines.push("", `### ${ticket.id}: ${ticket.title}`, "", meta.join(" · "));
+    if (ticket.files?.length) lines.push(`Files: ${ticket.files.map((file) => `\`${file}\``).join(", ")}`);
+    lines.push("", "**What to build**", "", ticket.whatToBuild);
+    if (ticket.implementation) lines.push("", "**Implementation**", "", ticket.implementation);
+    lines.push("", "**Acceptance criteria**", "", ...ticket.acceptanceCriteria.map((item) => `- [ ] ${item}`));
+    if (ticket.checks?.length) lines.push("", `Checks: ${ticket.checks.map((check) => `\`${check}\``).join(", ")}`);
+  }
+  lines.push("", "## Execution order", "", ...order);
+  if (plan.overlap.length > 0) lines.push("", `File overlap (serialized, not parallel): ${plan.overlap.join(", ")}`);
+  lines.push("", "## Policy", "", ...plan.risks.map((item) => `- ${item}`), "- This draft does not edit the repository. Implementation waits for /approve-plan.");
   return `${lines.join("\n")}\n`;
 }
 

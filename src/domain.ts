@@ -85,6 +85,8 @@ export interface Ticket {
   slug: string;
   title: string;
   whatToBuild: string;
+  /** Technical steps: files, functions, types and signatures to add or change, and how they connect. */
+  implementation?: string;
   acceptanceCriteria: string[];
   blockedBy: string[];
   suggestedTier?: Tier;
@@ -233,6 +235,8 @@ export interface PlanningProgress {
   stage: "interview" | "tickets";
   /** True when /plan --no-questions skipped the interview. */
   noQuestions: boolean;
+  /** The person's requested changes when a drafted plan was sent back from /approve-plan. */
+  revision?: string;
 }
 
 /** Where one ticket stands during /implement (tickets run in child pi processes). */

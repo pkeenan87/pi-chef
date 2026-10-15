@@ -1,9 +1,9 @@
-import { WorkflowError, type PlanDocument, type Ticket } from "../domain.js";
+import { WorkflowError, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
 import { remember } from "./budget.js";
 import { iso, knownZero, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
-import { applyOverlap, assertGraph, renderPlan } from "./plan.js";
+import { applyOverlap, assertGraph, PLAN_FILE, renderPlanReview } from "./plan.js";
 import { suggestAdvisor, announce } from "./routing.js";
 import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validateTickets, type TicketCheck } from "./tickets.js";
 
@@ -25,20 +25,14 @@ function specSummary(ctx: WorkflowContext, taskId: string, fallback: string): st
   return (match?.[1]?.trim() || fallback).slice(0, 400);
 }
 
-/**
- * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
- * Plan approval is still required before /implement.
- */
-export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<{ plan: PlanDocument; files: string[] }> {
-  requireTicketStage(ctx);
-  const { task } = activePlanning(ctx)!;
-  const at = iso(ctx);
+/** The draft plan document for these tickets, built from the active planning task without saving anything. */
+function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: string): PlanDocument {
   const parsed = applyOverlap(ticketsToGroups(tickets));
   assertGraph(parsed.groups);
   const classification = task.classification;
   const routing = task.routing;
   const ticketCriteria = tickets.flatMap((ticket) => ticket.acceptanceCriteria.map((item) => `${ticket.id}: ${item}`));
-  const draft: PlanDocument = {
+  return {
     version: task.approvedVersion ? task.approvedVersion + 1 : task.plan?.version ?? 1,
     createdAt: at,
     summary: specSummary(ctx, task.taskId, task.request),
@@ -50,17 +44,37 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Pr
     securitySensitive: routing?.requireHumanApproval ?? false,
     tickets,
   };
+}
+
+/** The full plan (spec and tickets) as the person will review it, before anything is saved. */
+export function previewPlan(ctx: WorkflowContext, tickets: Ticket[]): string {
+  requireTicketStage(ctx);
+  const { task } = activePlanning(ctx)!;
+  return renderPlanReview(draftFor(ctx, task, tickets, iso(ctx)), ctx.store.readText(task.taskId, SPEC_FILE));
+}
+
+/**
+ * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
+ * Plan approval is still required before /implement.
+ */
+export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<{ plan: PlanDocument; files: string[]; markdown: string }> {
+  requireTicketStage(ctx);
+  const { task } = activePlanning(ctx)!;
+  const at = iso(ctx);
+  const draft = draftFor(ctx, task, tickets, at);
+  const routing = task.routing;
   const state = await ctx.store.update(task.taskId, "tickets drafted", (current) =>
     move({ ...current, plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
   );
   const files = ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
+  const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE));
   ctx.store.writeText(task.taskId, "plan.json", JSON.stringify(draft, null, 2));
-  ctx.store.writeText(task.taskId, "plan.md", renderPlan(draft));
+  ctx.store.writeText(task.taskId, PLAN_FILE, markdown);
   if (routing) {
     remember(ctx, state, state.phase, routing.tier, routing.provider, routing.model, knownZero(), "success", 0, "tickets");
     await announce(ctx, task.taskId, "plan", routing);
   }
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for /approve-plan`);
-  return { plan: draft, files };
+  return { plan: draft, files, markdown };
 }

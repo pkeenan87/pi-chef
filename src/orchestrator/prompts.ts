@@ -2,27 +2,42 @@
 
 export const MAX_INTERVIEW_QUESTIONS = 7;
 
+/** What a plan must contain. Shared by the interview, no-questions, and revision rules. */
+const TECHNICAL_PLAN = `The spec is a technical implementation plan, like an engineer's plan mode, not a product brief. Read the code that will change first. In plan_spec:
+- context: what the code does today in that area, naming the files and functions you read.
+- approach: the design. Components, data flow, new types and function signatures, error handling, config.
+- changes: every file to create or modify, each with the concrete change (functions added or edited, fields, exports).
+- reuse: existing functions and utilities to build on, with their paths.
+- verification: the tests to add and the commands to run to prove it works end to end.`;
+
 export const INTERVIEW_RULES = `[PLAN INTERVIEW]
 You are planning, not building. Edit and write tools are off; use read, grep, find, ls, safe bash, web_search and web_fetch.
 1. Look up FACTS yourself with tools. Ask the user only DECISIONS (scope, trade-offs, preferences) that tools cannot answer.
 2. Ask in rounds with plan_questions. A round holds every question whose prerequisites are settled. A question that depends on another answer sets dependsOn and waits for the next round.
 3. Ask 3-${MAX_INTERVIEW_QUESTIONS} questions in TOTAL across all rounds. Fewer for small or mechanical tasks. Never more than ${MAX_INTERVIEW_QUESTIONS}; the tool rejects a round that would exceed it.
 4. Every question has 2-4 options, exactly one recommended option, and a one-line reason. Word each question so accepting the recommendation is the easy path.
-5. Stop when no open decision remains or the cap is reached. Then call plan_spec once (summary, decisions, assumptions, outOfScope, risks).
-6. After plan_spec, call plan_tickets. Do not write code or edit files.`;
+5. Stop when no open decision remains or the cap is reached. Then call plan_spec once.
+6. After plan_spec, call plan_tickets. Do not write code or edit files.
+${TECHNICAL_PLAN}`;
 
 export const NO_QUESTIONS_RULES = `[PLAN WITHOUT QUESTIONS]
-The user chose --no-questions. Do not call plan_questions. Explore with read-only tools, then call plan_spec. Record each decision you would have asked about as an assumption (the choice you recommend and why). Then call plan_tickets.`;
+The user chose --no-questions. Do not call plan_questions. Explore with read-only tools, then call plan_spec. Record each decision you would have asked about as an assumption (the choice you recommend and why). Then call plan_tickets.
+${TECHNICAL_PLAN}`;
+
+export const REVISION_RULES = `[PLAN REVISION]
+The user reviewed the drafted plan and asked for changes (below). Do not call plan_questions. Re-read code where the changes need it, then call plan_spec with the full revised spec (not a diff), then plan_tickets with the full revised ticket list. Keep what the user did not ask to change.
+${TECHNICAL_PLAN}`;
 
 export const TICKET_RULES = (target: number) => `[PLAN TICKETS]
 The spec is saved. Break the work into tickets and call plan_tickets once.
 - Vertical tracer-bullet slices: each ticket delivers one end-to-end behavior and is independently demoable and testable. Never slice layer by layer.
 - Each ticket must fit ONE fresh context window. Soft target: ${target} tokens (estimatedContextTokens counts the ticket text, the files it touches, and about 20K of system and tool overhead). The tool rejects a ticket estimated above the target; split it.
 - For wide mechanical refactors use expand-contract: add the new path, migrate callers in small tickets, then remove the old path.
-- Prefer behavior over file paths. List "files" only where precision matters (ownership hints).
+- whatToBuild states the end-to-end behavior. implementation is the technical how: the files to create or change, the functions, types and signatures to add (with names), how they wire into existing code, and the tests to write. Name real paths and symbols from the code you read.
+- List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
 - suggestedTier is optional: deterministic, cheap, standard or premium.
-After plan_tickets succeeds the user is asked to approve the granularity, then the plan waits for /approve-plan. Do not implement anything.`;
+plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves with /approve-plan. Do not implement anything.`;
 
 /** Appended to the system prompt of a ticket child process. */
 export const TICKET_WORKER_RULES = `[TICKET WORKER]
@@ -34,7 +49,7 @@ You are implementing exactly one ticket in your own git worktree. The ticket is 
 - Finish with a summary: one line per acceptance criterion written as "- [x] <criterion>" (met) or "- [ ] <criterion>" (not met), then "Files changed:" and the list of files.`;
 
 export interface TicketPromptInput {
-  ticket: { id: string; title: string; whatToBuild: string; acceptanceCriteria: string[]; files?: string[]; checks?: string[] };
+  ticket: { id: string; title: string; whatToBuild: string; implementation?: string; acceptanceCriteria: string[]; files?: string[]; checks?: string[] };
   /** Saved spec text (summary and decisions). */
   spec?: string;
   /** Completion summaries of the tickets this one is blocked by. */
@@ -45,7 +60,7 @@ export interface TicketPromptInput {
   previousFailure?: string;
 }
 
-export const TICKET_PROMPT_LIMITS = { spec: 6000, blocker: 1500, rules: 6000, failure: 2000 };
+export const TICKET_PROMPT_LIMITS = { spec: 12000, blocker: 1500, rules: 6000, failure: 2000 };
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n[truncated]` : text);
 
@@ -58,6 +73,7 @@ export function ticketPrompt(input: TicketPromptInput): string {
     "## What to build",
     "",
     ticket.whatToBuild,
+    ...(ticket.implementation ? ["", "## Implementation", "", ticket.implementation] : []),
     "",
     "## Acceptance criteria",
     "",
@@ -65,7 +81,7 @@ export function ticketPrompt(input: TicketPromptInput): string {
   ];
   if (ticket.files?.length) parts.push("", "## Files (ownership hints)", "", ...ticket.files.map((file) => `- ${file}`));
   if (ticket.checks?.length) parts.push("", "## Checks to run", "", ...ticket.checks.map((check) => `- ${check}`));
-  if (input.spec) parts.push("", "## Spec (summary and decisions)", "", clip(input.spec, TICKET_PROMPT_LIMITS.spec));
+  if (input.spec) parts.push("", "## Spec (technical plan and decisions)", "", clip(input.spec, TICKET_PROMPT_LIMITS.spec));
   if (input.blockers.length) {
     parts.push("", "## Completed blocking tickets (already in your worktree)", "");
     for (const blocker of input.blockers) parts.push(`### ${blocker.id}: ${blocker.title}`, clip(blocker.summary || "(no summary recorded)", TICKET_PROMPT_LIMITS.blocker), "");

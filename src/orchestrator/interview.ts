@@ -6,7 +6,8 @@ import { active, done, fail, guard, iso, PUBLISHED_PHASES, type WorkflowContext 
 import { move } from "./machine.js";
 import { blank, classify, plan } from "./planning.js";
 import { finish } from "./publish.js";
-import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, TICKET_RULES } from "./prompts.js";
+import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
+import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
 
 export interface InterviewOption {
@@ -52,12 +53,23 @@ export interface InterviewFile {
   pending?: { round: number; questions: InterviewQuestion[] };
 }
 
+/** A technical implementation plan, in the shape of an engineer's plan mode: what changes where, and how it is verified. */
 export interface PlanSpec {
   summary: string;
+  /** What the code does today in the area that changes, with the files and functions read. */
+  context: string;
+  /** The technical design: components, data flow, types and signatures, error handling. */
+  approach: string;
+  /** One entry per file to create, modify, or delete, with the concrete change. */
+  changes: { path: string; change: string }[];
+  /** Existing functions, types, and utilities to reuse, with their paths. */
+  reuse: string[];
   decisions: { question: string; answer: string; rationale: string }[];
   assumptions: string[];
   outOfScope: string[];
   risks: string[];
+  /** How to prove it works end to end: tests to add and commands to run. */
+  verification: string[];
 }
 
 export const INTERVIEW_FILE = "interview.json";
@@ -95,6 +107,7 @@ export function planningStatusText(ctx: WorkflowContext): string | undefined {
   if (!found) return undefined;
   const { task, interview } = found;
   if (task.planning!.stage === "tickets") return "plan · writing tickets";
+  if (task.planning!.revision) return "plan · revising";
   if (interview.noQuestions) return "plan · writing spec (no questions)";
   const round = interview.pending?.round ?? interview.rounds.length + 1;
   return `plan · interview round ${round} (${questionsAsked(interview)}/${MAX_INTERVIEW_QUESTIONS} questions)`;
@@ -209,6 +222,7 @@ export function abandonRound(ctx: WorkflowContext): void {
 export async function beginRound(ctx: WorkflowContext, input: { round: number; questions: InterviewQuestion[] }): Promise<{ round: number; asked: number; remaining: number }> {
   const { task, interview } = planningOrThrow(ctx, "interview");
   if (interview.noQuestions) throw new WorkflowError("NO_QUESTIONS", "The user chose --no-questions. Do not ask; call plan_spec and record assumptions instead.");
+  if (task.planning!.revision) throw new WorkflowError("NO_QUESTIONS", "This is a revision of a drafted plan. Do not ask; apply the requested changes and call plan_spec.");
   const asked = questionsAsked(interview);
   const round = interview.rounds.length + 1;
   const { questions } = input;
@@ -288,6 +302,21 @@ export function renderSpec(spec: PlanSpec): string {
     "",
     spec.summary,
     "",
+    "## Context",
+    "",
+    spec.context || "(not recorded)",
+    "",
+    "## Approach",
+    "",
+    spec.approach,
+    "",
+    "## Files to change",
+    "",
+    ...(spec.changes.length ? spec.changes.map((item) => `- \`${item.path}\`: ${item.change}`) : ["- (none)"]),
+    "",
+    "## Reuse",
+    ...list(spec.reuse),
+    "",
     "## Decisions",
     ...(spec.decisions.length ? spec.decisions.flatMap((item) => ["", `### ${item.question}`, `Answer: ${item.answer}`, `Why: ${item.rationale}`]) : ["", "- (none)"]),
     "",
@@ -299,6 +328,9 @@ export function renderSpec(spec: PlanSpec): string {
     "",
     "## Risks",
     ...list(spec.risks),
+    "",
+    "## Verification",
+    ...list(spec.verification),
     "",
   ].join("\n");
 }
@@ -314,7 +346,9 @@ function texts(value: unknown, field: string, errors: string[]): string[] {
 
 /** Saves `spec.md` and moves planning on to the ticket stage. */
 export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promise<{ file: string }> {
-  const { task } = planningOrThrow(ctx, "interview");
+  // Also allowed at the ticket stage, so a change the person asks for during ticket review can reach the spec.
+  const found = activePlanning(ctx);
+  const { task } = found?.task.planning?.stage === "tickets" ? found : planningOrThrow(ctx, "interview");
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const errors: string[] = [];
   const summary = typeof raw.summary === "string" ? raw.summary.trim() : "";
@@ -327,10 +361,39 @@ export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promis
     : [];
   if (raw.decisions !== undefined && !Array.isArray(raw.decisions)) errors.push("decisions must be an array.");
   if (decisions.some((item) => !item.question || !item.answer)) errors.push("Every decision needs a question and an answer.");
-  const spec: PlanSpec = { summary, decisions, assumptions: texts(raw.assumptions, "assumptions", errors), outOfScope: texts(raw.outOfScope, "outOfScope", errors), risks: texts(raw.risks, "risks", errors) };
+  const context = typeof raw.context === "string" ? raw.context.trim() : "";
+  const approach = typeof raw.approach === "string" ? raw.approach.trim() : "";
+  if (!approach) errors.push("approach is required: the technical design (components, data flow, types and signatures).");
+  const changes = Array.isArray(raw.changes)
+    ? raw.changes.map((item) => {
+        const entry = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+        return { path: String(entry.path ?? "").trim(), change: String(entry.change ?? "").trim() };
+      })
+    : [];
+  if (raw.changes !== undefined && !Array.isArray(raw.changes)) errors.push("changes must be an array.");
+  else if (changes.length === 0) errors.push("changes needs at least one file: { path, change } naming what is added or modified there.");
+  if (changes.some((item) => !item.path || !item.change)) errors.push("Every change needs a path and a description of the change.");
+  const verification = texts(raw.verification, "verification", errors);
+  if (verification.length === 0 && (raw.verification === undefined || Array.isArray(raw.verification))) errors.push("verification needs at least one step (a test to add or a command to run).");
+  const spec: PlanSpec = {
+    summary,
+    context,
+    approach,
+    changes,
+    reuse: texts(raw.reuse, "reuse", errors),
+    decisions,
+    assumptions: texts(raw.assumptions, "assumptions", errors),
+    outOfScope: texts(raw.outOfScope, "outOfScope", errors),
+    risks: texts(raw.risks, "risks", errors),
+    verification,
+  };
   if (errors.length) throw new WorkflowError("SPEC_INVALID", errors.join("\n"));
   const file = ctx.store.writeText(task.taskId, SPEC_FILE, redact(renderSpec(spec)));
-  await ctx.store.update(task.taskId, "spec saved", (current) => ({ ...current, planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false }, updatedAt: iso(ctx) }));
+  await ctx.store.update(task.taskId, "spec saved", (current) => ({
+    ...current,
+    planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}) },
+    updatedAt: iso(ctx),
+  }));
   showStatus(ctx);
   return { file };
 }
@@ -340,9 +403,16 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const found = activePlanning(ctx);
   if (!found) return undefined;
   const { task, interview } = found;
+  const revision = task.planning!.revision;
+  const feedback = revision ? ["", "The user sent the drafted plan back with these requested changes:", revision] : [];
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
-    return [TICKET_RULES(ctx.config.workers.ticketContextTokens), "", "Saved spec:", spec.slice(0, 8000)].join("\n");
+    return [TICKET_RULES(ctx.config.workers.ticketContextTokens), ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
+  }
+  if (revision) {
+    const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
+    const tickets = task.plan?.tickets?.length ? renderTicketsMarkdown(task.plan.tickets) : "";
+    return [REVISION_RULES, "", `Request: ${interview.request}`, ...feedback, "", "Previous spec:", spec.slice(0, 12000), ...(tickets ? ["", "Previous tickets:", tickets.slice(0, 12000)] : [])].join("\n");
   }
   const lines = [interview.noQuestions ? NO_QUESTIONS_RULES : INTERVIEW_RULES, "", `Request: ${interview.request}`];
   if (!interview.noQuestions) {
@@ -357,4 +427,24 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
     if (interview.pending) lines.push("", `Round ${interview.pending.round} was shown but not answered (session restarted). Ask it again with plan_questions: ${interview.pending.questions.map((item) => item.id).join(", ")}.`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Sends a drafted plan back to planning with the person's requested changes. The model rewrites the spec and
+ * tickets (no new interview questions), and the plan returns to /approve-plan. Plan approval stays required.
+ */
+export async function requestPlanChanges(ctx: WorkflowContext, task: TaskState, feedback: string): Promise<CommandResult> {
+  const text = redact(feedback.trim());
+  if (!text) return fail("USAGE", "Describe the changes you want, then run /approve-plan again.");
+  if (!readInterview(ctx, task.taskId)) return fail("NO_INTERVIEW", "This plan was not drafted by the /plan interview. Run /plan again with the changes in the request.");
+  if (!ctx.startTurn) return fail("NO_SESSION", "Revising the plan needs a Pi session.");
+  const at = iso(ctx);
+  await ctx.store.update(task.taskId, "plan changes requested", (current) => ({
+    ...toPlanning(current, at),
+    approvedVersion: undefined,
+    planning: { stage: "interview", noQuestions: true, revision: text },
+  }));
+  showStatus(ctx);
+  ctx.startTurn(`Revise the plan with these changes:\n\n${text}`);
+  return done("Sent the plan back for changes. The revised plan will be shown for /approve-plan again.", { taskId: task.taskId });
 }
