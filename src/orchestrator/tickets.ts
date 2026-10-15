@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 import { isTier, type PlanGroup, type Ticket } from "../domain.js";
 import { assertCommandSafe } from "../sandbox.js";
@@ -48,15 +48,34 @@ export function splitCheckLine(line: string): { command: string; args: string[] 
   return { command, args };
 }
 
-/** Why a ticket check cannot run under the sandbox deny rules, or undefined when it can. */
-export function checkLineProblem(line: string): string | undefined {
+/** True when `command` is a path, or an executable file on PATH (PATHEXT too on Windows). */
+export function commandOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!command) return false;
+  if (command.includes("/") || (process.platform === "win32" && command.includes("\\"))) return true;
+  const exts = process.platform === "win32" ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)] : [""];
+  for (const dir of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      try {
+        accessSync(path.join(dir, command + ext), constants.X_OK);
+        return true;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return false;
+}
+
+/** Why a ticket check cannot run (deny rules, or a first word that is not a command), or undefined when it can. */
+export function checkLineProblem(line: string, onPath: (command: string) => boolean = commandOnPath): string | undefined {
   const { command, args } = splitCheckLine(line);
   try {
     assertCommandSafe(command, args);
-    return undefined;
   } catch (error) {
     return (error as Error).message;
   }
+  if (!onPath(command)) return `"${command}" is not a command on PATH; describe manual steps in implementation, not checks`;
+  return undefined;
 }
 
 function strings(value: unknown): string[] {
@@ -64,7 +83,7 @@ function strings(value: unknown): string[] {
 }
 
 /** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
-export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; }): TicketCheck {
+export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean }): TicketCheck {
   const errors: string[] = [];
   const tickets: Ticket[] = [];
   if (!Array.isArray(input) || input.length === 0) return { tickets, errors: ["tickets must be a non-empty array."] };
@@ -104,7 +123,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     }
     const checks = strings(item.checks);
     for (const check of checks) {
-      const problem = checkLineProblem(check);
+      const problem = checkLineProblem(check, options.commandExists);
       if (problem === undefined) continue;
       errors.push(
         `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the ticket, one command per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,

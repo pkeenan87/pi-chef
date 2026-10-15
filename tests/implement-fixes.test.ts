@@ -41,6 +41,19 @@ describe("ticket checks at plan time", () => {
     expect(validateTickets([ticket("01", "a", { checks: ["npm test", "make test", "npm ci"] })], options).errors).toEqual([]);
   });
 
+  it("rejects prose whose first word is not a command on PATH", () => {
+    const result = validateTickets([ticket("01", "a", { checks: ["Run the smoke test by hand."] })], options);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('"Run" is not a command on PATH; describe manual steps in implementation, not checks');
+  });
+
+  it("accepts paths, and uses the injected lookup", () => {
+    expect(validateTickets([ticket("01", "a", { checks: ["./scripts/check.sh"] })], options).errors).toEqual([]);
+    const only = { ...options, commandExists: (command: string) => command === "mytool" };
+    expect(validateTickets([ticket("01", "a", { checks: ["mytool --x"] })], only).errors).toEqual([]);
+    expect(validateTickets([ticket("01", "a", { checks: ["npm test"] })], only).errors).toHaveLength(1);
+  });
+
   it("tells the planner what checks are", () => {
     const rules = TICKET_RULES(150_000);
     expect(rules).toContain("shell command lines");
