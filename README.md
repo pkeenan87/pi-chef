@@ -17,23 +17,170 @@ Pi 1.2.0 declares `node >= 22.19.0`. This package typechecks on Node 20 and the 
 
 ## Install
 
-```bash
-npm install
-npm test
-npm run typecheck
-```
-
-Load it as a Pi package. `package.json` already has the `pi-package` keyword and:
+This repo is a Pi package. `package.json` has the `pi-package` keyword and:
 
 ```json
 "pi": { "extensions": ["./src/extension.ts"], "skills": ["./skills"] }
 ```
 
-From a Pi session, install the package the way you install other local Pi packages (Pi's package docs: a path or a git URL). Host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) are optional peers. Pi provides them. They are not bundled here.
+Host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) are optional peers. Pi provides them. They are not bundled here.
 
-Copy or edit `.pi-workflows/config.yaml`. A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base; the project file overrides it. The YAML must not contain secrets, API keys, or tokens. `autopilot.autoMerge: true` is rejected. `approvals.merge` stays `manual`. Plan approval stays required.
+### One-command setup
+
+From the project directory:
+
+```bash
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init
+```
+
+`init` (the `pi-cost-init` bin) does three things:
+
+1. Runs `pi install -l git:origin.cursor.com/pkeenan/pi-cost-router`. The source comes from `repository` in `package.json`.
+2. Copies the sample config to `.pi-workflows/config.yaml`. It keeps an existing file unless you pass `--force`.
+3. Adds any missing workflow-state lines to `.gitignore`. Lines already there are not added twice.
+
+If `pi` is missing or `pi install` fails, it still writes the config, prints the install command to run yourself, and exits 1.
+
+Variations:
+
+```bash
+# Pin a tag: once for the script npx fetches, once for what Pi installs
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git#v0.1.0 init --ref v0.1.0
+
+# Over SSH
+npx git+ssh://git@origin.cursor.com/pkeenan/pi-cost-router.git init
+
+# From a GitHub mirror (--source, or Pi still installs from origin)
+npx github:<owner>/pi-cost-router init --source git:github.com/<owner>/pi-cost-router
+
+# From a local checkout (no network)
+node ~/src/pi-cost-router/bin/init.mjs --source ~/src/pi-cost-router
+
+# After an npm publish
+npx pi-cost-optimized-agent init --source npm:pi-cost-optimized-agent
+
+# Personal install for every project, instead of this project only
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --global
+
+# Only write the config and .gitignore; skip pi install
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --no-install
+
+# Show what would change
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --dry-run
+```
+
+Other flags: `--dir <path>` targets another project directory, and `--help` lists them all. npm's `github:` shorthand only works for GitHub, GitLab, and Bitbucket. Other hosts need the full `git+https://` or `git+ssh://` URL. `npx` and `pi install` both run `git clone`, so a private repo needs git credentials on the machine.
+
+The sections below do the same steps by hand.
+
+### Choose a scope
+
+| Flag | Pi writes the package to | Loads in |
+|---|---|---|
+| (none) | `~/.pi/agent/settings.json` | every project |
+| `-l` / `--local` | `.pi/settings.json` in the current directory | this project, after you grant project trust |
+
+Run the commands below from the project directory when you use `-l`. Commit `.pi/settings.json` if the whole team should get the package.
+
+### Install from origin (git over HTTPS)
+
+```bash
+pi install -l git:origin.cursor.com/pkeenan/pi-cost-router
+```
+
+Pin a tag or commit so updates do not move under you:
+
+```bash
+pi install -l git:origin.cursor.com/pkeenan/pi-cost-router@<tag-or-commit>
+```
+
+Pi also accepts the plain URL and treats it as a git source:
+
+```bash
+pi install -l https://origin.cursor.com/pkeenan/pi-cost-router
+```
+
+Pi clones with `git`, so the machine needs git credentials for `origin.cursor.com` (a credential helper or a token). Pi does not ask for them. Pi installs `dependencies` (`yaml`) for git sources.
+
+### Install from another git host
+
+Any git host works with the same form. For a GitHub mirror:
+
+```bash
+pi install -l git:github.com/<owner>/pi-cost-router@<tag-or-commit>
+```
+
+### Install from a local checkout
+
+```bash
+git clone https://origin.cursor.com/pkeenan/pi-cost-router.git ~/src/pi-cost-router
+cd ~/src/pi-cost-router && npm install
+cd /path/to/your/project
+pi install -l ~/src/pi-cost-router
+```
+
+Pi loads a local path in place without copying it, and it does not install that package's dependencies. Run `npm install` in the checkout first. A relative path resolves from the settings file that contains it.
+
+### Install from npm
+
+Not published yet. `package.json` is `"private": true`. After a publish, the command is:
+
+```bash
+pi install -l npm:pi-cost-optimized-agent@<version>
+```
+
+### Try it once without installing
+
+```bash
+pi -e git:origin.cursor.com/pkeenan/pi-cost-router
+```
+
+`-e` loads the package for one run and writes nothing to settings.
+
+### Add the project config
+
+`pi install` does not create workflow config. Copy the sample from a checkout into the target project:
+
+```bash
+mkdir -p .pi-workflows
+cp ~/src/pi-cost-router/.pi-workflows/config.yaml .pi-workflows/config.yaml
+```
+
+Then add these lines to the project's `.gitignore`:
+
+```gitignore
+.pi-workflows/tasks/
+.pi-workflows/cost/
+.pi-workflows/autopilot/
+.pi-workflows/metrics/
+.pi-workflows/worktrees/
+.pi-workflows/notifications.jsonl
+.pi-workflows/active-task.json
+.pi-workflows/*.local.yaml
+```
+
+A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `autopilot.autoMerge: true` is rejected. `approvals.merge` stays `manual`. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
 
 Task files, the cost ledger, autopilot cursors, and worktrees are gitignored. The config file is not.
+
+### Verify, update, remove
+
+```bash
+pi list
+pi update git:origin.cursor.com/pkeenan/pi-cost-router
+pi update --extensions
+pi remove -l git:origin.cursor.com/pkeenan/pi-cost-router
+```
+
+`pi update` without a target updates Pi itself, not this package. Inside Pi, `/cost-help` lists the commands and `/auth status` checks logins. `-a` / `--approve` trusts project-local files for one command.
+
+### Develop this repo
+
+```bash
+npm install
+npm test
+npm run typecheck
+```
 
 ## Account login
 
@@ -200,6 +347,7 @@ src/github/               gh client and autopilot cycle
 src/cost/                 ledger, budgets, baseline compare
 src/storage/              lock, journal, snapshots
 src/git/                  worktrees
+bin/init.mjs              npx setup: pi install, sample config, .gitignore
 tests/                    unit and integration, mocks only
 ```
 
