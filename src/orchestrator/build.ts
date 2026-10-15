@@ -87,6 +87,18 @@ function orderedTickets(tickets: Ticket[]): Ticket[] {
   return waves(groups).flat().map((group) => byGroup.get(group.id)!);
 }
 
+/** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
+async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
+  const workspace = ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
+  return (await ctx.git.statusPorcelain())
+    .split("\n")
+    .filter((line) => line.trim())
+    .filter((line) => {
+      const file = line.slice(3).replace(/^"|"$/g, "");
+      return file !== workspace && !file.startsWith(`${workspace}/`);
+    });
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // startBuild
 
@@ -115,6 +127,10 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
     }
     if (!state.classification) return fail("NOT_READY", "The task has no classification. Run /plan again.");
 
+    // A fresh build commits the whole tree per ticket, so changes made before it would land in ticket 01's commit.
+    if (!state.build && (await dirtyPaths(ctx)).length > 0) {
+      return fail("DIRTY_TREE", "Uncommitted changes in the working tree. Commit or stash them first so they don't land in ticket 01's commit.");
+    }
     const current = await ctx.git.currentBranch();
     let build: BuildRecord;
     if (state.build) {
@@ -261,7 +277,7 @@ const clip = (text: string) => text.slice(0, MAX_SUMMARY_CHARS);
 // nextChunk
 
 /**
- * The next ticket whose run is not done, routed and with its prompt, or `done`. A ticket left in-progress or failed
+ * The next ticket whose run is not done, routed and with its prompt, or `done`. A ticket left failed
  * with changes in the tree first has its checks re-run, so a fix made by hand in the chat is committed without a
  * model turn. Only if they still fail does the ticket go to a model again, one tier up after a failure.
  */
@@ -273,7 +289,7 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       const ticket = orderedTickets(state.plan.tickets).find((item) => state.ticketRuns?.[item.id]?.status !== "done");
       if (!ticket) return { kind: "done" };
       const run = state.ticketRuns?.[ticket.id];
-      if (run && run.attempts > 0 && (run.status === "in-progress" || run.status === "failed") && (await ctx.git.statusPorcelain()).trim()) {
+      if (run && run.attempts > 0 && run.status === "failed" && (await dirtyPaths(ctx)).length > 0) {
         ctx.progress?.(`Ticket ${ticket.id}: re-running checks on the changes in the tree`);
         const settled = await settle(ctx, state, ticket, run.summary ?? "", false);
         if (settled.kind === "committed") {
@@ -282,8 +298,8 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
           if (settled.warning) ctx.notify(settled.warning);
           continue;
         }
-        // A ticket that failed keeps its failure text for the next model; an interrupted one stays in-progress.
-        if (run.status === "failed") await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
+        // The failure text goes to the next model.
+        await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
       }
       return await prepare(ctx, state, ticket);
     }
@@ -313,8 +329,9 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     const blocker = state.plan?.tickets?.find((item) => item.id === id);
     return { id, title: blocker?.title ?? id, summary: state.ticketRuns?.[id]?.summary ?? "" };
   });
-  const previousFailure = run?.status === "failed" ? run.error : run && run.attempts > 0 ? "The previous attempt was interrupted. Uncommitted changes from it may be in the working tree (see `git status`); build on them where they are sound." : undefined;
-  const prompt = `${BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure })}`;
+  const previousFailure = run?.status === "failed" ? run.error : undefined;
+  const priorWork = !previousFailure && run && run.attempts > 0 ? "Uncommitted changes from an interrupted attempt are in the working tree (see `git status`); build on what fits the ticket as written above, and change or remove what does not." : undefined;
+  const prompt = `${BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork })}`;
   const now = iso(ctx);
   await patch(
     ctx,

@@ -291,6 +291,22 @@ describe("/build stops", () => {
     expect(again.sends[0]!.text).toContain("interrupted");
   });
 
+  it("does not auto-commit an interrupted ticket's leftovers: it goes to a model again on the same tier", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" })] });
+    const first = fakeDriver(t.cwd, () => {
+      first.write("partial.txt");
+      return { aborted: true };
+    });
+    await t.run(first.driver);
+    const again = fakeDriver(t.cwd, () => undefined);
+    const result = await t.run(again.driver);
+    expect(result.ok, result.text).toBe(true);
+    expect(again.sends).toHaveLength(1);
+    expect(again.sends[0]!.model).toEqual({ provider: "openai", id: "gpt-6-luna" });
+    expect(again.sends[0]!.text).toContain("Uncommitted changes from an interrupted attempt are in the working tree");
+    expect(t.progress.some((line) => line.includes("on your changes"))).toBe(false);
+  });
+
   it("starts nothing at the hard budget", async () => {
     const t = await buildTask();
     t.app.store.appendLedger({
@@ -373,6 +389,34 @@ describe("/build branch and approval", () => {
     expect(result.code).toBe("WRONG_BRANCH");
     expect(result.text).toContain(`git switch ${branch}`);
     expect(again.state.fresh).toBe(0);
+  });
+
+  it("refuses to start a fresh build on a dirty tree, but not a resumed one", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    writeFileSync(path.join(t.cwd, "mine.txt"), "wip\n");
+    const d = fakeDriver(t.cwd, () => undefined);
+    const result = await t.run(d.driver);
+    expect(result.code).toBe("DIRTY_TREE");
+    expect(result.text).toContain("Commit or stash them first");
+    expect(d.state.fresh).toBe(0);
+    expect(t.load().build).toBeUndefined();
+    // Once a build exists, a dirty tree is the ticket's own work.
+    await git(t.cwd, "add", "mine.txt");
+    await git(t.cwd, "commit", "-m", "mine");
+    const first = fakeDriver(t.cwd, () => ({ aborted: true }));
+    await t.run(first.driver);
+    writeFileSync(path.join(t.cwd, "partial.txt"), "x\n");
+    const resumed = fakeDriver(t.cwd, () => undefined);
+    expect((await t.run(resumed.driver)).code).not.toBe("DIRTY_TREE");
+    expect(resumed.sends).toHaveLength(1);
+  });
+
+  it("ignores the workspace directory when judging a dirty tree", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    writeFileSync(path.join(t.app.store.root, "stray.json"), "{}\n");
+    await git(t.cwd, "status", "--porcelain");
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    expect((await t.run(d.driver)).code).not.toBe("DIRTY_TREE");
   });
 
   it("refuses a draft plan", async () => {
