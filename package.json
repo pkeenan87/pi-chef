@@ -5,9 +5,17 @@
   "description": "Pi extension and local modules that route coding work across account-login and local providers to cut cost per successful task.",
   "type": "module",
   "keywords": ["pi-package", "pi", "coding-agent"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://origin.cursor.com/pkeenan/pi-cost-router.git"
+  },
   "engines": {
     "node": ">=20"
   },
+  "bin": {
+    "pi-cost-init": "./bin/init.mjs"
+  },
+  "files": ["src", "skills", "bin", ".pi-workflows/config.yaml", "README.md", "docs"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

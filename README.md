@@ -25,6 +25,54 @@ This repo is a Pi package. `package.json` has the `pi-package` keyword and:
 
 Host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) are optional peers. Pi provides them. They are not bundled here.
 
+### One-command setup
+
+From the project directory:
+
+```bash
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init
+```
+
+`init` (the `pi-cost-init` bin) does three things:
+
+1. Runs `pi install -l git:origin.cursor.com/pkeenan/pi-cost-router`. The source comes from `repository` in `package.json`.
+2. Copies the sample config to `.pi-workflows/config.yaml`. It keeps an existing file unless you pass `--force`.
+3. Adds any missing workflow-state lines to `.gitignore`. Lines already there are not added twice.
+
+If `pi` is missing or `pi install` fails, it still writes the config, prints the install command to run yourself, and exits 1.
+
+Variations:
+
+```bash
+# Pin a tag: once for the script npx fetches, once for what Pi installs
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git#v0.1.0 init --ref v0.1.0
+
+# Over SSH
+npx git+ssh://git@origin.cursor.com/pkeenan/pi-cost-router.git init
+
+# From a GitHub mirror (--source, or Pi still installs from origin)
+npx github:<owner>/pi-cost-router init --source git:github.com/<owner>/pi-cost-router
+
+# From a local checkout (no network)
+node ~/src/pi-cost-router/bin/init.mjs --source ~/src/pi-cost-router
+
+# After an npm publish
+npx pi-cost-optimized-agent init --source npm:pi-cost-optimized-agent
+
+# Personal install for every project, instead of this project only
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --global
+
+# Only write the config and .gitignore; skip pi install
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --no-install
+
+# Show what would change
+npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --dry-run
+```
+
+Other flags: `--dir <path>` targets another project directory, and `--help` lists them all. npm's `github:` shorthand only works for GitHub, GitLab, and Bitbucket. Other hosts need the full `git+https://` or `git+ssh://` URL. `npx` and `pi install` both run `git clone`, so a private repo needs git credentials on the machine.
+
+The sections below do the same steps by hand.
+
 ### Choose a scope
 
 | Flag | Pi writes the package to | Loads in |
@@ -299,6 +347,7 @@ src/github/               gh client and autopilot cycle
 src/cost/                 ledger, budgets, baseline compare
 src/storage/              lock, journal, snapshots
 src/git/                  worktrees
+bin/init.mjs              npx setup: pi install, sample config, .gitignore
 tests/                    unit and integration, mocks only
 ```
 
