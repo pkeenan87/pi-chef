@@ -144,8 +144,10 @@ export function recordWebSearch(ctx: WorkflowContext, input: { provider: string;
 
 /**
  * Ledgers one ticket attempt from the child's JSON events (the child itself ledgers nothing).
- * Cost is Pi's own `cost.total` when it is positive, otherwise priced from config, otherwise unknown (null).
- * A child that reported no usage at all is an unknown charge, never zero.
+ * Cost comes from the config pricing row for the model (a subscription model's $0, or its api-key row while the
+ * provider is on a key), so the ledger agrees with how the router ranked the model. Pi's own `cost.total` (list
+ * price) fills in only when no row applies, and is kept as `listPriceUsd` either way. A child that reported no
+ * usage at all is an unknown charge, never zero.
  */
 export function recordTicketUsage(
   ctx: WorkflowContext,
@@ -158,10 +160,11 @@ export function recordTicketUsage(
     ? { input: input.usage.input, output: input.usage.output, cacheRead: input.usage.cacheRead, cacheWrite: input.usage.cacheWrite, requests: input.usage.turns }
     : { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 };
   const entry = buildCostRecord({ provider: input.provider, model: input.model, phase: state.phase, taskId: state.taskId, tier: input.tier, usage, outcome: input.outcome, retries: input.retries, reason: input.reason, estimatedUsd: state.routing?.estimatedUsd ?? null }, ctx.config.pricing, ctx.now(), ctx.id());
+  if (reported && input.usage.costUsd !== null) entry.listPriceUsd = fromMicroUsd(toMicroUsd(input.usage.costUsd));
   if (input.noModelCall === true && input.usage.turns === 0) {
     entry.actualUsd = 0;
     entry.usageKnown = true;
-  } else if (reported && input.usage.costUsd !== null && input.usage.costUsd > 0) {
+  } else if (reported && entry.actualUsd === null && input.usage.costUsd !== null && input.usage.costUsd > 0) {
     entry.actualUsd = fromMicroUsd(toMicroUsd(input.usage.costUsd));
     entry.usageKnown = true;
   }

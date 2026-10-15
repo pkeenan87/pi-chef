@@ -28,7 +28,7 @@ export const REVISION_RULES = `[PLAN REVISION]
 The user reviewed the drafted plan and asked for changes (below). Do not call plan_questions. Re-read code where the changes need it, then call plan_spec with the full revised spec (not a diff), then plan_tickets with the full revised ticket list. Keep what the user did not ask to change.
 ${TECHNICAL_PLAN}`;
 
-export const TICKET_RULES = (target: number) => `[PLAN TICKETS]
+export const TICKET_RULES = (target: number, allowlist: string[] = []) => `[PLAN TICKETS]
 The spec is saved. Break the work into tickets and call plan_tickets once.
 - Vertical tracer-bullet slices: each ticket delivers one end-to-end behavior and is independently demoable and testable. Never slice layer by layer.
 - Each ticket must fit ONE fresh context window. Soft target: ${target} tokens (estimatedContextTokens counts the ticket text, the files it touches, and about 20K of system and tool overhead). The tool rejects a ticket estimated above the target; split it.
@@ -37,6 +37,7 @@ The spec is saved. Break the work into tickets and call plan_tickets once.
 - List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
 - suggestedTier is optional: deterministic, cheap, standard or premium.
+- checks is optional: shell command lines the parent runs in the ticket's worktree after the child exits (one command per entry, no prose), and each must be on the command allowlist: ${allowlist.length ? allowlist.join(", ") : "(none configured; leave checks empty)"}. An entry ending in " *" accepts extra arguments. Verification steps that are not a command belong in implementation.
 plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves with /approve-plan. Do not implement anything.`;
 
 /** Appended to the system prompt of a ticket child process. */
@@ -60,7 +61,7 @@ export interface TicketPromptInput {
   previousFailure?: string;
 }
 
-export const TICKET_PROMPT_LIMITS = { spec: 12000, blocker: 1500, rules: 6000, failure: 2000 };
+export const TICKET_PROMPT_LIMITS = { spec: 12000, blocker: 1500, rules: 6000, failure: 4000 };
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n[truncated]` : text);
 

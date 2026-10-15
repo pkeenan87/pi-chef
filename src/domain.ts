@@ -162,6 +162,8 @@ export interface CostRecord {
   cacheWriteTokens: number | null;
   estimatedUsd: number | null;
   actualUsd: number | null;
+  /** Pi's own cost figure for the call (its list-price pricing), kept for information when the config priced the call differently. */
+  listPriceUsd?: number | null;
   usageKnown: boolean;
   outcome: "success" | "failure" | "unknown";
   retries: number;

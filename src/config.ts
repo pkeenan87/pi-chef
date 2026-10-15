@@ -55,6 +55,11 @@ export type Billing = "subscription" | "api-key";
 
 let billingOf: (provider: string) => Billing = () => "subscription";
 
+/** How a provider is billed right now: "api-key" while Pi holds a key for it and the fallback is on, else "subscription". */
+export function billingFor(provider: string): Billing {
+  return billingOf(provider);
+}
+
 /**
  * Tells pricing how each provider is billed right now. The host sets this from Pi's stored credentials, so
  * every price lookup (ranking, ledger, budgets) uses API-key rows while a provider runs on an API key.

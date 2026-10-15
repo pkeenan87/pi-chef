@@ -244,7 +244,10 @@ export class GitWorkspace {
       if (added.code !== 0) throw new WorkflowError("GIT", added.stderr || added.stdout);
     }
     const conflicts: IntegrateResult["conflicts"] = [];
-    // All-or-nothing: remember where the (tool-owned) integration worktree started.
+    // The integration worktree is tool-owned and rebuilt from the base every time, so a branch an earlier plan version
+    // merged (and later abandoned) does not linger in it. All-or-nothing: a conflict rolls back to this start.
+    const reset = await this.git(["reset", "--hard", options.baseSha], options.worktreePath);
+    if (reset.code !== 0) throw new WorkflowError("GIT", reset.stderr || reset.stdout);
     const startSha = await this.head(options.worktreePath);
     const rollback = async () => {
       await this.git(["merge", "--abort"], options.worktreePath);

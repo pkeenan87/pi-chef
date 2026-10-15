@@ -6,7 +6,7 @@ import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, recordClassifier, remember } from "./budget.js";
 import { active, done, fail, guard, handoff, iso, knownZero, PUBLISHED_PHASES, requireActive, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { acceptanceCriteria, applyOverlap, assertGraph, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
+import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
 import { finish } from "./publish.js";
 import { announce, availability, decide, suggestAdvisor } from "./routing.js";
@@ -24,6 +24,8 @@ export async function classify(ctx: WorkflowContext, text: string): Promise<{ cl
     rng: ctx.rng,
     at: ctx.now(),
     api: "decisions",
+    // A classifier call to a provider that is not signed in cannot succeed; the keyword fallback is cheaper than a billed failure.
+    strictAvailability: true,
   });
   const candidate = selection.candidate;
   const client = candidate ? ctx.deciders[candidate.provider] : undefined;
@@ -132,13 +134,13 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     if (state.phase === "PLANNING") {
       state = await ctx.store.update(state.taskId, "plan drafted", (task) => move({ ...task, plan: draft, classification, routing, request: safe, approvedVersion: undefined }, "AWAITING_PLAN_APPROVAL", at));
     } else if (state.phase === "AWAITING_PLAN_APPROVAL" && !state.approvedVersion) {
-      state = await ctx.store.update(state.taskId, "draft replaced", (task) => ({ ...task, plan: draft, classification, routing, request: safe, updatedAt: at }));
+      state = await ctx.store.update(state.taskId, "draft replaced", (task) => ({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe, updatedAt: at }));
     } else if (state.approvedVersion) {
       state = await ctx.store.update(state.taskId, "scope change requires re-approval", (task) =>
-        backToApproval({ ...task, plan: draft, classification, routing, request: safe, approvedVersion: undefined, publishApproved: false }, at, "scope change"),
+        backToApproval({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe, approvedVersion: undefined, publishApproved: false }, at, "scope change"),
       );
     } else {
-      state = await ctx.store.update(state.taskId, "plan drafted", (task) => backToApproval({ ...task, plan: draft, classification, routing, request: safe }, at));
+      state = await ctx.store.update(state.taskId, "plan drafted", (task) => backToApproval({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe }, at));
     }
     ctx.store.writeText(state.taskId, "plan.json", JSON.stringify(draft, null, 2));
     ctx.store.writeText(state.taskId, PLAN_FILE, renderPlan(draft));

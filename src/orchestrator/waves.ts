@@ -56,20 +56,22 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
   // Without an explicit executor, a model-backed tier writes edits only for groups the plan left empty;
   // groups with approved literal edits keep applying those exact edits.
   const modelExecutor = !explicit && ctx.chat && decision.provider !== "none" ? createModelExecutor(ctx.chat) : undefined;
-  const baseSha = state.worktrees[0]?.baseSha ?? (await ctx.git.head());
+  // Worktrees of groups an earlier plan version had (abandoned) take no part: not as the base, not as inputs, not in the merge.
+  const liveWorktrees = (task: TaskState) => task.worktrees.filter((item) => !item.abandoned);
+  const baseSha = liveWorktrees(state)[0]?.baseSha ?? (await ctx.git.head());
   // Tickets run in child pi processes, one fresh process per ticket attempt; the plan's groups are their worktrees.
   const tickets = ctx.ticketRunner ? plan.tickets : undefined;
   const warnings: string[] = [];
   let budgetStop = false;
-  const heads = new Map(state.worktrees.map((item) => [item.groupId, item.headSha]));
-  const branches = new Map(state.worktrees.map((item) => [item.groupId, item.branch]));
+  const heads = new Map(liveWorktrees(state).map((item) => [item.groupId, item.headSha]));
+  const branches = new Map(liveWorktrees(state).map((item) => [item.groupId, item.branch]));
   // Literal edits need no model, so they are a known zero. An executor that omits usage makes this unknown.
   let usage = knownZero();
   for (const wave of waves(plan.groups)) {
     const jobs: { groupId: string; record: WorktreeRecord; job: WorkerJob }[] = [];
     // Worktree creation stays sequential: git serializes on its own lock.
     for (const group of wave) {
-      const existing = state.worktrees.find((item) => item.groupId === group.id);
+      const existing = liveWorktrees(state).find((item) => item.groupId === group.id);
       const [first, ...others] = group.dependsOn;
       const base = first ? heads.get(first) ?? baseSha : baseSha;
       const dir = existing?.path ?? path.join(ctx.store.root, "worktrees", state.taskId, group.id);
@@ -115,7 +117,8 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
         const located = jobs.find((item) => item.groupId === job.id)!;
         const ticket = tickets?.find((item) => groupId(item) === job.id);
         if (ticket) {
-          if (state.ticketRuns?.[ticket.id]?.status === "done") {
+          // Done only counts with its worktree still live; a run left by an abandoned plan version is not this ticket's.
+          if (state.ticketRuns?.[ticket.id]?.status === "done" && liveWorktrees(state).some((item) => item.groupId === job.id)) {
             return { summary: ticket.title, changedFiles: [], testResults: [], unresolvedIssues: [], usage: knownZero() };
           }
           const outcome = await runTicket(ctx, state.taskId, ticket, located.record, signal);
@@ -196,7 +199,7 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
       integrationBranch,
       baseSha,
       worktreePath: integrationPath,
-      branches: state.worktrees.map((item) => item.branch),
+      branches: liveWorktrees(state).map((item) => item.branch),
     });
   } catch (error) {
     // A git failure is not a merge conflict, and a higher tier cannot fix it.
@@ -212,10 +215,10 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
     integration: { branch: integrationBranch, sha: integrationSha, path: integrationPath },
     updatedAt: iso(ctx),
   }));
-  ctx.store.writeText(state.taskId, "reports/implementation.json", JSON.stringify({ tier, integration: integrationSha, worktrees: state.worktrees }, null, 2));
+  ctx.store.writeText(state.taskId, "reports/implementation.json", JSON.stringify({ tier, integration: integrationSha, worktrees: liveWorktrees(state) }, null, 2));
   return {
     ok: true,
-    summary: `Implemented ${state.worktrees.length} worktree(s) on ${integrationBranch} at ${integrationSha}.`,
+    summary: `Implemented ${liveWorktrees(state).length} worktree(s) on ${integrationBranch} at ${integrationSha}.`,
     usage,
     ...(tickets ? { ledgered: true as const, warnings } : {}),
     handoff: [
@@ -223,7 +226,7 @@ export async function runImplementation(ctx: WorkflowContext, initial: TaskState
       "",
       `Integration ${integrationBranch} @ ${integrationSha}`,
       `Base ${baseSha}`,
-      ...state.worktrees.map((item) => `- ${item.groupId} ${item.branch} ${item.headSha}`),
+      ...liveWorktrees(state).map((item) => `- ${item.groupId} ${item.branch} ${item.headSha}`),
       "",
       "Review the diff against the approved plan. Do not treat this note as a test pass.",
     ].join("\n"),

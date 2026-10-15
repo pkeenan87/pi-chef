@@ -1,5 +1,24 @@
-import type { CommandResult } from "../domain.js";
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import type { CommandResult, TaskState } from "../domain.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
+
+/** Canonical form of a path for comparison (git prints worktree paths with symlinks resolved). */
+function real(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+/** Worktrees under this task's directory that the state does not record (left by an earlier plan version or a crash). */
+function orphans(ctx: WorkflowContext, state: TaskState, live: { path: string; branch: string }[]): { path: string; branch: string }[] {
+  const root = real(path.join(ctx.store.root, "worktrees", state.taskId)) + path.sep;
+  // The integration worktree is tool-owned and rebuilt by the next run, so it is never an orphan even between plan versions.
+  const known = new Set([...state.worktrees.map((item) => real(item.path)), real(path.join(ctx.store.root, "worktrees", state.taskId, "integration")), ...(state.integration?.path ? [real(state.integration.path)] : [])]);
+  return live.filter((entry) => real(entry.path).startsWith(root) && !known.has(real(entry.path)));
+}
 
 /** /worktrees status|list|cleanup. Cleanup asks before deleting unmerged work and refuses while a PR is active. */
 export function worktrees(ctx: WorkflowContext, arg = "", confirmed = false): Promise<CommandResult> {
@@ -11,9 +30,11 @@ export function worktrees(ctx: WorkflowContext, arg = "", confirmed = false): Pr
       const recorded = state?.worktrees ?? [];
       const lines = recorded.map((item) => {
         const found = live.find((entry) => entry.path === item.path);
-        return `${item.groupId} ${item.branch} base ${item.baseSha.slice(0, 7)} head ${item.headSha.slice(0, 7)} ${found ? "present" : "missing"}`;
+        return `${item.groupId} ${item.branch} base ${item.baseSha.slice(0, 7)} head ${item.headSha.slice(0, 7)} ${found ? "present" : "missing"}${item.abandoned ? " abandoned" : ""}`;
       });
-      return done(lines.join("\n") || "No recorded worktrees.", { recorded, live });
+      const stray = state ? orphans(ctx, state, live) : [];
+      lines.push(...stray.map((entry) => `orphan ${path.basename(entry.path)} ${entry.branch || "(detached)"} (not in state; /worktrees cleanup removes it)`));
+      return done(lines.join("\n") || "No recorded worktrees.", { recorded, live, orphans: stray });
     }
     if (command !== "cleanup") return fail("USAGE", "Use /worktrees status, list, or cleanup.");
     if (!state) return fail("NO_TASK", "No task to clean up.");
@@ -40,6 +61,12 @@ export function worktrees(ctx: WorkflowContext, arg = "", confirmed = false): Pr
       const result = await ctx.git.removeWorktree(item.path, item.branch);
       if (result.ok) removed.push(item.groupId);
       else failures.push(`${item.groupId}: ${result.error ?? "removal failed"}`);
+    }
+    // Worktrees no plan version owns any more: nothing to confirm. Listed afresh, after the recorded ones were removed.
+    for (const entry of orphans(ctx, state, await ctx.git.listWorktrees())) {
+      const result = await ctx.git.removeWorktree(entry.path, entry.branch || undefined);
+      if (result.ok) removed.push(`orphan ${path.basename(entry.path)}`);
+      else failures.push(`orphan ${path.basename(entry.path)}: ${result.error ?? "removal failed"}`);
     }
     if (state.integration?.path && (state.phase === "COMPLETE" || confirmed)) {
       const result = await ctx.git.removeWorktree(state.integration.path, state.integration.branch);

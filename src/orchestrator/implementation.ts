@@ -1,6 +1,6 @@
 import { emptyUsage, WorkflowError, type CommandResult, type RoutingDecision, type TaskState } from "../domain.js";
 import { budgetState, gateBudget, remember, warnSoft } from "./budget.js";
-import { done, fail, guard, handoff, iso, IMPLEMENTABLE, requireActive, active, transition, type WorkflowContext } from "./context.js";
+import { done, fail, guard, handoff, iso, IMPLEMENTABLE, knownZero, requireActive, active, transition, type WorkflowContext } from "./context.js";
 import { redact } from "../redact.js";
 import { move } from "./machine.js";
 import { announce, decide, suggestAdvisor } from "./routing.js";
@@ -12,13 +12,18 @@ function canUseModel(ctx: WorkflowContext, decision: RoutingDecision, state: Tas
   return !!ctx.chat && decision.provider !== "none" && (state.plan?.groups.some((group) => group.edits.length === 0) ?? false);
 }
 
+/** Errors raised by git or the plan graph before any model request: nothing was billed and the model is not to blame. */
+const NO_MODEL_CODES = new Set(["GIT", "PLAN_CYCLE", "PATH_DENIED", "GIT_NOT_READY"]);
+
 /** A thrown error mid-implementation must not leave the task parked in IMPLEMENTING. */
 async function failImplementation(ctx: WorkflowContext, state: TaskState, decision: RoutingDecision, escalations: number, error: unknown): Promise<CommandResult> {
   const code = error instanceof WorkflowError ? error.code : "ERROR";
   const message = redact((error as Error).message || "Implementation failed.");
   const current = active(ctx) ?? state;
-  remember(ctx, current, current.phase, decision.tier, decision.provider, decision.model, emptyUsage(), "failure", escalations, message);
-  await ctx.store.bumpMetric(current.classification?.task_type ?? "general", decision.tier, false, ctx.now(), decision.candidate);
+  // Ticket children ledger their own attempts and never throw for a model failure, so anything thrown there is infrastructure.
+  const beforeModel = NO_MODEL_CODES.has(code) || !!(ctx.ticketRunner && current.plan?.tickets);
+  remember(ctx, current, current.phase, decision.tier, decision.provider, decision.model, beforeModel ? knownZero() : emptyUsage(), "failure", escalations, message);
+  if (!beforeModel) await ctx.store.bumpMetric(current.classification?.task_type ?? "general", decision.tier, false, ctx.now(), decision.candidate);
   if (current.phase === "IMPLEMENTING") {
     await transition(ctx, current.taskId, message, code.startsWith("AUTH") ? "BLOCKED" : "FAILED", message);
   }

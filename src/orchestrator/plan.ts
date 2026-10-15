@@ -1,5 +1,5 @@
 import { containsSecret } from "../redact.js";
-import { WorkflowError, type PlanDocument, type PlanGroup } from "../domain.js";
+import { WorkflowError, type PlanDocument, type PlanGroup, type TaskState } from "../domain.js";
 
 /** The human-readable plan in the task folder: the document shown for review and approval. */
 export const PLAN_FILE = "plan.md";
@@ -146,6 +146,24 @@ export function materialChange(left: PlanDocument, right: PlanDocument): boolean
 }
 
 /** Rejects duplicate group ids, missing dependencies, and cycles before any work starts. */
+/**
+ * The run state a task carries into a new plan draft. Attempts start over. Worktrees of groups the new plan no longer
+ * has are marked abandoned (kept on disk until /worktrees cleanup) and their ticket runs dropped, so a stale "done"
+ * cannot skip a new ticket that reuses the id. Worktrees and runs of groups that survive are kept, so a re-approved
+ * plan with the same tickets resumes instead of paying for them again. The integration branch is rebuilt on the next run.
+ */
+export function forNewPlan(task: TaskState, draft: PlanDocument): Pick<TaskState, "attempts" | "ticketRuns" | "worktrees" | "integration"> {
+  const groups = new Set(draft.groups.map((group) => group.id));
+  const worktrees = task.worktrees.map((item) => (groups.has(item.groupId) ? { ...item, abandoned: undefined } : { ...item, abandoned: true }));
+  const live = new Set(worktrees.filter((item) => !item.abandoned).map((item) => item.groupId));
+  const was = new Map((task.plan?.tickets ?? []).map((ticket) => [ticket.id, `${ticket.id}-${ticket.slug}`]));
+  const kept = Object.entries(task.ticketRuns ?? {}).filter(([id]) => {
+    const group = was.get(id);
+    return group !== undefined && live.has(group) && (draft.tickets ?? []).some((ticket) => ticket.id === id && `${ticket.id}-${ticket.slug}` === group);
+  });
+  return { attempts: [], ticketRuns: kept.length ? Object.fromEntries(kept) : undefined, worktrees, integration: undefined };
+}
+
 export function assertGraph(groups: PlanGroup[]): void {
   const ids = new Set<string>();
   for (const group of groups) {
