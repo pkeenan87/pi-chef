@@ -1,5 +1,6 @@
 import path from "node:path";
-import { emptyUsage, WorkflowError, type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewReport, type RoutingDecision } from "../domain.js";
+import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
+import { type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewReport, type RoutingDecision, type TierCandidate } from "../domain.js";
 import { modelReviewLines, runModelReview } from "../review/model-review.js";
 import { reviewDiff } from "../review/review.js";
 import { fallbackClassification } from "../router/classify.js";
@@ -75,21 +76,49 @@ export function reviewMarkdown(report: ReviewReport, options: { setupConfigured:
 }
 
 /**
- * The model pass: the review-tier model reads the diff and lists advisory findings. Budget-gated, ledgered under
- * REVIEWING with reason "model review", and never a reason for the review to pass or fail. Returns undefined when the
- * pass is off in config.
+ * The review tier in the order the model pass tries it: the routed candidate, then the other usable candidates of the
+ * same tier (not excluded by policy, circuit, budget, or availability), another provider first, then by score.
+ */
+export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision): TierCandidate[] {
+  const primary = decision.candidate;
+  if (!primary) return [];
+  const key = (item: { provider: string; model: string }) => `${item.provider}/${item.model}`;
+  const usable = new Map((decision.considered ?? []).filter((item) => !item.excludedReason).map((item) => [key(item), item.score]));
+  const rest = tierCandidates(ctx.config, decision.tier)
+    .map((candidate, order) => ({ candidate, order, score: usable.get(key(candidate)) }))
+    .filter((row) => row.candidate.api === "chat" && key(row.candidate) !== key(primary) && usable.has(key(row.candidate)));
+  rest.sort((a, b) => {
+    const otherA = a.candidate.provider === primary.provider ? 1 : 0;
+    const otherB = b.candidate.provider === primary.provider ? 1 : 0;
+    if (otherA !== otherB) return otherA - otherB;
+    if ((a.score === undefined) !== (b.score === undefined)) return a.score === undefined ? 1 : -1;
+    if (a.score !== undefined && b.score !== undefined && a.score !== b.score) return a.score - b.score;
+    return a.order - b.order;
+  });
+  return [primary, ...rest.map((row) => row.candidate)];
+}
+
+/**
+ * The model pass: the review-tier model reads the diff and lists advisory findings. A failed part is retried once on
+ * the next review candidate. Budget-gated before every call, each call ledgered under REVIEWING with reason "model
+ * review" and counted against its own candidate, and never a reason for the review to pass or fail. Returns undefined
+ * when the pass is off in config.
  */
 async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string, plan: PlanDocument, decision: RoutingDecision | undefined, diff: string): Promise<ModelReview | undefined> {
   if (!ctx.config.review.model) return undefined;
   const skip = (error: string): ModelReview => ({ provider: decision?.provider ?? "none", model: decision?.model ?? "none", findings: [], truncated: false, error });
   if (!ctx.chat) return skip("no model connection (only available inside a Pi session).");
-  const candidate = decision?.candidate;
-  if (!candidate) return skip(decision?.blocked ?? "no review model is available.");
-  if (budgetState(ctx, taskId).status === "hard") return skip("the task or daily budget is exhausted.");
+  if (!decision?.candidate) return skip(decision?.blocked ?? "no review model is available.");
+  const exhausted = () => (budgetState(ctx, taskId).status === "hard" ? "the task or daily budget is exhausted." : undefined);
+  const stop = exhausted();
+  if (stop) return skip(stop);
   const started = ctx.now().getTime();
   const progress = (line: string) => ctx.progress?.(`Review: ${line}`);
+  // Unknown cost stays unknown: one call with no price makes the pass's cost null, never zero.
+  let micro: number | null = 0;
+  let review: ModelReview;
   try {
-    const { review, usage } = await runModelReview(ctx.chat, candidate, {
+    review = await runModelReview(ctx.chat, reviewCandidates(ctx, decision), {
       plan,
       diff,
       maxDiffChars: ctx.config.review.maxDiffChars,
@@ -97,18 +126,23 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
       timeoutMs: ctx.config.review.timeoutMs,
       signal: ctx.shutdown.signal,
       onProgress: progress,
+      stop: () => exhausted()?.replace(/\.$/, ""),
+      onCall: async (call) => {
+        // A failed call may or may not have been billed: its usage is unknown, never zero.
+        const entry = record(ctx, taskId, "REVIEWING", decision.tier, call.candidate.provider, call.candidate.model, call.usage, call.outcome === "success" ? "success" : "failure", call.retry, "model review");
+        micro = micro === null || entry.actualUsd === null ? null : micro + toMicroUsd(entry.actualUsd);
+        // Only model-attributable outcomes count, and only against the candidate that made the call.
+        if (call.outcome !== "stopped") await ctx.store.bumpMetric(taskType, decision.tier, call.outcome === "success", ctx.now(), call.candidate);
+      },
     });
-    const entry = record(ctx, taskId, "REVIEWING", decision.tier, candidate.provider, candidate.model, usage, review.error ? "failure" : "success", 0, "model review");
-    await ctx.store.bumpMetric(taskType, decision.tier, !review.error, ctx.now(), candidate);
-    const elapsedMs = ctx.now().getTime() - started;
-    progress(`model pass done: ${review.findings.length} finding(s) in ${formatDuration(elapsedMs)}, ${formatUsd(entry.actualUsd)}`);
-    return { ...review, elapsedMs, costUsd: entry.actualUsd };
   } catch (error) {
-    // The call may or may not have been billed: unknown usage, never zero.
-    record(ctx, taskId, "REVIEWING", decision.tier, candidate.provider, candidate.model, emptyUsage(), "failure", 0, "model review");
-    await ctx.store.bumpMetric(taskType, decision.tier, false, ctx.now(), candidate);
-    return skip(`the call failed: ${redact((error as Error).message || (error instanceof WorkflowError ? error.code : "unknown error"))}`);
+    // Failed model calls do not throw; this is the bookkeeping around them. The pass is advisory, so /ship goes on.
+    return skip(`the model pass stopped: ${redact((error as Error).message || "unknown error")}`);
   }
+  const costUsd = micro === null ? null : fromMicroUsd(micro);
+  const elapsedMs = ctx.now().getTime() - started;
+  progress(`model pass done: ${review.findings.length} finding(s) in ${formatDuration(elapsedMs)}, ${formatUsd(costUsd)}`);
+  return { ...review, elapsedMs, costUsd };
 }
 
 /** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */

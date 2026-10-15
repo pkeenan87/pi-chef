@@ -199,17 +199,30 @@ export interface ModelFinding {
   evidence?: string;
 }
 
+/** One part of the diff in the model pass: who reviewed it, and the attempts that failed first (or instead). */
+export interface ModelReviewPart {
+  /** 1-based. */
+  index: number;
+  /** "provider/model" that answered; absent when no attempt succeeded. */
+  reviewedBy?: string;
+  findings: number;
+  /** "provider/model: why" per failed attempt, in order; or why the part was not attempted. */
+  failures: string[];
+}
+
 export interface ModelReview {
+  /** The routed review model (the first candidate). `parts` says who actually reviewed each part. */
   provider: string;
   model: string;
   findings: ModelFinding[];
   /** The diff was cut to fit the configured size, so the model did not see all of it. */
   truncated: boolean;
-  /** Calls made: one per diff chunk of at most review.maxDiffChars. */
+  /** Diff parts sent for review, each of at most review.maxDiffChars. */
   chunks?: number;
+  parts?: ModelReviewPart[];
   elapsedMs?: number;
   costUsd?: number | null;
-  /** Why there are no model findings (budget, no model, a failed call, or unparseable output). */
+  /** Why there are no or fewer model findings (budget, no model, failed parts, or unparseable output). */
   error?: string;
 }
 
