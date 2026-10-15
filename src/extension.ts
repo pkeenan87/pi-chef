@@ -5,7 +5,8 @@ import { statSync } from "node:fs";
 import { configPaths, loadConfig, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { GhCli } from "./github/gh.js";
-import { isDeniedCommand } from "./sandbox.js";
+import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
+import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { Workflow, type SessionControl } from "./orchestrator/service.js";
@@ -156,6 +157,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
 type CommandContext = ExtensionContext &
   Parameters<typeof sessionFrom>[0] & {
     sendUserMessage?: (text: string) => Promise<void> | void;
+    waitForIdle?: () => Promise<void>;
     sendMessage?: (message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean }) => Promise<void> | void;
   };
 
@@ -182,21 +184,35 @@ function showPlanMessage(ctx: CommandContext, text: string, customType = "cost-p
  */
 const RESTORE_MODEL = Symbol.for("pi-cost-router.restore-model");
 type ModelRef = { provider: string; id: string };
-const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef };
+
+/**
+ * Resolves when the model restore started by this session's `session_start` has finished (the driver waits for it before
+ * sending to a fresh /build session). On globalThis for the same reason as RESTORE_MODEL.
+ */
+const RESTORE_DONE = Symbol.for("pi-cost-router.restore-done");
+/**
+ * `setModel` of the newest extension instance, refreshed by every `session_start`. A command's own `pi` and ctx are dead
+ * after /build opens a session, and the replacement ctx has no setModel (only `pi` has), so /build puts the user's model
+ * back through this, which always belongs to the live session.
+ */
+const SET_MODEL = Symbol.for("pi-cost-router.set-model");
+/** The last assistant text and abort flag of the run /build is waiting on, filled by the message_end and agent_settled handlers. */
+const TURN = Symbol.for("pi-cost-router.turn");
+const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [TURN]?: { lastText: string; aborted: boolean } };
 
 /** Re-selects the model the replaced session was using, when the new session started on a different one. */
-function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): void {
+function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): Promise<void> | undefined {
   const wanted = restoreSlot[RESTORE_MODEL];
   delete restoreSlot[RESTORE_MODEL];
-  if (!wanted) return;
+  if (!wanted) return undefined;
   const current = (ctx as { model?: ModelRef }).model;
-  if (current?.provider === wanted.provider && current.id === wanted.id) return;
+  if (current?.provider === wanted.provider && current.id === wanted.id) return undefined;
   const warn = () => {
     if (ctx.hasUI) ctx.ui.notify(`The new session started on ${current ? `${current.provider}/${current.id}` : "the default model"}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
   };
   const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
-  if (!model || typeof pi.setModel !== "function") return warn();
-  pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
+  if (!model || typeof pi.setModel !== "function") return void warn();
+  return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
 }
 
 function sessionFrom(ctx: { newSession: ExtensionContext extends never ? never : (options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>; compact: (options?: { customInstructions?: string }) => void }): SessionControl {
@@ -281,6 +297,73 @@ function restoreToolsBeforePlan(ctx: ExtensionContext): void {
   }
 }
 
+/**
+ * The session driver for /build, the only code that opens Pi sessions for tickets. Each chunk gets a fresh session on
+ * its routed model: `newSession` from the command ctx (never from a lifecycle handler), then `sendUserMessage` and
+ * `waitForIdle` on the replacement ctx handed to `withSession`. After each replacement the old ctx and `pi` are dead,
+ * so `live` always holds the newest ctx and the workflow is re-resolved from it on every call.
+ */
+function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: BuildDriver } {
+  let live: CommandContext = ctx;
+  // Plain data captured before the first replacement: the model the user was on (normally cost-opt/auto).
+  const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+  const getWorkflow = () => workflowFor(live.cwd, live);
+  const driver: BuildDriver = {
+    async fresh(model, run) {
+      restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
+      let opened = false;
+      try {
+        const result = await live.newSession({
+          withSession: async (next) => {
+            opened = true;
+            replacementCtx = next;
+            live = next;
+            try {
+              workflowFor(next.cwd, next);
+            } catch {
+              /* a config problem is reported by the next command */
+            }
+            // session_start starts the model switch without awaiting it; wait here so the ticket never runs on the wrong model.
+            await restoreSlot[RESTORE_DONE];
+            delete restoreSlot[RESTORE_DONE];
+            const on = (next as { model?: ModelRef }).model;
+            if (on && (on.provider !== model.provider || on.id !== model.id)) {
+              throw new Error(`The new session is on ${on.provider}/${on.id}, not the routed ${model.provider}/${model.id}, so the ticket was not started. /build resumes it.`);
+            }
+            if (typeof next.sendUserMessage !== "function") throw new Error("This Pi session cannot send messages, so /build cannot run.");
+            const session: ChunkSession = {
+              async send(text) {
+                restoreSlot[TURN] = { lastText: "", aborted: false };
+                await next.sendUserMessage!(text);
+                await next.waitForIdle?.();
+                const turn = restoreSlot[TURN] ?? { lastText: "", aborted: false };
+                delete restoreSlot[TURN];
+                return { lastText: turn.lastText, aborted: turn.aborted };
+              },
+            };
+            await run(session);
+          },
+        });
+        if (result.cancelled || !opened) throw new Error("Pi did not open a new session for the next ticket (cancelled), so /build stopped. Run /build to resume.");
+      } finally {
+        delete restoreSlot[RESTORE_MODEL];
+        delete restoreSlot[RESTORE_DONE];
+        delete restoreSlot[TURN];
+      }
+    },
+    async finish() {
+      if (!original) return;
+      const now = (live as { model?: ModelRef }).model;
+      if (now?.provider === original.provider && now.id === original.id) return;
+      const model = live.modelRegistry?.find(original.provider, original.id);
+      const set = restoreSlot[SET_MODEL];
+      const ok = model && set ? await set(model as never).catch(() => false) : false;
+      if (!ok && live.hasUI) live.ui.notify(`Run /model ${original.provider}/${original.id} to switch back to your model.`, "warning");
+    },
+  };
+  return { getWorkflow, driver };
+}
+
 export function registerWorkflow(pi: ExtensionAPI): void {
   for (const spec of COMMANDS) {
     pi.registerCommand(spec.name, {
@@ -295,7 +378,10 @@ export function registerWorkflow(pi: ExtensionAPI): void {
         replacementCtx = undefined;
         try {
           const workflow = workflowFor(ctx.cwd, ctx as unknown as CommandContext);
-          result = await spec.run(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
+          if (spec.drive) {
+            const host = buildHost(ctx as unknown as CommandContext);
+            result = await spec.drive(host.getWorkflow, host.driver);
+          } else result = await spec.run(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
         } catch (error) {
           // An invalid config must reach the user as a failed command, not as an exception inside Pi.
           result = asResult(error);
@@ -344,8 +430,9 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     if (progress && ctx.hasUI) ctx.ui.setStatus("cost-plan", progress);
     registerRouter(pi, { cwd: ctx.cwd, modelRegistry: ctx.modelRegistry });
     // After a handoff's new session, put back the model the previous session used (normally cost-opt/auto).
+    restoreSlot[SET_MODEL] = typeof pi.setModel === "function" ? (model) => pi.setModel(model) : undefined;
     try {
-      restoreModel(pi, ctx);
+      restoreSlot[RESTORE_DONE] = restoreModel(pi, ctx);
     } catch {
       /* the model stays as Pi chose it; /model switches it */
     }
@@ -371,6 +458,10 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     if (isToolCallEventType("bash", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command. It stays blocked until a person runs an approved command." };
     }
+    if (isToolCallEventType("bash", event) && active?.buildingTicket()) {
+      const reason = buildBashBlock(event.input.command);
+      if (reason) return { block: true, reason };
+    }
     if (isToolCallEventType("powershell", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command." };
     }
@@ -382,8 +473,17 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     }
     return undefined;
   });
+  pi.on("agent_settled", (event) => {
+    if (event.aborted && restoreSlot[TURN]) restoreSlot[TURN].aborted = true;
+  });
   pi.on("message_end", (event) => {
     const message = event.message;
+    const turn = restoreSlot[TURN];
+    if (turn && message.role === "assistant") {
+      const text = Array.isArray(message.content) ? message.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
+      if (text.trim()) turn.lastText = text;
+      if ("stopReason" in message && message.stopReason === "aborted") turn.aborted = true;
+    }
     if (message.role !== "assistant" || !("usage" in message) || !message.usage) return;
     // A failed attempt that Pi retries (possibly on another model) bills nothing: the retry ledgers its own message.
     const stop = "stopReason" in message ? message.stopReason : undefined;

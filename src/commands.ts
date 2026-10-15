@@ -1,10 +1,14 @@
 import type { CommandResult } from "./domain.js";
+import { fail } from "./orchestrator/context.js";
+import { runBuild, type BuildDriver } from "./orchestrator/build.js";
 import type { Workflow } from "./orchestrator/service.js";
 
 export interface CommandSpec {
   name: string;
   /** Runs the command against a workflow. `confirm` asks the person (always false without a UI). */
   run: (workflow: Workflow, args: string, confirm: (title: string, message: string) => Promise<boolean>) => Promise<CommandResult>;
+  /** For commands that open Pi sessions: the host passes the live workflow getter and a session driver, and `run` is not used. */
+  drive?: (getWorkflow: () => Workflow, driver: BuildDriver) => Promise<CommandResult>;
   description: string;
   complete: (prefix: string) => { label: string; value: string }[];
 }
@@ -22,6 +26,12 @@ export const COMMANDS: CommandSpec[] = [
   },
   { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets).", complete: () => [] },
   { name: "implement", run: (w) => w.implement(), description: "Run an approved plan in isolated worktrees. Refuses a draft.", complete: () => [] },
+  {
+    name: "build", run: async () => fail("NO_SESSION", "/build needs a Pi session to open a fresh session per ticket."),
+    drive: (getWorkflow, driver) => runBuild(getWorkflow, driver),
+    description: "Build the approved plan one ticket at a time in fresh sessions on one branch: routed model per ticket, checks, a commit each. Run again to resume.",
+    complete: () => [],
+  },
   { name: "review", run: (w) => w.review(), description: "Review each worktree and the integrated diff in a fresh context.", complete: () => [] },
   { name: "push", run: (w) => w.push(), description: "After checks and approval, push the integration branch and open or update one PR.", complete: () => [] },
   {

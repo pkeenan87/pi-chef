@@ -302,6 +302,23 @@ export interface TicketRun {
   elapsedMs?: number;
   /** One entry per attempt, oldest first: the trail /status shows. */
   attemptLog?: TicketAttempt[];
+  /** Commit that /build made for this ticket. */
+  commit?: string;
+}
+
+/** Where /build works: one branch in the main checkout. */
+export interface BuildRecord {
+  branch: string;
+  /** The branch the PR will target. */
+  base: string;
+  /** Merge base of the branch and `base` when the build started. */
+  baseSha: string;
+  /** The ticket a chunk is running now. Set only between nextChunk and finishChunk. */
+  currentTicket?: string;
+  /** When the running chunk began. */
+  chunkStartedAt?: string;
+  /** The config `setup` steps already ran for this build. */
+  setupDone?: boolean;
 }
 
 export interface TicketAttempt {
@@ -333,6 +350,7 @@ export interface TaskState {
   worktrees: WorktreeRecord[];
   /** Per-ticket progress, keyed by ticket id. */
   ticketRuns?: Record<string, TicketRun>;
+  build?: BuildRecord;
   integration?: { branch: string; sha?: string; path?: string };
   review?: ReviewReport;
   pullRequest?: PullRequestRef;

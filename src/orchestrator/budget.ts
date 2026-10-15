@@ -126,9 +126,11 @@ export function recordClassifier(ctx: WorkflowContext, taskId: string, phase: Ph
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
   const state = active(ctx);
   const known = input.usage.input !== null && input.usage.output !== null;
-  const reason = known ? "observed assistant usage" : "observed assistant usage missing tokens";
+  const base = known ? "observed assistant usage" : "observed assistant usage missing tokens";
   // No task: still ledger the turn so it counts toward the daily limit.
-  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
+  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, base);
+  // While /build runs a ticket, the turn is that ticket's spend (/cost and the build report read it back).
+  const reason = state.build?.currentTicket ? `${base} · ticket ${state.build.currentTicket}` : base;
   return remember(ctx, state, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
 }
 

@@ -1,7 +1,7 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { CHILD_ROOT_ENV, CHILD_TASK_ENV } from "./agents/pi-runner.js";
-import { baseName, GIT_VALUE_FLAGS, isDeniedCommand, splitSegments, stripWrappers } from "./sandbox.js";
+import { baseName, isDeniedCommand, runsGitPush, splitSegments, stripWrappers } from "./sandbox.js";
 import { Workflow } from "./orchestrator/service.js";
 import { createRuntime, registerChatProviders } from "./providers/runtime.js";
 import { registerWebTools, type WebToolsDeps } from "./tools/index.js";
@@ -14,8 +14,6 @@ import { registerWebTools, type WebToolsDeps } from "./tools/index.js";
  * so recording it here too would count it twice. Only web_search is ledgered here, because the parent never sees it.
  * Budget and ledger are read from the parent's project root (PI_COST_ROUTER_ROOT), and spend lands under the parent task.
  */
-/** Matches `git push` (also `git -C dir push`, `git -c k=v push`) anywhere in a command line. */
-const GIT_PUSH = /(^|[;&|(\n`]|\$\()\s*(\S*\/)?git(\s+(-[cC]\s+\S+|--[\w-]+(=\S+)?|-\w+))*\s+push\b/;
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 const MAX_NESTING = 4;
 /** `gh <noun> <verb>` verbs that change something on GitHub. */
@@ -53,22 +51,15 @@ export function childBashBlock(command: string, depth = 0): string | undefined {
   if (isDeniedCommand(command)) {
     return "Blocked: this command is destructive (recursive delete, force push, hard reset, or piping a download into a shell). Use a safer command inside the worktree.";
   }
-  if (GIT_PUSH.test(command)) return BLOCKED_PUSH;
-  // Command substitution or a backtick next to the word push cannot be inspected, so it is refused.
-  if (/\bpush\b/.test(command) && (/\$\(|`/.test(command) || /(^|[;&|(\n])\s*\\?\$\{?\w/.test(command))) return BLOCKED_PUSH;
-  if (depth >= MAX_NESTING) return /\bpush\b/.test(command) ? BLOCKED_PUSH : undefined;
+  if (runsGitPush(command)) return BLOCKED_PUSH;
+  if (depth >= MAX_NESTING) return undefined;
   for (const segment of splitSegments(command)) {
     const tokens = stripWrappers(segment.tokens);
     const first = tokens[0];
     if (!first) continue;
     const name = baseName(first).toLowerCase();
     const args = tokens.slice(1);
-    if (first.includes("$") && args.some((arg) => arg === "push")) return BLOCKED_PUSH;
-    if (name === "git") {
-      let i = 0;
-      while (i < args.length && args[i]!.startsWith("-")) i += GIT_VALUE_FLAGS.has(args[i]!) ? 2 : 1;
-      if (args[i] === "push") return BLOCKED_PUSH;
-    } else if (name === "gh") {
+    if (name === "gh") {
       if (ghWrites(args)) return BLOCKED_GH;
     } else if (SHELLS.has(name)) {
       const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
@@ -76,7 +67,7 @@ export function childBashBlock(command: string, depth = 0): string | undefined {
       if (script !== undefined) {
         const nested = childBashBlock(script, depth + 1);
         if (nested) return nested;
-      } else if (segment.piped && /\bpush\b/.test(command)) return BLOCKED_PUSH;
+      }
     } else if (name === "eval") {
       const nested = childBashBlock(args.join(" "), depth + 1);
       if (nested) return nested;

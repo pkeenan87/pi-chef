@@ -9,6 +9,7 @@ import type { AuthProbe } from "../providers/auth.js";
 import { advisor } from "./advisor.js";
 import { autopilot, onPoll, resumeWatcher } from "./autopilot-service.js";
 import type { QuotaUsage } from "../cost/quota.js";
+import { buildReport, finishChunk, nextChunk, startBuild } from "./build.js";
 import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
 import { InFlightSpend } from "./inflight.js";
@@ -239,6 +240,42 @@ export class Workflow {
 
   implement(): Promise<CommandResult> {
     return implement(this.ctx);
+  }
+
+  /** `/build`: starts or resumes the build (branch, budget, approval). The session loop is in extension.ts. */
+  startBuild(): Promise<CommandResult> {
+    return startBuild(this.ctx);
+  }
+
+  /** The next ticket to build, routed and with its prompt, or `done`. */
+  nextChunk(): ReturnType<typeof nextChunk> {
+    return nextChunk(this.ctx);
+  }
+
+  /** Checks, commit, and bookkeeping for the chunk that just ran. */
+  finishChunk(ticketId: string, result: { lastText: string; aborted: boolean }, options: { final?: boolean } = {}): ReturnType<typeof finishChunk> {
+    return finishChunk(this.ctx, ticketId, result, options);
+  }
+
+  /** The build's ticket table and next step, as markdown. */
+  buildReport(stopped?: string): string {
+    return buildReport(this.ctx, stopped);
+  }
+
+  /** The ticket a /build chunk is running now, if any. */
+  buildingTicket(): string | undefined {
+    const id = this.store.readActive();
+    return id ? this.store.load(id)?.build?.currentTicket : undefined;
+  }
+
+  /** One-line chat event, when a Pi session is bound. */
+  progress(text: string): void {
+    this.ctx.progress?.(text);
+  }
+
+  /** Multi-line markdown block kept in the chat transcript, when a Pi session is bound. */
+  report(markdown: string): void {
+    this.ctx.report?.(markdown);
   }
 
   review(): Promise<CommandResult> {

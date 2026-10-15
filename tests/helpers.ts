@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { ProviderId } from "../src/domain.js";
+import type { ProviderId, Ticket } from "../src/domain.js";
 import { Workflow, type WorkflowOptions } from "../src/orchestrator/service.js";
 import type { CheckRunner } from "../src/review/review.js";
 import type { GitHubClient, PullRequestSnapshot } from "../src/github/types.js";
@@ -18,7 +18,7 @@ const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-cost-"));
-  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n");
+  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
   await exec("git", ["config", "user.email", "test@example.com"], { cwd });
@@ -228,4 +228,21 @@ export function permissiveRegistry() {
     isUsingOAuth: () => true,
     getAvailable: () => seen,
   };
+}
+
+export function sampleTicket(id: string, extra: Partial<Ticket> = {}): Ticket {
+  return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: `Build part ${id}.`, acceptanceCriteria: ["retry works"], blockedBy: [], estimatedContextTokens: 40_000, ...extra };
+}
+
+export const sampleSpec = { summary: "Retry failed ingests.", context: "src/ingest.ts parses and drops failures.", approach: "Wrap parse() in retryParse() with a fixed backoff.", changes: [{ path: "src/ingest.ts", change: "add retryParse(input, attempts)" }], reuse: ["sleep() in src/util.ts"], verification: ["npm test"], decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: [], outOfScope: [], risks: [] };
+
+/** A workflow in a fresh repo with a ticket plan saved through the /plan tools and, unless `approve` is false, approved. */
+export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string } = {}) {
+  const cwd = options.cwd ?? (await tempRepo());
+  const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, ...extras });
+  if (!(await app.startPlan("Add retry to the Neo ingest parser")).ok) throw new Error("startPlan failed in fixture");
+  await app.savePlanSpec(sampleSpec);
+  await app.commitTickets(tickets);
+  if (options.approve !== false && !(await app.approveDraft()).ok) throw new Error("approveDraft failed in fixture");
+  return { cwd, app, taskId: app.activeTaskId()! };
 }
