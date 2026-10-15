@@ -378,11 +378,12 @@ describe("/implement with tickets", () => {
     }
     // Branched from the blocker: 02's worktree contains 01's file.
     expect(existsSync(path.join(t.calls[1]!.cwd, "feature-01.txt"))).toBe(true);
-    // One ledger record per ticket, priced from the child's own cost (two turns at $0.01).
+    // One ledger record per ticket, priced from config (a $0 subscription model, as the router ranked it); the child's own
+    // list price (two turns at $0.01) is kept for information only.
     const records = ticketLedger(t.app);
     expect(records).toHaveLength(2);
     expect(records.map((item) => item.reason)).toEqual(["ticket 01", "ticket 02"]);
-    expect(records[0]).toMatchObject({ inputTokens: 81_000 - 100, outputTokens: 100, actualUsd: 0.02, usageKnown: true, outcome: "success", requests: 2 });
+    expect(records[0]).toMatchObject({ inputTokens: 81_000 - 100, outputTokens: 100, actualUsd: 0, listPriceUsd: 0.02, usageKnown: true, outcome: "success", requests: 2 });
     // The pipeline adds no second record for the same model usage.
     expect(t.app.store.readLedger().filter((item) => item.phase === "IMPLEMENTING" && item.tier !== "classifier").every((item) => item.reason.startsWith("ticket ") || item.reason.startsWith("web_search"))).toBe(true);
     // Status line, route events, ticket files, per-ticket state, /status.
@@ -392,10 +393,10 @@ describe("/implement with tickets", () => {
     expect(t.ticketFile(one)).toContain("## Status: done");
     expect(t.ticketFile(one)).toContain("- [x] retry works");
     const state = t.app.store.load(t.taskId)!;
-    expect(state.ticketRuns!["01"]).toMatchObject({ status: "done", turns: 2, tokens: 81_000, costUsd: 0.02, attempts: 1, crossedTarget: false });
+    expect(state.ticketRuns!["01"]).toMatchObject({ status: "done", turns: 2, tokens: 81_000, costUsd: 0, attempts: 1, crossedTarget: false });
     expect(state.integration?.sha).toBeTruthy();
     const status = await t.app.status();
-    expect(status.text).toMatch(/Ticket 01: done · \S+\/\S+ · 81000 tokens over 2 turn\(s\) · \$0\.0200/);
+    expect(status.text).toMatch(/Ticket 01: done · \S+\/\S+ · 81000 tokens over 2 turn\(s\) · \$0\.0000/);
     expect(status.text).toContain("Ticket 02: done");
     const metrics = JSON.stringify(t.app.store.readMetrics());
     expect(metrics).toContain('"success"');
@@ -499,9 +500,14 @@ describe("/implement with tickets", () => {
   });
 
   it("stops scheduling new tickets once the budget is hard", async () => {
+    // A per-token model (foundry grok-4-7, $1/$4 per million): ticket 01's two turns cost about $0.08 by config price.
     const t = await ticketTask({
-      tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })],
-      mutate: (config) => void (config.budgets.taskUsd = 0.02),
+      tickets: [ticket("01", { suggestedTier: "standard" }), ticket("02", { blockedBy: ["01"], suggestedTier: "standard" })],
+      mutate: (config) => {
+        // Exactly ticket 01's config price: the running charge never exceeds it, the ledger then reaches it.
+        config.budgets.taskUsd = 0.0813;
+        config.tiers.standard = (config.tiers.standard ?? []).filter((item) => item.model === "grok-4-7");
+      },
     });
     const result = await t.app.implement();
     expect(result).toMatchObject({ ok: false, code: "BUDGET" });
@@ -525,6 +531,60 @@ describe("/implement with tickets", () => {
     expect(again.ok, again.text).toBe(true);
     const after = t.calls.slice(before);
     expect(after.every((call) => call.cwd.endsWith("02-t02"))).toBe(true);
+  });
+
+  it("stops a ticket without escalation or a strike when a plan check is not an allowlisted command", async () => {
+    const t = await ticketTask({ tickets: [ticket("01", { checks: ["Validate all BDK APIs against the current docs."] })] });
+    const result = await t.app.implement();
+    expect(result).toMatchObject({ ok: false, code: "BLOCKED" });
+    expect(result.text).toContain("could not run");
+    expect(result.text).toContain("Validate all BDK APIs");
+    // One child only: a pricier model cannot fix the plan.
+    expect(t.calls).toHaveLength(1);
+    const run = t.app.store.load(t.taskId)!.ticketRuns!["01"]!;
+    expect(run).toMatchObject({ status: "failed", attempts: 1 });
+    expect(run.error).toMatch(/not on the command allowlist/);
+    expect(t.ticketFile(ticket("01"))).toContain("## Status: failed");
+    expect(JSON.stringify(t.app.store.readMetrics())).not.toContain('"failure"');
+  });
+
+  it("shows the next attempt what the failing check printed", async () => {
+    let checks = 0;
+    const t = await ticketTask({
+      tickets: [ticket("01", { suggestedTier: "cheap", checks: ["npm run typecheck"] })],
+      runner: checkRunner(async (command, args) => (args[0] === "run" && ++checks === 1 ? { code: 2, stdout: "", stderr: "src/a.ts(3,1): error TS2322: boom" } : { code: 0, stdout: "ok", stderr: "" })),
+    });
+    const result = await t.app.implement();
+    expect(result.ok, result.text).toBe(true);
+    expect(t.calls).toHaveLength(2);
+    expect(t.calls[1]!.prompt).toContain("### npm run typecheck (exit 2)");
+    expect(t.calls[1]!.prompt).toContain("error TS2322: boom");
+  });
+
+  it("does not re-run a model that already failed this ticket when escalation has nowhere else to go", async () => {
+    const t = await ticketTask({
+      tickets: [ticket("01", { suggestedTier: "premium" })],
+      mutate: (config) => void (config.tiers.premium = (config.tiers.premium ?? []).filter((item) => item.model === "claude-opus-5-5")),
+      script: () => ({ code: 1, stderr: "crash", stdout: [assistant("oops", 1000)] }),
+    });
+    const result = await t.app.implement();
+    expect(result).toMatchObject({ ok: false, code: "BLOCKED" });
+    expect(t.calls).toHaveLength(1);
+    expect(result.text).toContain("already ran this ticket");
+  });
+
+  it("fails a ticket whose child met no acceptance criterion when no check ran, and escalates", async () => {
+    const t = await ticketTask({
+      tickets: [ticket("01")],
+      mutate: (config) => void (config.checks = []),
+      script: () => ({ stdout: [assistant("I could not finish the retry work.", 2000)] }),
+    });
+    const result = await t.app.implement();
+    expect(result.ok).toBe(false);
+    expect(t.calls.length).toBeGreaterThan(1);
+    const run = t.app.store.load(t.taskId)!.ticketRuns!["01"]!;
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/no acceptance criterion/);
   });
 
   it("is refused clearly when no runner is available", async () => {
@@ -714,11 +774,16 @@ describe("child process lifecycle", () => {
 
 describe("in-flight budget", () => {
   it("aborts concurrent children when ledger plus in-flight spend passes the task limit, overshooting by at most one message", async () => {
-    const cost = 0.01;
+    // Charged at the config price of foundry grok-4-7 ($1/$4 per million), not the child's list price: the dearest message
+    // here (12,000 tokens) costs $0.01215.
+    const cost = 0.01215;
     const t = await ticketTask({
-      tickets: [ticket("01"), ticket("02")],
-      mutate: (config) => void (config.budgets.taskUsd = 0.015),
-      script: () => ({ hang: true, gapMs: 40, stdout: [assistant("one", 10_000, {}, cost), assistant("two", 11_000, {}, cost), assistant("three", 12_000, {}, cost)] }),
+      tickets: [ticket("01", { suggestedTier: "standard" }), ticket("02", { suggestedTier: "standard" })],
+      mutate: (config) => {
+        config.budgets.taskUsd = 0.015;
+        config.tiers.standard = (config.tiers.standard ?? []).filter((item) => item.model === "grok-4-7");
+      },
+      script: () => ({ hang: true, gapMs: 40, stdout: [assistant("one", 10_000), assistant("two", 11_000), assistant("three", 12_000)] }),
     });
     const result = await t.app.implement();
     expect(result).toMatchObject({ ok: false, code: "BUDGET" });

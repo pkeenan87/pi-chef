@@ -12,7 +12,7 @@ import { iso, knownZero, requireActive, type WorkflowContext } from "./context.j
 import { SPEC_FILE } from "./interview.js";
 import { TICKET_WORKER_RULES, ticketPrompt } from "./prompts.js";
 import { announce, decide, suggestAdvisor } from "./routing.js";
-import { addTicketWarning, groupId, parseCriteriaMet, setTicketStatus, tickCriteria, ticketFileName, type TicketStatus } from "./tickets.js";
+import { addTicketWarning, groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, type TicketStatus } from "./tickets.js";
 
 const MAX_SUMMARY_CHARS = 3000;
 
@@ -54,11 +54,6 @@ function repoRules(ctx: WorkflowContext): string | undefined {
   }
 }
 
-function splitCommand(line: string): { command: string; args: string[] } {
-  const [command = "", ...args] = line.trim().split(/\s+/);
-  return { command, args };
-}
-
 /** Parent variables the child needs by name: the Foundry endpoint variable and the local provider's key variable, as configured. */
 function childEnvNames(ctx: WorkflowContext): string[] {
   const providers = ctx.config.providers;
@@ -69,7 +64,7 @@ function childEnvNames(ctx: WorkflowContext): string[] {
 async function runChecks(ctx: WorkflowContext, ticket: Ticket, cwd: string): Promise<CheckEvidence[]> {
   const planned = [
     ...ctx.config.checks.map((check) => ({ name: check.name, command: check.command, args: check.args })),
-    ...(ticket.checks ?? []).map((line) => ({ name: line, ...splitCommand(line) })),
+    ...(ticket.checks ?? []).map((line) => ({ name: line, ...splitCheckLine(line) })),
   ];
   const out: CheckEvidence[] = [];
   for (const check of planned) {
@@ -105,6 +100,38 @@ export function stderrSummary(stderr: string): string {
   return picked.join(" | ").slice(0, 600);
 }
 
+/** Characters of a failing check's output shown to the next attempt. */
+const CHECK_TAIL_CHARS = 1500;
+
+/** What the failing checks printed, for the next attempt's prompt. Checks that passed or never ran add nothing. */
+export function checkOutputDetail(checks: CheckEvidence[]): string {
+  return checks
+    .filter((item) => item.ran && item.exitCode !== 0)
+    .map((item) => {
+      const output = (item.stderr.trim() || item.stdout.trim()).slice(-CHECK_TAIL_CHARS);
+      return `### ${item.name} (exit ${item.exitCode})\n${output || "(no output)"}`;
+    })
+    .join("\n\n");
+}
+
+/**
+ * Why a successful child's ticket still is not done when no check could judge it: the child's own summary says no
+ * acceptance criterion was met. With a check that ran, the check is the judge and the summary only ticks boxes.
+ */
+function unmetReason(result: TicketRunResult | undefined, checks: CheckEvidence[], criteria: string[]): string | undefined {
+  if (!result?.ok || checks.some((item) => item.ran) || criteria.length === 0) return undefined;
+  const met = parseCriteriaMet(result.finalText, criteria);
+  if (met.some(Boolean)) return undefined;
+  return "No check ran for this ticket and the child's summary marks no acceptance criterion as met, so the ticket is not done.";
+}
+
+/** The checks the plan asked for that the allowlist refused: a plan problem, which no model can fix. */
+function unrunnableReason(checks: CheckEvidence[]): string | undefined {
+  const refused = checks.filter((item) => !item.ran);
+  if (refused.length === 0) return undefined;
+  return `Checks could not run (not on the command allowlist): ${refused.map((item) => `"${item.name}"`).join(", ")}. Fix the plan's checks (allowlisted commands only) and run /implement again.`;
+}
+
 function failureReason(result: TicketRunResult | undefined, thrown: string | undefined, checks: CheckEvidence[]): string | undefined {
   if (thrown) return thrown;
   if (!result) return "The ticket runner returned nothing.";
@@ -135,6 +162,8 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
   let succeeded = false;
   let failedTier: RoutingDecision["tier"] | undefined;
   let previousFailure: string | undefined;
+  /** Models that already ran this ticket: an escalation that lands on one of them again is not an escalation. */
+  const tried = new Set<string>();
   const taskType = () => requireActive(ctx).classification?.task_type ?? "general";
 
   const finish = async (status: TicketStatus, finalText: string): Promise<void> => {
@@ -166,6 +195,12 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         issues.push(decision.blocked ?? "No model is available for this ticket.");
         break;
       }
+      const modelKey = `${decision.provider}/${decision.model}`;
+      if (tried.has(modelKey)) {
+        issues.push(`No different model to escalate to: ${modelKey} already ran this ticket.`);
+        break;
+      }
+      tried.add(modelKey);
       const view = await ctx.authProbe.inspect(decision.provider);
       if (view.status !== "ready") {
         issues.push(view.detail);
@@ -194,14 +229,16 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
       const forward = () => attemptStop.abort();
       if (signal.aborted) attemptStop.abort();
       else signal.addEventListener("abort", forward, { once: true });
+      // The config price (what the router ranked on) charges the running budget; Pi's list price only fills a gap, as in the ledger.
       const charge = (spend: RunnerSpend) => {
-        const priced = spend.costUsd !== null && spend.costUsd > 0 ? spend.costUsd : buildCostRecord(
+        const configured = buildCostRecord(
           { provider: decision.provider, model: decision.model, phase: "IMPLEMENTING", taskId, tier: decision.tier, usage: { ...spend.usage, requests: 1 }, outcome: "unknown", retries: 0, reason: "in-flight", estimatedUsd: null },
           ctx.config.pricing,
           ctx.now(),
           "in-flight",
         ).actualUsd;
-        chargeInFlight(ctx, flight, priced ?? 0);
+        const priced = configured ?? (spend.costUsd !== null && spend.costUsd > 0 ? spend.costUsd : 0);
+        chargeInFlight(ctx, flight, priced);
       };
       try {
         result = await runner({
@@ -240,7 +277,9 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         thrown ??= `Could not commit the ticket's changes: ${redact((error as Error).message)}`;
       }
       evidence = result?.ok && !thrown ? await runChecks(ctx, ticket, record.path) : [];
-      const reason = failureReason(result, thrown ?? budgetReason, evidence);
+      // A check the allowlist refused is a plan problem: the ticket stops here, with no strike against the model and no escalation.
+      const planProblem = result?.ok && !thrown && !budgetReason ? unrunnableReason(evidence) : undefined;
+      const reason = planProblem ?? failureReason(result, thrown ?? budgetReason, evidence) ?? unmetReason(result, evidence, ticket.acceptanceCriteria);
       const ok = reason === undefined;
       finalText = result?.finalText ?? "";
       const usage = result?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: null, turns: 0 };
@@ -250,7 +289,7 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
       const entry = recordTicketUsage(ctx, requireActive(ctx), { tier: decision.tier, provider: decision.provider, model: decision.model, usage, outcome: ok ? "success" : "failure", retries: escalations, reason: `ticket ${ticket.id}`, noModelCall });
       ctx.inflight.release(flight);
       if (budgetReason) budgetStop = true;
-      if (!noModelCall) await ctx.store.bumpMetric(taskType(), decision.tier, ok, ctx.now(), decision.candidate);
+      if (!noModelCall && !planProblem) await ctx.store.bumpMetric(taskType(), decision.tier, ok, ctx.now(), decision.candidate);
       await patchRun(ctx, taskId, ticket, (run) => ({
         ...run,
         status: "in-progress",
@@ -267,7 +306,9 @@ export async function runTicket(ctx: WorkflowContext, taskId: string, ticket: Ti
         break;
       }
       issues.push(`${decision.provider}/${decision.model}: ${reason}`);
-      previousFailure = reason;
+      if (planProblem) break;
+      const detail = checkOutputDetail(evidence);
+      previousFailure = detail ? `${reason}\n\n${detail}` : reason;
       if (result?.aborted || signal.aborted) break;
       if (escalations >= ctx.config.routing.maxEscalations) break;
       failedTier = decision.tier;

@@ -1,4 +1,4 @@
-import { estimateUsd, priceFor, type PricingRow } from "../config.js";
+import { billingFor, estimateUsd, priceFor, type PricingRow } from "../config.js";
 import type { CostRecord, Phase, TokenUsage } from "../domain.js";
 
 export interface UsageInput {
@@ -50,6 +50,20 @@ export interface SpendBucket {
   estimatedUnknownUsd?: number;
 }
 
+/** provider/model pairs in the ledger that have no pricing row for the provider's current billing, in first-seen order. */
+export function unpricedModels(records: CostRecord[], pricing: PricingRow[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const record of records) {
+    if (!record.model) continue;
+    const key = `${record.provider}/${record.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!priceFor(pricing, record.provider, record.model, new Date(record.at))) out.push(key);
+  }
+  return out;
+}
+
 export interface SpendSummary {
   knownUsd: number;
   unknownRecords: number;
@@ -76,10 +90,14 @@ function fromMicro(micro: number): number {
   return Math.round(micro) / MICRO;
 }
 
-/** Worst-case micro-USD for an unknown record, or null when tokens or prices are unavailable. */
+/**
+ * Worst-case micro-USD for an unknown record, or null when tokens or prices are unavailable. Only rows for the provider's
+ * current billing count: a subscription session is not estimated at API-key rates.
+ */
 function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number | null {
   if (record.inputTokens === null && record.outputTokens === null) return null;
-  const rows = pricing.filter((row) => row.provider === record.provider);
+  const apiKey = billingFor(record.provider) === "api-key";
+  const rows = pricing.filter((row) => row.provider === record.provider && (row.billing === "api-key") === apiKey);
   if (rows.length === 0) return null;
   let worst = 0;
   for (const row of rows) {

@@ -3,13 +3,13 @@ import { remember } from "./budget.js";
 import { iso, knownZero, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
-import { applyOverlap, assertGraph, PLAN_FILE, renderPlanReview } from "./plan.js";
+import { applyOverlap, assertGraph, forNewPlan, PLAN_FILE, renderPlanReview } from "./plan.js";
 import { suggestAdvisor, announce } from "./routing.js";
 import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validateTickets, type TicketCheck } from "./tickets.js";
 
 /** Validates model- or person-written tickets against the config's context target and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
-  return validateTickets(input, { target: ctx.config.workers.ticketContextTokens, fileSize: (file) => projectFileSize(ctx.cwd, file) });
+  return validateTickets(input, { target: ctx.config.workers.ticketContextTokens, fileSize: (file) => projectFileSize(ctx.cwd, file), allowlist: ctx.config.commandAllowlist });
 }
 
 /** Throws unless a task is at the ticket stage (spec saved). */
@@ -64,7 +64,7 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Pr
   const draft = draftFor(ctx, task, tickets, at);
   const routing = task.routing;
   const state = await ctx.store.update(task.taskId, "tickets drafted", (current) =>
-    move({ ...current, plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
+    move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
   );
   const files = ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
   const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE));
