@@ -54,7 +54,11 @@ export interface ChildLike {
   pid?: number;
 }
 
-export type SpawnFn = (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; detached?: boolean }) => ChildLike;
+export type SpawnFn = (
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; detached?: boolean; stdio: ["ignore", "pipe", "pipe"] },
+) => ChildLike;
 
 /** Tokens and Pi's own cost for one model call, as reported in a JSON event. */
 export interface RunnerSpend {
@@ -341,7 +345,8 @@ function supervise(input: TicketRunInput, command: string, args: string[], env: 
     let child: ChildLike;
     try {
       // Its own process group (not on Windows), so one signal reaches the shell commands and servers the child started.
-      child = (input.spawn ?? (nodeSpawn as unknown as SpawnFn))(command, args, { cwd: input.worktreePath, env, detached: grouped });
+      // stdin is /dev/null: `pi -p` reads all of a piped stdin before it starts, so an open pipe would hang it forever.
+      child = (input.spawn ?? (nodeSpawn as unknown as SpawnFn))(command, args, { cwd: input.worktreePath, env, detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       resolve(finish(null, `Could not start pi: ${redact((error as Error).message)}`));
       return;
