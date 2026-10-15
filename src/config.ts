@@ -4,7 +4,6 @@ import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
 import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
-import { allowlistEntryCovers } from "./sandbox.js";
 
 export interface ProviderConfig {
   type: string;
@@ -113,40 +112,25 @@ export interface WorkflowConfig {
     circuitBreakerFailures: number;
   };
   workers: {
-    concurrency: number;
-    isolatedWorktrees: boolean;
-    preserveUntilReviewed: boolean;
+    /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
-    deadlineMs: number;
     /** Soft context-window target for one ticket, in tokens. Planning rejects a ticket estimated above it. */
     ticketContextTokens: number;
   };
-  worktrees: {
-    strategy: "per-independent-task";
-    integrationBranch: boolean;
-    cleanupRequiresConfirmation: boolean;
-    branchPrefix: string;
-  };
-  budgets: { taskUsd: number; autopilotPrUsd: number; dailyUsd: number; softWarningRatio: number };
+  /** /build and /ship name the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
+  branchPrefix: string;
+  budgets: { taskUsd: number; dailyUsd: number; softWarningRatio: number };
   approvals: {
     plan: "required";
     publish: "required" | "auto";
     merge: "manual";
     securitySensitiveFix: "required";
   };
-  autopilot: {
-    pollSeconds: number;
-    maxFixCycles: number;
-    autoMerge: false;
-    maxRuntimeMs: number;
-    backoffSeconds: number;
-  };
   checks: CheckConfig[];
-  /** Commands /review runs in the integration worktree before the checks (an install, for example). Same allowlist as checks. */
+  /** Commands /ship runs in the repo root before the checks (an install, for example). Same rules as checks. */
   setup: CheckConfig[];
-  /** The model pass of /review: a review-tier model reads the integrated diff and lists advisory findings. */
+  /** The model pass of /ship: a review-tier model reads the branch diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
-  commandAllowlist: string[];
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -170,26 +154,15 @@ const DEFAULTS: WorkflowConfig = {
     circuitBreakerFailures: 3,
   },
   workers: {
-    concurrency: 2,
-    isolatedWorktrees: true,
-    preserveUntilReviewed: true,
     tokenBudget: 8000,
-    deadlineMs: 600000,
     ticketContextTokens: 150000,
   },
-  worktrees: {
-    strategy: "per-independent-task",
-    integrationBranch: true,
-    cleanupRequiresConfirmation: true,
-    branchPrefix: "cost",
-  },
-  budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 },
+  branchPrefix: "cost",
+  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 },
   approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
-  autopilot: { pollSeconds: 90, maxFixCycles: 5, autoMerge: false, maxRuntimeMs: 7_200_000, backoffSeconds: 30 },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  commandAllowlist: ["npm test", "npm run typecheck", "npm run lint", "npx vitest", "npx vitest run *", "git status", "git diff"],
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -226,10 +199,6 @@ function checkNumber(
   if (rule.min !== undefined && value < rule.min) invalid(where, field, `must be >= ${rule.min}`);
   if (rule.exclusiveMin !== undefined && value <= rule.exclusiveMin) invalid(where, field, `must be > ${rule.exclusiveMin}`);
   if (rule.max !== undefined && value > rule.max) invalid(where, field, `must be <= ${rule.max}`);
-}
-
-function checkBoolean(section: Record<string, unknown>, key: string, where: string, prefix: string): void {
-  if (section[key] !== undefined && typeof section[key] !== "boolean") invalid(where, `${prefix}.${key}`, "must be a boolean");
 }
 
 function section(raw: Record<string, unknown>, key: string, where: string): Record<string, unknown> | undefined {
@@ -407,10 +376,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   for (const name of Object.keys(providers)) {
     if (!isProviderId(name)) invalid(where, `providers.${name}`, `is not a known provider (${PROVIDERS.join(", ")})`);
   }
-  const autopilot = section(raw, "autopilot", where);
-  if (autopilot?.autoMerge === true) {
-    throw new WorkflowError("CONFIG_INVALID", "autopilot.autoMerge cannot be true.");
-  }
   const approvals = section(raw, "approvals", where);
   if (approvals?.merge && approvals.merge !== "manual") {
     throw new WorkflowError("CONFIG_INVALID", "approvals.merge must stay manual.");
@@ -460,23 +425,16 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   }
   const workers = section(raw, "workers", where);
   if (workers) {
-    checkNumber(workers, "concurrency", where, { min: 1, integer: true }, "workers");
     checkNumber(workers, "tokenBudget", where, { exclusiveMin: 0 }, "workers");
-    checkNumber(workers, "deadlineMs", where, { exclusiveMin: 0 }, "workers");
     checkNumber(workers, "ticketContextTokens", where, { min: 20000, integer: true }, "workers");
-    checkBoolean(workers, "isolatedWorktrees", where, "workers");
-    checkBoolean(workers, "preserveUntilReviewed", where, "workers");
+  }
+  if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
+    invalid(where, "branchPrefix", "must be a plain branch-name prefix such as cost");
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
-    for (const key of ["taskUsd", "autopilotPrUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
+    for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
     checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
-  }
-  if (autopilot) {
-    checkNumber(autopilot, "pollSeconds", where, { exclusiveMin: 0 }, "autopilot");
-    checkNumber(autopilot, "maxFixCycles", where, { min: 0, integer: true }, "autopilot");
-    checkNumber(autopilot, "maxRuntimeMs", where, { exclusiveMin: 0 }, "autopilot");
-    checkNumber(autopilot, "backoffSeconds", where, { min: 0 }, "autopilot");
   }
   for (const key of ["checks", "setup"] as const) {
     const list = raw[key];
@@ -498,7 +456,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(raw.review, "maxChunks", where, { min: 1, integer: true }, "review");
     checkNumber(raw.review, "timeoutMs", where, { min: 1000, integer: true }, "review");
   }
-  if (raw.commandAllowlist !== undefined) stringArray(raw.commandAllowlist, "commandAllowlist", where);
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
     for (const id of list) if (!isProviderId(id)) invalid(where, "orgProviderAllowlist", `contains unknown provider ${id}`);
@@ -551,7 +508,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
-    worktrees: { ...DEFAULTS.worktrees, ...obj("worktrees") } as WorkflowConfig["worktrees"],
+    branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
     approvals: {
       ...DEFAULTS.approvals,
@@ -560,13 +517,11 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
       merge: "manual",
       securitySensitiveFix: "required",
     } as WorkflowConfig["approvals"],
-    autopilot: { ...DEFAULTS.autopilot, ...obj("autopilot"), autoMerge: false } as WorkflowConfig["autopilot"],
     checks: Array.isArray(norm.checks)
       ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
       : DEFAULTS.checks,
     setup: Array.isArray(norm.setup) ? (norm.setup as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] })) : DEFAULTS.setup,
     review: { ...DEFAULTS.review, ...obj("review") } as WorkflowConfig["review"],
-    commandAllowlist: Array.isArray(norm.commandAllowlist) ? (norm.commandAllowlist as string[]) : DEFAULTS.commandAllowlist,
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,
     pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
@@ -672,7 +627,7 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers", "worktrees", "autopilot"]) {
+  for (const key of ["models", "tiers", "routing", "workers"]) {
     const value = mergeSection(user[key], project[key]);
     if (value) merged[key] = value;
     else delete merged[key];
@@ -716,17 +671,38 @@ export function layerConfigs(
     securitySensitiveFix: "required",
   };
 
-  // commandAllowlist: keep only project entries that the user list covers. Without a user list the
-  // built-in defaults are the ceiling, so a project file cannot grant itself new commands.
-  const projectList = Array.isArray(project.commandAllowlist) ? (project.commandAllowlist as string[]) : undefined;
-  const ceiling = Array.isArray(user.commandAllowlist) ? (user.commandAllowlist as string[]) : DEFAULTS.commandAllowlist;
-  if (projectList) {
-    const kept = projectList.filter((entry) => ceiling.some((outer) => allowlistEntryCovers(outer, entry)));
-    if (kept.length < projectList.length) warnings.push(`Ignored project commandAllowlist entries that the ${Array.isArray(user.commandAllowlist) ? "user" : "built-in"} allowlist does not cover: ${projectList.filter((entry) => !kept.includes(entry)).join(", ")}.`);
-    merged.commandAllowlist = kept;
-  } else if (Array.isArray(user.commandAllowlist)) {
-    merged.commandAllowlist = user.commandAllowlist;
+  // worktrees.* and the worker pool settings are gone (/build runs tickets one at a time on one branch).
+  // An old worktrees.branchPrefix still names the branches while branchPrefix is unset.
+  if (user.worktrees !== undefined || project.worktrees !== undefined) {
+    const old = [project.worktrees, user.worktrees].map((item) => (isRecord(item) ? item.branchPrefix : undefined)).find((item) => typeof item === "string");
+    if (merged.branchPrefix === undefined && typeof old === "string") merged.branchPrefix = old;
+    warnings.push(`worktrees is no longer used${typeof old === "string" ? "; worktrees.branchPrefix is honored as branchPrefix, so move it to the top level" : ""}.`);
   }
+  delete merged.worktrees;
+  if (isRecord(merged.workers)) {
+    const removed = ["concurrency", "deadlineMs", "isolatedWorktrees", "preserveUntilReviewed"].filter((key) => key in (merged.workers as Record<string, unknown>));
+    if (removed.length > 0) {
+      warnings.push(`workers.${removed.join("/")} are no longer used (only workers.tokenBudget and workers.ticketContextTokens remain).`);
+      merged.workers = Object.fromEntries(Object.entries(merged.workers).filter(([key]) => !removed.includes(key)));
+    }
+  }
+  // commandAllowlist is gone: checks run any non-destructive command. Old files still load.
+  if (user.commandAllowlist !== undefined || project.commandAllowlist !== undefined) {
+    warnings.push("commandAllowlist is no longer used; checks run any non-destructive command.");
+  }
+  delete merged.commandAllowlist;
+  // The autopilot is gone, and merge stays manual (approvals.merge). Old files still load.
+  if (user.autopilot !== undefined || project.autopilot !== undefined) {
+    warnings.push("autopilot is no longer used; merge stays manual.");
+  }
+  delete merged.autopilot;
+  for (const source of [user, project]) {
+    if (isRecord(source.budgets) && source.budgets.autopilotPrUsd !== undefined) {
+      warnings.push("budgets.autopilotPrUsd is no longer used.");
+      break;
+    }
+  }
+  if (isRecord(merged.budgets)) delete merged.budgets.autopilotPrUsd;
   // orgProviderAllowlist: an empty list means "all providers", so a project list can only restrict that.
   // Once the user names providers, the user's list is final.
   if (Array.isArray(user.orgProviderAllowlist) && user.orgProviderAllowlist.length > 0) {

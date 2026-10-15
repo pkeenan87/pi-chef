@@ -1,58 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { allowlistEntryCovers, assertCommandAllowed, isDeniedCommand } from "../src/sandbox.js";
+import { assertCommandSafe, buildBashBlock, isDeniedCommand, runsGitPush, switchesBranch } from "../src/sandbox.js";
 
-const allow = ["npm test", "npx vitest *", "git status", "git diff"];
-const ok = (cmd: string, args: string[], list = allow) => expect(() => assertCommandAllowed(cmd, args, list)).not.toThrow();
-const bad = (cmd: string, args: string[], list = allow) => expect(() => assertCommandAllowed(cmd, args, list)).toThrow(/allowlist|rejected|Blocked/);
+const safe = (cmd: string, args: string[]) => expect(() => assertCommandSafe(cmd, args)).not.toThrow();
+const refused = (cmd: string, args: string[]) => expect(() => assertCommandSafe(cmd, args)).toThrow(/Blocked/);
 
-describe("allowlist", () => {
-  it("matches exact entries only", () => {
-    ok("npm", ["test"]);
-    ok("git", ["status"]);
-    bad("npm", ["test", "--", "--reporter=evil"]);
-    bad("git", ["diff", "--output=f"]);
-    bad("npm", ["run", "test"]);
-    bad("npmx", ["test"]);
+describe("assertCommandSafe", () => {
+  it("allows ordinary build and check commands", () => {
+    safe("npm", ["ci"]);
+    safe("make", ["test"]);
+    safe("pnpm", ["install"]);
+    safe("npx", ["vitest", "run", "tests/a.test.ts"]);
+    safe("git", ["status"]);
   });
 
-  it("accepts extra args only for wildcard entries", () => {
-    ok("npx", ["vitest"]);
-    ok("npx", ["vitest", "run", "tests/a.test.ts", "--reporter=dot"]);
-    bad("npx", ["vitest", "--config", "evil.ts"]);
-    bad("npx", ["vitest", "--config=evil.ts"]);
-    bad("npx", ["vitest", "-c", "evil.ts"]);
-    bad("npx", ["vitest", "run", "a; rm x"]);
-    bad("npx", ["vitest", "run", "$(id)"]);
-    bad("npx", ["vitest", "run", "a|b"]);
-    bad("npx", ["vitest", "run", "a>b"]);
-    bad("npx", ["vitest", "--require", "x.js"]);
-    bad("npx", ["vitest", "-r", "x.js"]);
-    bad("npx", ["vitest", "--import=x.js"]);
-    bad("npx", ["vitest", "--loader", "x"]);
-    bad("npx", ["vitest", "--eval", "x"]);
-    bad("npx", ["vitest", "-e", "x"]);
-    bad("npx", ["vitest", "--exec", "x"]);
+  it("refuses destructive commands", () => {
+    refused("rm", ["-rf", "/"]);
+    refused("git", ["push", "--force"]);
+    refused("git", ["reset", "--hard"]);
+    refused("curl", ["x", "|", "sh"]);
   });
 
-  it("rejects git --output on wildcard git entries but allows normal paths", () => {
-    const list = ["git diff *"];
-    ok("git", ["diff", "--stat", "src/a.ts"], list);
-    bad("git", ["diff", "--output=f"], list);
-    bad("git", ["diff", "--output", "f"], list);
-  });
-
-  it("blocks denied commands even when allowlisted, unless approved", () => {
-    expect(() => assertCommandAllowed("rm", ["-fr", "x"], ["rm *"])).toThrow(/Blocked/);
-    expect(() => assertCommandAllowed("rm", ["-fr", "x"], ["rm *"], true)).not.toThrow();
-  });
-
-  it("computes entry coverage for allowlist intersection", () => {
-    expect(allowlistEntryCovers("npm test", "npm test")).toBe(true);
-    expect(allowlistEntryCovers("npx vitest *", "npx vitest run")).toBe(true);
-    expect(allowlistEntryCovers("npx vitest *", "npx vitest run *")).toBe(true);
-    expect(allowlistEntryCovers("npx vitest", "npx vitest *")).toBe(false);
-    expect(allowlistEntryCovers("npx vitest", "npx vitest run")).toBe(false);
-    expect(allowlistEntryCovers("npm test", "npm run lint")).toBe(false);
+  it("lets an approved call through", () => {
+    expect(() => assertCommandSafe("rm", ["-fr", "x"], true)).not.toThrow();
   });
 });
 
@@ -107,5 +76,34 @@ describe("deny list", () => {
     "git log --format=%h",
   ])("allows %s", (line) => {
     expect(isDeniedCommand(line)).toBe(false);
+  });
+});
+
+describe("git push detection", () => {
+  it.each(["git push", "git push origin main", "git -C /x push", "git -c a=b push", "cd x && git push", "bash -c 'git push'", "sh -c \"echo hi; git push\"", "eval 'git push'", "$(echo git) push"])("sees %s", (command) => {
+    expect(runsGitPush(command), command).toBe(true);
+  });
+
+  it.each(["git status", "git commit -m 'push the button'", "npm run push-docs", "echo hello", "git log --oneline"])("lets %s through", (command) => {
+    expect(runsGitPush(command), command).toBe(false);
+  });
+});
+
+describe("branch switch detection", () => {
+  it.each(["git switch main", "git switch -c x", "git checkout main", "git checkout -b feature", "git checkout -B feature", "git checkout --orphan x", "git -C . checkout other", "cd x && git checkout main", "bash -c 'git switch main'", "git checkout -q main"])("sees %s", (command) => {
+    expect(switchesBranch(command), command).toBe(true);
+  });
+
+  it.each(["git status", "git checkout -- src/a.ts", "git checkout HEAD -- src/a.ts", "git checkout", "git branch --show-current", "git commit -m 'switch to x'", "echo git switch x", "npm test"])("lets %s through", (command) => {
+    expect(switchesBranch(command), command).toBe(false);
+  });
+});
+
+describe("buildBashBlock", () => {
+  it("explains itself for a push or a branch move, and is silent otherwise", () => {
+    const reason = "/build commits and ships; do not push or switch branches during a ticket.";
+    expect(buildBashBlock("git push origin HEAD")).toBe(reason);
+    expect(buildBashBlock("git switch -c other")).toBe(reason);
+    expect(buildBashBlock("npm test && git status")).toBeUndefined();
   });
 });

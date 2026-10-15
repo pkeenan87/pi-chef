@@ -184,72 +184,93 @@ export function commandLine(command: string, args: string[]): string {
   return [command, ...args].join(" ");
 }
 
-const METACHARS = /[;&|`<>\n\r]|\$\(/;
-/** Flags that can run arbitrary code or write files, rejected in wildcard extras for every command. */
-const DANGEROUS_FLAGS = new Set(["--exec", "-e", "--eval", "--require", "-r", "--import", "--loader", "--experimental-loader"]);
-
-/** Returns a reason when an extra arg (supplied under a trailing " *" allowlist entry) is unsafe. */
-function dangerousArg(command: string, tokens: string[], arg: string): string | null {
-  if (METACHARS.test(arg)) return `argument contains shell metacharacters: ${arg}`;
-  const flag = arg.startsWith("-") ? arg.split("=")[0] : arg;
-  if (DANGEROUS_FLAGS.has(flag)) return `argument is not permitted: ${arg}`;
-  const isVitest = tokens.some((token) => baseName(token) === "vitest");
-  if (isVitest && (flag === "--config" || flag === "-c")) return `argument is not permitted for vitest: ${arg}`;
-  if (baseName(command) === "git" && flag === "--output") return `argument is not permitted for git: ${arg}`;
-  return null;
-}
-
-export interface AllowlistEntry {
-  tokens: string[];
-  wildcard: boolean;
-}
-
-export function parseAllowlistEntry(entry: string): AllowlistEntry {
-  const tokens = entry.trim().split(/\s+/).filter(Boolean);
-  const wildcard = tokens.length > 1 && tokens[tokens.length - 1] === "*";
-  return { tokens: wildcard ? tokens.slice(0, -1) : tokens, wildcard };
-}
-
-/**
- * True when allowlist entry `outer` permits everything entry `inner` permits.
- * Used to intersect a project allowlist with a user allowlist.
- */
-export function allowlistEntryCovers(outer: string, inner: string): boolean {
-  const o = parseAllowlistEntry(outer);
-  const i = parseAllowlistEntry(inner);
-  if (i.tokens.length < o.tokens.length) return false;
-  if (!o.tokens.every((token, idx) => i.tokens[idx] === token)) return false;
-  if (i.tokens.length === o.tokens.length) return !i.wildcard || o.wildcard;
-  return o.wildcard;
-}
-
-/**
- * Allowlist semantics: an entry matches the full command line exactly. An entry ending in " *"
- * additionally accepts extra args, which are screened for shell metacharacters and
- * code-execution or file-writing flags.
- */
-export function assertCommandAllowed(command: string, args: string[], allowlist: string[], approved = false): void {
+/** Refuses destructive commands (rm -rf, force push, reset --hard, piping a download into a shell) unless `approved`. Everything else may run. */
+export function assertCommandSafe(command: string, args: string[], approved = false): void {
   const line = commandLine(command, args);
-  const argv = [command, ...args];
-  if (isDeniedCommand(line) || deniedArgv(argv)) {
-    if (!approved) {
-      throw new WorkflowError("COMMAND_DENIED", `Blocked destructive command: ${line}`);
-    }
+  if ((isDeniedCommand(line) || deniedArgv([command, ...args])) && !approved) {
+    throw new WorkflowError("COMMAND_DENIED", `Blocked destructive command: ${line}`);
   }
-  let rejection: string | null = null;
-  for (const raw of allowlist) {
-    const entry = parseAllowlistEntry(raw);
-    if (entry.tokens.length === 0 || argv.length < entry.tokens.length) continue;
-    if (!entry.tokens.every((token, idx) => argv[idx] === token)) continue;
-    if (argv.length === entry.tokens.length) return;
-    if (!entry.wildcard) continue;
-    const extras = argv.slice(entry.tokens.length);
-    const bad = extras.map((arg) => dangerousArg(command, argv, arg)).find((reason) => reason !== null) ?? null;
-    if (bad === null) return;
-    rejection = bad;
+}
+
+/** Matches `git push` (also `git -C dir push`, `git -c k=v push`) anywhere in a command line. */
+const GIT_PUSH = /(^|[;&|(\n`]|\$\()\s*(\S*\/)?git(\s+(-[cC]\s+\S+|--[\w-]+(=\S+)?|-\w+))*\s+push\b/;
+const MAX_NESTING = 4;
+
+/** The git subcommand and its arguments for one segment, or undefined when the segment is not git. */
+function gitCall(tokens: string[]): { sub: string | undefined; rest: string[] } | undefined {
+  const stripped = stripWrappers(tokens);
+  const first = stripped[0];
+  if (!first || baseName(first).toLowerCase() !== "git") return undefined;
+  const args = stripped.slice(1);
+  let i = 0;
+  while (i < args.length && args[i]!.startsWith("-")) i += GIT_VALUE_FLAGS.has(args[i]!) ? 2 : 1;
+  return { sub: args[i], rest: args.slice(i + 1) };
+}
+
+/** True for `git switch`, `git checkout -b|-B|--orphan|--detach`, and `git checkout <ref>` (a `--` before the paths means a file restore). */
+function movesBranch(call: { sub: string | undefined; rest: string[] }): boolean {
+  if (call.sub === "switch") return true;
+  if (call.sub !== "checkout") return false;
+  if (call.rest.some((arg) => /^-[A-Za-z]*[bB][A-Za-z]*$/.test(arg) || arg === "--orphan" || arg === "--detach")) return true;
+  const dash = call.rest.indexOf("--");
+  const before = dash < 0 ? call.rest : call.rest.slice(0, dash);
+  return dash < 0 ? before.some((arg) => !arg.startsWith("-")) : false;
+}
+
+/** Walks a command line, descending into `sh -c "..."` and `eval`, and reports whether `test` holds for any git call. */
+function anyGitCall(command: string, test: (call: { sub: string | undefined; rest: string[] }, segmentTokens: string[]) => boolean, depth = 0): boolean {
+  if (depth >= MAX_NESTING) return false;
+  for (const segment of splitSegments(command)) {
+    const tokens = stripWrappers(segment.tokens);
+    const first = tokens[0];
+    if (!first) continue;
+    const name = baseName(first).toLowerCase();
+    const args = tokens.slice(1);
+    const call = gitCall(segment.tokens);
+    if (call && test(call, segment.tokens)) return true;
+    if (SHELLS.has(name)) {
+      const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
+      const script = at >= 0 ? args[at + 1] : undefined;
+      if (script !== undefined && anyGitCall(script, test, depth + 1)) return true;
+    } else if (name === "eval" && anyGitCall(args.join(" "), test, depth + 1)) return true;
   }
-  if (rejection) {
-    throw new WorkflowError("COMMAND_DENIED", `Command arguments rejected (${rejection}): ${line}`);
+  return false;
+}
+
+/**
+ * True when the command line may run `git push`. Conservative: command substitution or a variable next to the word
+ * `push` cannot be inspected, so it counts. Defense in depth only; the real push controls are elsewhere.
+ */
+export function runsGitPush(command: string, depth = 0): boolean {
+  if (GIT_PUSH.test(command)) return true;
+  if (/\bpush\b/.test(command) && (/\$\(|`/.test(command) || /(^|[;&|(\n])\s*\\?\$\{?\w/.test(command))) return true;
+  if (depth >= MAX_NESTING) return /\bpush\b/.test(command);
+  for (const segment of splitSegments(command)) {
+    const tokens = stripWrappers(segment.tokens);
+    const first = tokens[0];
+    if (!first) continue;
+    const name = baseName(first).toLowerCase();
+    const args = tokens.slice(1);
+    if (first.includes("$") && args.some((arg) => arg === "push")) return true;
+    if (name === "git") {
+      if (gitCall(segment.tokens)?.sub === "push") return true;
+    } else if (SHELLS.has(name)) {
+      const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
+      const script = at >= 0 ? args[at + 1] : undefined;
+      if (script !== undefined) {
+        if (runsGitPush(script, depth + 1)) return true;
+      } else if (segment.piped && /\bpush\b/.test(command)) return true;
+    } else if (name === "eval" && runsGitPush(args.join(" "), depth + 1)) return true;
   }
-  throw new WorkflowError("COMMAND_DENIED", `Command is not on the allowlist: ${line}`);
+  return false;
+}
+
+/** True when the command line switches branches: `git switch`, `git checkout -b|-B|<branch>` (also inside `sh -c`). */
+export function switchesBranch(command: string): boolean {
+  return anyGitCall(command, (call) => movesBranch(call));
+}
+
+/** Why a bash command is refused while a /build ticket runs, or undefined. */
+export function buildBashBlock(command: string): string | undefined {
+  return runsGitPush(command) || switchesBranch(command) ? "/build commits and ships; do not push or switch branches during a ticket." : undefined;
 }

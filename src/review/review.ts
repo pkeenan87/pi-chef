@@ -1,6 +1,6 @@
 import { redact } from "../redact.js";
 import type { CheckEvidence, Finding, ReviewReport } from "../domain.js";
-import { assertCommandAllowed, commandLine } from "../sandbox.js";
+import { assertCommandSafe, commandLine } from "../sandbox.js";
 
 export interface CheckRunner {
   run(command: string, args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }>;
@@ -37,8 +37,8 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
 }
 
 export async function reviewDiff(options: {
-  diffs: { groupId: string; diff: string }[];
-  integratedDiff: string;
+  /** The branch's changes against its base, working tree included. */
+  diff: string;
   checks: { name: string; command: string; args: string[] }[];
   /** Commands run one after another before the checks (an install). A failure fails the review and skips the checks. */
   setup?: { name: string; command: string; args: string[] }[];
@@ -48,14 +48,13 @@ export async function reviewDiff(options: {
   onProgress?: (line: string) => void;
   cwd: string;
   runner: CheckRunner;
-  allowlist: string[];
   planAcceptance: string[];
 }): Promise<ReviewReport> {
   const findings: Finding[] = [];
   const now = options.now ?? (() => Date.now());
   const progress = options.onProgress ?? (() => undefined);
-  const combined = options.diffs.map((item) => item.diff).join("\n") + options.integratedDiff;
-  progress(`static scan of ${options.diffs.length} worktree diff(s) and the integrated diff (${Math.round(combined.length / 1000)}k chars)`);
+  const combined = options.diff;
+  progress(`static scan of the diff (${Math.round(combined.length / 1000)}k chars)`);
   if (SECRET_DIFF.test(combined)) {
     findings.push({
       severity: "blocking",
@@ -91,11 +90,11 @@ export async function reviewDiff(options: {
   const checks: CheckEvidence[] = [];
   const runOne = async (check: { name: string; command: string; args: string[] }): Promise<{ evidence: CheckEvidence; finding?: Finding }> => {
     try {
-      assertCommandAllowed(check.command, check.args, options.allowlist);
+      assertCommandSafe(check.command, check.args);
     } catch (error) {
       const message = (error as Error).message;
       const evidence: CheckEvidence = { name: check.name, command: check.command, args: check.args, cwd: options.cwd, exitCode: null, stdout: "", stderr: message, ran: false };
-      const finding: Finding = { severity: "blocking", category: "checks", message: `Check ${check.name} is not allowlisted.`, evidence: message };
+      const finding: Finding = { severity: "blocking", category: "checks", message: `Check ${check.name} was refused.`, evidence: message };
       return { evidence, finding };
     }
     let result: { code: number; stdout: string; stderr: string };
@@ -173,14 +172,13 @@ export async function reviewDiff(options: {
   // Say why, not just how many: a review that cannot pass for lack of checks must not look like a clean one.
   const why: string[] = [];
   if (blocking.length > 0) why.push(`${blocking.length} blocking finding(s): ${blocking.map((finding) => finding.message).join(" ")}`);
-  if (options.checks.length === 0) why.push("no checks ran, so there is no evidence of a test pass. Set `checks:` in .pi-workflows/config.yaml (for example npm test) or give the plan's tickets allowlisted checks, then run /review again");
+  if (options.checks.length === 0) why.push("no checks ran, so there is no evidence of a test pass. Set `checks:` in .pi-workflows/config.yaml (for example npm test) or give the plan's tickets allowlisted checks, then run /ship again");
   return {
     passed,
     claimedPass: passed,
     findings,
     checks,
-    worktreeDiffs: options.diffs.map((item) => ({ groupId: item.groupId, diff: redact(item.diff) })),
-    integratedDiff: redact(options.integratedDiff),
+    diff: redact(options.diff),
     summary: passed ? `Review passed with ${checks.length} check(s) and no blocking findings.` : `Review did not pass: ${why.join("; ")}.`,
   };
 }

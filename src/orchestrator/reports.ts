@@ -2,7 +2,7 @@ import { PROVIDERS, type CommandResult, type CostRecord, type RoutingDecision, t
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
-import { active, done, fail, guard, handoff, iso, requireActive, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, type WorkflowContext } from "./context.js";
 import { formatDuration } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
@@ -51,6 +51,14 @@ function ticketLines(state: TaskState | undefined): string[] {
   });
 }
 
+/** The /build branch, its base, and how many tickets are done. */
+function buildLines(state: TaskState | undefined): string[] {
+  if (!state?.build) return [];
+  const total = state.plan?.tickets?.length ?? 0;
+  const finished = Object.values(state.ticketRuns ?? {}).filter((run) => run.status === "done").length;
+  return [`Build: ${state.build.branch} (base ${state.build.base}) · tickets ${finished}/${total} done`];
+}
+
 export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> {
   return guard(() => costReport(ctx, format));
 }
@@ -94,9 +102,8 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     state?.approvedVersion ? `Approved plan v${state.approvedVersion}` : "No approved plan.",
     state?.blockedReason ? `Note: ${state.blockedReason}` : "",
     corrupt > 0 ? `Warning: ${corrupt} corrupt line(s) in the task event log. state.json is the source of truth; inspect events.jsonl.` : "",
-    `Worktrees: ${state?.worktrees.map((item) => `${item.groupId}@${item.headSha.slice(0, 7)}`).join(", ") || "none"}`,
+    ...buildLines(state),
     ...ticketLines(state),
-    `Integration: ${state?.integration?.sha ?? "none"}`,
     `PR: ${state?.pullRequest ? `#${state.pullRequest.number} ${state.pullRequest.headSha}` : "none"}`,
     `Budget: ${budget}`,
     ...(ctx.config.warnings ?? []).map((warning) => `Config warning: ${warning}`),
@@ -105,15 +112,6 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     ...auth.map((view) => `${view.provider}: ${view.status} (${view.method}) ${view.detail}`),
   ].filter(Boolean);
   return done(text.join("\n"), { state, auth, budget, corruptEventLines: corrupt });
-}
-
-export function resetPhase(ctx: WorkflowContext): Promise<CommandResult> {
-  return guard(async () => {
-    const state = requireActive(ctx);
-    const note = await handoff(ctx, state, "manual", `# Manual reset\n\nPhase ${state.phase} kept. Artifacts were not deleted.\n`);
-    await ctx.store.update(state.taskId, "manual context reset", (task) => ({ ...task, contextResets: [...task.contextResets, note], updatedAt: iso(ctx) }));
-    return done(`Context reset (${note.mode}) while phase stayed ${state.phase}.`);
-  });
 }
 
 export function auth(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {

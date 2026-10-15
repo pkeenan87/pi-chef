@@ -2,7 +2,7 @@
 
 Local Pi extension and TypeScript modules that keep a coding task cheap without dropping the review. A deterministic policy picks the provider, the budget, and the next phase. Models only advise. State stays in the workspace under `.pi-workflows/`. There is no hosted coordinator and no database.
 
-The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, implement, review, publish, then watch the pull request. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
+The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, build, ship. You plan and approve once, each ticket is built in its own fresh session on a routed model, and one pull request goes out for you to merge. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
 
 ## Supported Pi version
 
@@ -151,17 +151,16 @@ Then add these lines to the project's `.gitignore`:
 ```gitignore
 .pi-workflows/tasks/
 .pi-workflows/cost/
-.pi-workflows/autopilot/
 .pi-workflows/metrics/
-.pi-workflows/worktrees/
+.pi-workflows/reports/
 .pi-workflows/notifications.jsonl
 .pi-workflows/active-task.json
 .pi-workflows/*.local.yaml
 ```
 
-A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `autopilot.autoMerge: true` is rejected. `approvals.merge` stays `manual`. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
+A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/ship` to pass (see [Sample workflow](#sample-workflow)).
 
-Task files, the cost ledger, autopilot cursors, and worktrees are gitignored. The config file is not.
+Task files, the cost ledger, metrics, and reports are gitignored. The config file is not.
 
 ### Verify, update, remove
 
@@ -184,7 +183,7 @@ npm run typecheck
 
 ## Configuration
 
-**Layering.** `~/.pi/agent/cost-workflow.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, `workers`, and `autopilot` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
+**Layering.** `~/.pi/agent/cost-workflow.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
 
 **User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `decisionsPath` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
 
@@ -192,13 +191,24 @@ npm run typecheck
 
 | Field | Layering rule |
 |---|---|
-| `commandAllowlist` | A project entry is kept only if the user list covers it. With no user list, the built-in defaults are the ceiling. So the result is an intersection, and a project cannot grant itself new commands |
 | `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
 | `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
 | `approvals` | Plan approval stays required, merge stays `manual`, and publish is `auto` only if the user config says so |
 | `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier) |
 
-The YAML must not contain secrets, API keys, or tokens. `autopilot.autoMerge: true` is rejected.
+The YAML must not contain secrets, API keys, or tokens.
+
+**Other top-level keys.**
+
+| Key | Meaning |
+|---|---|
+| `branchPrefix` (default `cost`) | `/build` and `/ship` name the branch `<branchPrefix>/<task-id>` when they start from the default branch |
+| `checks` | Commands `/build` (when a ticket has none of its own) and `/ship` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
+| `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/ship` |
+| `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
+| `review` | The advisory model pass of `/ship`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
+
+Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, and `budgets.autopilotPrUsd`. An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
 
 Provider setup: [Azure CLI and Foundry](#azure-cli-and-foundry-deployments) (`endpoint`, `audience: https://ai.azure.com`, `decisionsPath`) and [Vercel CLI and AI Gateway](#vercel-cli-and-ai-gateway) (`vercel login`, `vercel link`, `vercel env pull`, `projectDir`).
 
@@ -242,7 +252,7 @@ A subscription login is not proof of free API usage.
 
 ### Session renewal
 
-An oauth credential with `expires` in the past is `expired`. `/implement` moves the task to `PAUSED` and tells you to run `/login` again. It does not try an API key. After you sign in, run `/auth status`, then `/implement` again. The approved plan and the worktrees are still on disk.
+An oauth credential with `expires` in the past is `expired`. `/build` moves the task to `PAUSED` and tells you to run `/login` again. It does not try an API key. After you sign in, run `/auth status`, then `/build` again. The approved plan and the commits so far are still there.
 
 ## Azure CLI and Foundry deployments
 
@@ -324,7 +334,7 @@ How a candidate is picked:
 1. Filter out candidates that the org allowlist or `proprietaryCode` excludes, whose own circuit breaker is open, whose expected cost exceeds the remaining task or daily budget, and whose provider is not signed in. For the deterministic tier an unreachable local server also excludes it (a cached `GET <baseUrl>/models` with a short timeout). If no provider is signed in for a tier, the choice ignores sign-in so the usual "run /login" pause appears instead of a silent escalation to a dearer tier.
 2. Score each remaining candidate as expected cost per success: its price times the expected token mix (`workers.tokenBudget`, 4:1 input to output), plus its quota shadow price (below), divided by its success probability. The probability is a Thompson sample from Beta(1 + successes, 1 + failures) for that task type and model, so a new or unlucky model still gets tried now and then.
 3. The lowest score wins. Ties go to config order. A candidate with no `pricing` row ranks after priced ones and the decision is flagged `price_unknown`.
-4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/implement` blocks the task with `NO_CANDIDATE`; it never falls back to literal edits for a model tier).
+4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/build` stops with `NO_CANDIDATE`).
 
 Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. A classifier call counts as a success when its answer reaches `routing.minConfidence`.
 
@@ -346,7 +356,7 @@ quota:
   overCapMultiplier: 4         # default 4
 ```
 
-- **Shadow cost.** For one task the shadow cost is `workers.tokenBudget` tokens at `perMillionTokensUsd`. It is added to the real expected cost when the selector scores candidates within a tier, and when the policy compares proven tiers for `/implement`. When a soft budget keeps only the cheapest candidate of a chat tier, the real price decides and the shadow price only breaks ties. A model without a `quota.models` row has no shadow cost.
+- **Shadow cost.** For one task the shadow cost is `workers.tokenBudget` tokens at `perMillionTokensUsd`. It is added to the real expected cost when the selector scores candidates within a tier, and when the policy compares proven tiers for `/build`. When a soft budget keeps only the cheapest candidate of a chat tier, the real price decides and the shadow price only breaks ties. A model without a `quota.models` row has no shadow cost.
 - **Ranking only.** Shadow prices never reach the ledger's `actualUsd`, the task or daily budget, or the over-budget filter. A $0 subscription model stays eligible when the budget is spent, whatever its shadow price. `expectedUsd` in a routing decision is the real cost. A model still needs a `pricing` row: a quota weight does not make an unpriced model priced.
 - **Soft caps.** Quota use per provider is the sum of the reported tokens (input, output, cache read, and cache write) in the ledger, for the budget day (UTC, like `dailyUsd`) and for the rolling seven days. Unknown token counts add nothing. At or over a provider's `dailyTokens` or `weeklyTokens`, its shadow prices are multiplied by `overCapMultiplier`, which pushes work to the other provider or to metered models. A cap never blocks a call, and the decision reason notes "over quota cap" when an over-cap model still wins.
 - **Tier choice is unchanged.** Hard and security-sensitive work still goes to `premium` by policy. The shadow price only decides which premium model serves it, for example Sol over Opus when Anthropic is over its cap.
@@ -355,7 +365,7 @@ quota:
 
 ### Showing the chosen model
 
-Every routing decision (`/plan`, `/implement` and each escalation, `/review`, `/autopilot`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
+Every routing decision (`/plan`, each `/build` ticket and escalation, `/ship`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
 
 Chat turns on `cost-opt/auto` set no status line of their own: Pi's footer already shows `auto • level → model`. While a task is active they still add a `route` event to its log.
 
@@ -384,7 +394,7 @@ The declared context window and max output are the smallest known across the con
 
 ### Advisor
 
-`/advisor <question>` asks the advisor tier one question. It checks the budget first, builds a redacted context of at most 8,000 characters (task request, plan summary, classification, last failure, diff stat), picks a candidate with the same selector, ledgers the call with reason `advisor`, and prints the answer. It never changes the task phase and never edits files. Pi only suggests it: after a security-sensitive plan, and when `/implement` runs out of escalations. The suggestion is a notification ("Consider /advisor ..."); the model is never called without the command.
+`/advisor <question>` asks the advisor tier one question. It checks the budget first, builds a redacted context of at most 8,000 characters (task request, plan summary, classification, last failure, diff stat), picks a candidate with the same selector, ledgers the call with reason `advisor`, and prints the answer. It never changes the task phase and never edits files. Pi only suggests it, after a security-sensitive plan. The suggestion is a notification ("Consider /advisor ..."); the model is never called without the command.
 
 ### Classifier
 
@@ -394,7 +404,7 @@ The classifier tier sends one Decisions request with five questions (`task_type`
 
 OpenAI, Anthropic, Foundry, Vercel, and local chat models are called through Pi's model registry, which owns authentication. OpenAI and Anthropic calls are refused unless the registry is using an account login. Foundry, Vercel, and local models are registered with `pi.registerProvider` at session start, with credentials from `!command` values (the Azure CLI token, or a read of the pulled Vercel env file), so no token is held in config.
 
-`/implement` calls the selected model only for plan groups that have no literal `edits`. The model returns whole-file edits for the group's own files, which are written through the same owned-file check as literal edits. Groups with approved literal edits keep applying exactly those edits.
+`/build` does not call a model itself. It picks the model for each ticket, switches a fresh Pi session to it, and the session's normal turn does the work, so Pi's tools and your login apply. `/ship` calls the review-tier model once (in parts for a large diff) through the registry for the advisory pass.
 
 ## Local inference
 
@@ -410,69 +420,76 @@ Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This p
 
 ## Sample workflow
 
-Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass, and `/push` then refuses. With `checks: []`, `/review` falls back to the distinct `checks` of the plan's tickets (allowlisted commands, validated at plan time) and runs them on the integration branch; with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
+Configure at least one check before you expect `/ship` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass. With `checks: []`, `/ship` falls back to the distinct `checks` of the plan's tickets (validated at plan time); with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
 
 ```yaml
+setup:
+  - name: install
+    command: npm
+    args: ["ci"]
 checks:
   - name: unit
     command: npm
     args: ["test"]
 ```
 
-The command must also be on `commandAllowlist` (prefix or exact). Destructive commands stay blocked even if someone adds them to the allowlist, unless that call is explicitly approved.
+Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused. There is no allowlist.
 
 ```text
 /plan Harden Neo ingest: reject empty events. AC: empty input throws
-/approve-plan
-/implement
-/review
-/push
-/autopilot
-/autopilot status
-/autopilot stop
+/build
+/ship
 ```
 
-`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, allowlisted bash, `web_search`, `web_fetch`) plus three plan tools. It does not create a worktree and does not edit the repo.
+Three commands. `/show-plan` re-reads the plan, and approves a draft you saved earlier.
+
+### /plan
+
+`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus three plan tools. It edits nothing. If the active task is `PUBLISHED`, a new `/plan` closes it first: a merged pull request closes it with a chat line, an unmerged one asks you to confirm.
 
 1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
-2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan in the style of an engineer's plan mode (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps). Code rejects a spec without an approach, file changes, or verification.
-3. **Tickets.** The model submits vertical, independently testable slices with `plan_tickets`. Code validates unique ids, existing blockers, no cycles, at least one acceptance criterion, and that each ticket fits `workers.ticketContextTokens` (default 150000; the larger of the model's estimate and a code estimate of chars/4 plus listed file sizes plus 20K overhead). An oversize ticket is sent back to be split. Each ticket carries technical `implementation` steps (files, functions, signatures, tests) beside its behavior and acceptance criteria. You then see the full plan (spec and every ticket) in a scrollable review and choose: save it for approval, request changes (typed feedback goes back to the model), or edit the tickets. The saved plan is also posted in the chat and written to `tasks/<id>/plan.md`; `/show-plan` shows it again. Each ticket is written to `tasks/<id>/tickets/NN-slug.md`, and each becomes a plan group (`NN-slug`, `dependsOn` from `blockedBy`) so the plan still goes through `/approve-plan`.
+2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps). Code rejects a spec without an approach, file changes, or verification.
+3. **Tickets.** The model submits vertical, independently testable slices with `plan_tickets`. Code validates unique ids, existing blockers, no cycles, at least one acceptance criterion, and that each ticket fits `workers.ticketContextTokens` (the larger of the model's estimate and a code estimate of chars/4 plus listed file sizes plus 20K overhead). An oversize ticket is sent back to be split. A ticket's `checks` are command lines, one command per entry, never prose. `plan_tickets` rejects a check the deny rules would refuse, and one whose first word is not a command on `PATH`, so the planner rewrites it. Each ticket carries technical `implementation` steps beside its behavior and acceptance criteria.
+4. **Review screen.** You see the full plan (spec and every ticket) in a scrollable review and choose **Approve plan**, **Request changes** (typed feedback goes back to the model), **Edit tickets**, or **Save as draft**. Esc also saves a draft. Approving freezes `plan.vN.approved.json` (write-once). The plan is also posted in the chat and written to `tasks/<id>/plan.md`, and each ticket to `tasks/<id>/tickets/NN-slug.md`. A material scope change needs a new approval.
 
-`/plan --no-questions <request>` skips the interview: the model records the choices it would have recommended as assumptions in the spec. A request that contains a literal ```` ```tasks ```` block is drafted directly as before (`plan.md`, `plan.json`, no model turn).
+`/show-plan` prints the plan. For a draft it opens the same review (Approve plan, Request changes, Close), so you can approve later.
 
-Ticket plans have no literal edits. In Pi, `/implement` runs each ticket in a child `pi` process (see Implement). Outside Pi, a workflow built without a `ticketRunner` fails with "ticket runner not configured" and applies nothing.
+`/plan --no-questions <request>` skips the interview: the model records the choices it would have recommended as assumptions in the spec. A request that contains a literal ```` ```tasks ```` block is drafted directly (`plan.md`, `plan.json`, no model turn). Such a plan has no tickets, so `/build` asks you to run `/plan` again.
 
-`/approve-plan` shows the full plan again and asks you to approve it, request changes (the plan goes back to the model with your feedback, without new interview questions, and returns for approval), or wait. Approving freezes `plan.vN.approved.json`. That file is write-once. A material scope change needs a new approval. The command then writes a handoff and asks Pi for a new session (`newSession`). If the host cannot do that, it compacts, and the handoff file remains either way.
+### /build
 
-`/implement` refuses while the plan is still a draft. It creates one worktree and branch per independent group (`cost/<task-id>/<group>`), records the base SHA, and runs up to `workers.concurrency` (default 2) at once. Overlapping files are serialized. Groups integrate one at a time onto `cost/<task-id>/integration`. A conflict aborts that merge. Security-sensitive plans (auth, permissions, secrets, production) wait for a person before any edit.
+`/build` runs the approved tickets one at a time. It refuses a plan that is not approved, a plan with no tickets, a budget that is already spent, and (for a security-sensitive plan) asks you to confirm first. It does not run in the background: it holds the Pi command until it finishes or stops.
 
-**Tickets run in child pi processes.** For a plan with tickets, each ticket attempt starts a fresh `pi --mode json -p --no-session --no-approve --model <provider>/<id> --tools read,bash,edit,write,grep,find,ls,web_search,web_fetch --no-extensions -e <this package's extension> --append-system-prompt <file> @<ticket prompt file>` with the ticket's worktree as its working directory (argv array, no shell). `--no-approve` keeps the child from loading the worktree's own Pi files (`.pi/settings.json` packages, extensions, skills): the worktree is model-written, and a listed git package would otherwise be cloned at startup without credentials. A child that exits before any model request is recorded at $0 and does not count against the model's success rate. Tickets follow `blockedBy` in waves, at most `workers.concurrency` at once; each ticket's worktree branches from its blockers, and integration is unchanged. Per ticket:
+**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build refuses a working tree with uncommitted changes (outside `.pi-workflows/`), so they do not land in ticket 01's commit. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
 
-1. The ticket is routed with purpose `implement`. `suggestedTier` is a hint: it is capped by `routing.maxTier`, and a security-sensitive classification still forces the policy tier. The selector picks the model; the status line reads `ticket 01 → provider/model` and a `route` event is logged.
-2. The prompt holds the ticket (what to build, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by (truncated), the repo's `AGENTS.md` (truncated), and the instruction to implement only this ticket, add tests, run the checks, and close with each criterion marked met or not met plus the files changed.
-3. When the child exits, its changes are committed, then the configured checks and the ticket's own `checks` run through the caching runner and the command allowlist. A ticket's `checks` are shell command lines (one command per entry, no prose) and `plan_tickets` rejects any that the allowlist would refuse, so the planner rewrites them; should one still reach a run, the ticket stops as `failed` with the reason, without escalating or counting against the model. The ticket is `done` only if the child exited cleanly and every check passed. When no check ran at all, a child whose closing summary marks no acceptance criterion as met is a failure too. A failed check's output (last 1,500 characters) is shown to the next attempt. The ticket file's `## Status:` goes `in-progress`, then `done` or `failed`, and criteria checkboxes are ticked from the child's summary (best effort).
-4. A failed ticket is retried in a fresh child on the same worktree at the next tier, up to `routing.maxEscalations`. After that the task is `BLOCKED` with an `/advisor` suggestion. Finished tickets stay done, and a later `/implement` runs only the rest.
-5. The budget is checked before every ticket attempt. A hard budget starts no new tickets and blocks the task.
+**Per ticket**, in dependency order (`blockedBy`):
 
-`workers.ticketContextTokens` (150K) is a soft target at run time. The child's own compaction continues. If a child's context crosses it, `/implement` warns, the ticket file gets a warning line, and `/status` marks it ("consider splitting"). `workers.deadlineMs` bounds each child attempt (SIGTERM, then SIGKILL after 5 seconds). Cancelling kills the child the same way.
+1. **Route.** The ticket is routed with purpose `implement`. `suggestedTier` is a hint, capped by `routing.maxTier`, and a security-sensitive classification still forces the policy tier. The selector picks the model within the tier, and a tier with no usable model moves up one. The status line shows the choice and a `route` event is logged.
+2. **Fresh session.** `/build` opens a new Pi session on that model, so each ticket starts with an empty context. The first message holds the chunk rules (one ticket only, no commit, push, or branch switch), the ticket (what to build, implementation steps, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by, and the repo's `AGENTS.md`. The model works in your checkout with Pi's normal tools. While a ticket runs, a `git push` and a branch switch are blocked.
+3. **Checks.** When the model stops, `setup` runs once per build, then the ticket's `checks` (else `config.checks`), in the repo root. A failure sends the output tail back to the same session for one retry turn. If it fails again the ticket is `failed`.
+4. **Commit.** On a pass, the whole tree is committed as `<id>: <title>`, the ticket file's `## Status:` becomes `done`, criteria are ticked from the model's closing checklist (best effort), and the model's success is recorded. `/build` then moves on to the next ticket by itself. A ticket with no checks anywhere is committed with a warning that nothing verified it.
+5. **Trail.** The chat gets a line per ticket (model, time, cost, checks, commit) and a table at the end. Spend is ledgered as it happens, with the ticket id in the reason, so `/cost` can show it per ticket.
 
-The parent ledgers each ticket attempt once from the child's JSON events: provider and model from the route, cost from the config pricing row (a subscription model's $0, or its `billing: api-key` row while the provider is on a key), so the ledger agrees with how the router ranked the model; Pi's own `cost.total` (its list price) fills in only when no row applies and is kept as `listPriceUsd` for information. Escalation never re-runs a model that already ran the ticket: when the next pick is one of those, the ticket stops. `/status` shows each ticket's state, model, tokens, cost, elapsed time, peak context, and the attempt trail (which models ran it and for how long). While a child runs the status line shows `ticket 01 · turn 3 · ~52k ctx · 1m12s`, and the chat keeps a trail: a line per wave; per attempt a start line (model, escalation step), a heartbeat every five turns or sixty seconds (turn, context, elapsed, spend so far, tools used since the last one), a note when context is compacted, a warning at three quarters of `workers.deadlineMs`, a line per check with its duration, and a block when the attempt ends (model and attempt, time, turns and tokens, cost and list price, files changed, each check's result, which criteria the child claims met, its closing summary, the failure reason, and what happens next). The run ends with a summary block: one line per ticket with its trail, totals, and the integration SHA. Blocks are chat messages (`cost-report`), so they stay in the transcript.
+A check that cannot run (no such command, a denied command, or a failing `setup`) stops the ticket as `failed` with the reason. It does not count against the model, because a stronger model cannot fix a plan.
 
-**Child mode.** The child sets `PI_COST_ROUTER_CHILD=1` (plus `PI_COST_ROUTER_TASK`, `PI_COST_ROUTER_TICKET`, `PI_COST_ROUTER_ROOT`) and loads only this package's extension in a minimal form: our chat providers (foundry, vercel, local), `web_search` / `web_fetch`, and the bash deny hook below. No commands, no virtual router, no poller, no plan tools, no `message_end` ledgering. `web_search` checks the parent's task and daily budget from the parent's `.pi-workflows/` and ledgers under the parent task. `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are removed from the child's environment; the child uses Pi's account login.
+**Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (normally `cost-opt/auto`) and `/build` points you at `/ship`.
 
-Limitations: the child's `bash` tool is not allowlisted, because a ticket must run builds and tests, so a child can still run other commands in its worktree. The `tool_call` hook that refuses `git push`, `gh` writes, and the sandbox deny rules is defense in depth only (see Limitations below). The real controls are the child's allowlisted environment and git config, the `--tools` list, and the post-run checks. Review the diff. The child gets its prompt from a file in the system temp directory that is deleted after the run.
+**Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, it is committed without a model turn. Otherwise it goes to a model again, one tier up. A hard budget starts no new ticket and says so.
 
-`/review` diffs each worktree and the integration branch against the plan. Blocking findings (failed checks, secrets, auth bypass, `eval`) are separate from suggestions. `passed` is true only when every check (configured, else the tickets') exited 0 and nothing blocking was found. A review that did not pass says why in its summary and lists its suggestions.
+### /ship
 
-The integration worktree is a fresh checkout, so nothing a ticket child installed is there. List the install command under `setup:` (same shape as `checks:`, same allowlist), and `/review` runs it there first; a failed setup is a failed check. A check that fails for want of a tool ("command not found", a missing package) gets a hint to that effect.
+`/ship` reviews whatever is on the current branch and, on a pass, publishes it. It works after `/build`, after ad-hoc fixes made in the chat, with uncommitted edits, and with no task at all (an ad-hoc branch; the report goes under `.pi-workflows/reports/` and spend under task `session`).
 
-After the deterministic pass, a review-tier model (the same choice `/route` shows for review: premium for sensitive work, standard otherwise) reads the plan and the integrated diff and returns findings for a person to judge: severity, category, file, message, evidence. A diff larger than `review.maxDiffChars` (default 120,000 characters) is split at file boundaries and reviewed in parts, one call each, up to `review.maxChunks` (default 6); each call stops at `review.timeoutMs` (default 5 minutes). The model is told it has no tools and must judge what it is given. Findings are ledgered with reason `model review` and budget-gated. They never change `passed`: policy stays deterministic, the model advises. `review.model: false` turns the pass off.
+- **Branch and base.** The base is the build's recorded base, else the default branch. On the base branch with only uncommitted changes, it creates `<branchPrefix>/ship-<timestamp>` (or the task id) and carries them over. On the base branch with local commits it does not have on `origin`, it refuses and says how to move them to a branch. With nothing changed it stops.
+- **Review**, in the repo root against the merge-base with the base, so built commits, ad-hoc commits, and uncommitted edits are all in the diff: `setup`, then the checks (`config.checks`, else the plan's ticket checks), then a static scan (secrets, auth bypass, `eval`, TODO/FIXME), then an advisory model pass.
+- **Verdict.** `passed` is true only when at least one check ran, every check exited 0, and the scan found nothing blocking. The model pass (the review-tier model, same choice `/route` shows for review) reads the plan and the diff and returns findings for a person to judge. A diff over `review.maxDiffChars` (120,000) is split at file boundaries into up to `review.maxChunks` (6) calls, each stopping at `review.timeoutMs` (5 minutes). Findings are ledgered with reason `model review`, budget-gated, and never change `passed`. `review.model: false` turns the pass off.
+- **Chat trail.** A line per stage with elapsed time, then one block (also saved as `reports/ship.md` under the task): verdict, checks with durations and failure tails, static findings, model findings by severity, and what to do next. A check that failed for want of a tool gets a hint to list the install under `setup:`.
+- **On a pass**, `/ship` asks you to confirm (`approvals.publish` stays `required` unless your user config says `auto`), commits any uncommitted changes, pushes the branch, and opens or updates one pull request against the recorded base. The body holds the plan summary, the tickets with their status, the checks, and the finding counts. The task becomes `PUBLISHED`. It does not merge.
+- **On a fail**, it reports and pushes nothing. Fix in chat, then `/ship` again. Run `/ship` again after more changes to update the same pull request.
 
-While `/review` runs, the chat gets a line per stage: the static scan, each setup step and check as it starts and ends (with duration), the static finding counts, each model call, and the model pass total. The result is one block (also written to `reports/review.md`): the verdict and elapsed time, the checks with durations and failure tails, the static findings, the model's findings sorted by severity with file and evidence, and what to do next.
+### Other commands
 
-`/push` requires that review and a publish confirmation. It pushes the integration branch and opens or updates one pull request through `gh`. It does not merge.
-
-`/route <task>` previews tier, provider, and expected cost and writes nothing. `/status` shows phase, approval, worktrees, the PR, budget, and auth. `/cost`, `/cost json`, and `/cost csv` show the ledger. `/reset-phase` writes a manual handoff and resets context without deleting artifacts. `/worktrees status|list|cleanup` reconciles git worktrees, including orphans under the task's worktree directory that the state does not record. Cleanup of unmerged work asks first, and it refuses while a PR is active.
+`/route <task>` previews tier, provider, and expected cost and writes nothing. `/status` shows phase, approval, the build branch and ticket progress, the PR, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
 
 ## Cost
 
@@ -480,13 +497,13 @@ Every model call the workflow records goes to `.pi-workflows/cost/ledger.jsonl`:
 
 Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. A deterministic step that made no model call is a known zero.
 
-Budgets in the sample (`taskUsd: 20`, `autopilotPrUsd: 10`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are not added in as zero.
+Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are not added in as zero.
 
 `/cost` also names models seen in the ledger that have no pricing row: their spend is unknown and estimated at the provider's dearest row for its current billing (subscription rows while on account login), which keeps the budget "soft", so add a row for each. Failures before any model request (a git error, a plan cycle) are ledgered as a known $0 and do not count against the model, and the classifier never calls a provider that is not signed in (keywords are used instead).
 
 `/cost json` is the dashboard source. `compareBaseline` in `src/cost/ledger.ts` diffs this workflow against a Cursor Auto sample you supply (cost per merged PR, time to merge-ready, success rate, retries, regressions, interventions). The repo does not invent a Cursor Auto number.
 
-Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. Implementation starts at the cheapest proven tier, or at deterministic for mechanical work, and escalates at most `maxEscalations` times (default 2), never past `maxTier`. The classifier tier is for decisions, so a failed deterministic step escalates to `cheap`, not to the classifier. Three failures and zero successes in a task class open the circuit breaker.
+Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at the cheapest proven tier, or at deterministic for mechanical work, and escalates at most `maxEscalations` times (default 2), never past `maxTier`. The classifier tier is for decisions, so a failed deterministic step escalates to `cheap`, not to the classifier. Three failures and zero successes in a task class open the circuit breaker.
 
 ## Web tools
 
@@ -495,58 +512,50 @@ The extension registers two tools for the model to call.
 - `web_search` runs Anthropic's server-side `web_search_20250305` tool through Claude Haiku 5.5 (`claude-haiku-5-5`), using your Anthropic account login (`/login anthropic`). API keys are not accepted. It is refused when the task or daily budget is exhausted. Each call is written to the cost ledger (tier `web_search`, no query text) and the status line shows `anthropic/claude-haiku-5-5 · web_search`. Anthropic's per-search fee is not priced: `pricing:` rows only hold token prices, so only token cost is computed.
 - `web_fetch` runs locally. It fetches public http(s) pages only (private, loopback, and link-local addresses are refused), converts HTML to markdown, and caps response size, redirects, and time. See `src/tools/web-fetch.ts` for the exact limits.
 
-## Autopilot safety
-
-`/autopilot` runs inside the Pi process. Each cycle refreshes the head SHA, review threads, and checks. It dedupes by comment or check id plus SHA. Actionable items get one bounded fix and a reply only when the fix was verified. Informational notes are ignored. Ambiguous comments, security comments, and out-of-scope requests pause for a person. A force-push or a base change stops the watcher.
-
-`MERGE_READY` requires completed successful checks, an approval, a mergeable branch, branch protection, and no unresolved actionable thread. The reason string says the PR was not merged. There is no merge method on the GitHub client. `autoMerge: true` cannot be configured.
-
-Limits: `maxFixCycles` (5), `budgets.autopilotPrUsd`, `maxRuntimeMs`, and exponential backoff. The next poll is a `setTimeout` of `pollSeconds` (90) or the backoff, cleared by `/autopilot stop` and by Pi `session_shutdown`. Killing Pi stops the timer. The cursor remains in the task state, so the next `/autopilot` continues without repeating a reply for the same thread and SHA.
-
 ## Recovery
 
-Task state is `state.json` plus an append-only `events.jsonl`. On startup the store rebuilds from the log if the snapshot is missing or torn, then rewrites the snapshot. Writes go through a temp file and rename, under a lock file. A reset never deletes `plan.md`, the approved snapshot, handoffs, or reports.
+Task state is `state.json` plus an append-only `events.jsonl`. On startup the store rebuilds from the log if the snapshot is missing or torn, then rewrites the snapshot. Writes go through a temp file and rename, under a lock file. Nothing here deletes `plan.md`, the approved snapshot, or reports.
 
-Worktrees are normal git worktrees. After a crash, `/worktrees list` reconciles them with `git worktree list`. `/worktrees cleanup` removes only merged or abandoned trees (groups a later plan version dropped are marked abandoned, and orphan trees no state records are removed too), and it asks before deleting unmerged work. A new plan version restarts attempts and keeps only the ticket runs whose group survives with the same text (title, what to build, implementation, criteria, checks, files, blockers), so a stale `done` never skips a new or revised ticket; a revised ticket runs again in its existing worktree and its child is told to build on the earlier commits. The integration branch is rebuilt from the base on each run. It will not delete a tree while the PR is `PUBLISHED`, `AUTOPILOT`, `MERGE_READY`, or waiting for publish approval.
-
-A failed check escalates within the cap and records the unknown or known charge. A conflict leaves the integration merge aborted. An expired login pauses. Rate-limit and outage errors from the Foundry and local clients surface as provider errors and do not rewrite policy.
+- **Esc during `/build`.** The build stops after the current turn. The ticket stays in progress and nothing is committed. Run `/build` to continue.
+- **A failed ticket.** `/build` stops and says why. Fix it in the chat (the working tree keeps the failed attempt), then run `/build`: the checks run again, and if they pass your fix is committed and the build goes on. If you change nothing, the ticket goes to a model one tier up. A new plan version keeps the runs of tickets whose text is unchanged and builds the rest again.
+- **A failed `/ship`.** Fix the failing check or finding in the chat, then run `/ship` again. Nothing was committed or pushed by the failed run.
+- **A crash or closed Pi.** Commits already made stay on the branch. `/build` resumes from the first ticket that is not done. It needs you on the recorded branch, and says which `git switch` to run if you are not.
+- **An expired login** pauses the task. Rate-limit and outage errors from the Foundry and local clients surface as provider errors and do not rewrite policy.
+- **Old task files** that still have worktree, integration, or autopilot fields, or a retired phase, still load; those fields are ignored.
 
 ## Commands
 
 | Command | Effect |
 |---|---|
-| `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a draft plan. No edits |
-| `/show-plan` | Show the full plan (technical spec and tickets) |
-| `/approve-plan` | Review the full plan, then freeze a version and reset context, or request changes |
-| `/implement` | Approved plan only. Worktrees, tests, handoff |
-| `/review` | Independent diff and checks |
-| `/push` | Branch, commit is already on the integration branch, push, open or update the PR |
-| `/autopilot [stop\|status]` | One watch cycle, then a local poll |
+| `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits |
+| `/show-plan` | Show the full plan. A draft opens the review so you can approve it |
+| `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then a commit, on one branch. Run again to resume |
+| `/ship` | Review the branch (setup, checks, static scan, advisory model pass). On a pass and your confirm: commit leftovers, push, open or update the PR |
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
-| `/status` | Phase, auth, worktrees, budget |
-| `/reset-phase` | Handoff and context reset. Files stay |
-| `/worktrees status\|list\|cleanup` | Reconcile or clean trees |
+| `/status` | Phase, build progress, PR, auth, budget |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
+| `/cost-help` | List the commands |
 
-`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/autopilot`, `/cost`, and `/worktrees`.
+`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, and `/plan`.
 
-Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → REVIEWING → AWAITING_PUBLISH_APPROVAL → PUBLISHED → AUTOPILOT → MERGE_READY → COMPLETE`. Fixes return to `IMPLEMENTING`. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes implementation on its own.
+Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → PUBLISHED → COMPLETE`. `/build` on a `PUBLISHED` task (more tickets for the same PR) returns it to `IMPLEMENTING`, and `/ship` returns it to `PUBLISHED`. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
 
 ## Layout
 
 ```text
-src/extension.ts          Pi commands and the virtual model cost-opt/auto
-src/orchestrator/         state machine, plans, workflow
+src/extension.ts          Pi commands, the virtual model cost-opt/auto, and the /build session driver
+src/commands.ts           the command table
+src/orchestrator/         state machine, plans, workflow; build.ts (/build), ship.ts (/ship)
 src/providers/            account-login gate, Foundry, Vercel, Decisions client, Pi registry chat
 src/router/               classifier schema, policy, and per-tier candidate selector
-src/agents/               worker pool
-src/review/               diff and check evidence
-src/github/               gh client and autopilot cycle
-src/cost/                 ledger, budgets, baseline compare
+src/review/               static scan, checks, and the advisory model pass
+src/github/               gh client
+src/cost/                 ledger, budgets, quota, baseline compare
 src/storage/              lock, journal, snapshots
-src/git/                  worktrees
+src/git/workspace.ts      branch, diff, commit, and push helpers for the checkout
+src/tools/                web_search, web_fetch, and the plan tools
 bin/init.mjs              npx setup: pi install, sample config, .gitignore
 tests/                    unit and integration, mocks only
 ```
@@ -560,19 +569,19 @@ Artifacts for a task:
   plan.vN.approved.json
   state.json
   events.jsonl
-  handoffs/
+  tickets/
+  spec.md
+  interview.json
   reports/
 ```
 
 ## Limitations
 
 - No paid provider call is made by the tests. OpenAI and Anthropic transports throw unless a test injects one. Account login is verified by reading Pi 1.2.0's provider objects, not by completing a prompt.
-- The autopilot poll does not outlive the Pi process. There is no detached daemon.
+- The `/build` loop (a fresh Pi session per ticket, the model set through `session_start`, waiting for each run to finish, Esc while the command waits) is tested with fakes only. It has not been run against a live Pi. If it deadlocks there, the fallback is one ticket per `/build`.
+- `/build` runs the model in your checkout with Pi's normal tools, not in a sandbox or worktree. The `git push` and branch-switch block during a ticket is a hook on Pi's `bash` tool, and shell can hide a command from it, so review the diff. Tickets run one at a time, never in parallel.
 - Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked unless the user config sets `apiKeyFallback` for that provider.
-- Ticket children never pick a provider that is not signed in: when no model in the chosen tier is usable, the ticket moves up a tier instead of failing on a login error.
-- The ticket child's bash hook is defense in depth, not a boundary: it normalizes wrappers (`env`, `command`, `sudo`, `nohup`, ...), looks inside `sh -c` and `eval`, and refuses `git push` and `gh` writes, but shell can always hide a command (a script file, an alias, an encoded string). The real controls are (a) an environment allowlist, so the child never sees `GITHUB_TOKEN`, `GH_TOKEN`, `*_TOKEN`, `*_KEY`, `*_SECRET`, `AWS_*`, `VERCEL_OIDC_TOKEN`, `ANTHROPIC_*`, or `OPENAI_*`, and (b) git config injected through `GIT_CONFIG_COUNT` that disables pushing for every remote and any URL, turns credential helpers and hooks off, and sets `GIT_TERMINAL_PROMPT=0`. A child can still use credentials stored in files under your home directory (for example `~/.ssh` or a `gh` config file) for non-git tools, so run tickets from an account that holds nothing you would not give the model.
-- Ticket children run in their own process group. They are stopped with SIGTERM then SIGKILL on cancel, deadline, a budget stop, `session_shutdown`, and Pi exiting. A running child's spend is tracked as its messages arrive, and every concurrent child is stopped when ledger plus in-flight spend passes the task or daily limit (the overshoot is at most one model call).
-- Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). It is not a full allowlist of every other command, because that would break the host agent. Worker checks are allowlisted.
-- `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands. In `/implement`, groups with literal `edits` apply exactly those edits; only groups without them are written by the selected model. The worker pool does not spawn further agents.
-- The `gh` client is argument-array `gh` with no shell. Tests use an in-memory GitHub client. A live `gh auth status` is still required before `/push` against GitHub.
-- Context reset uses `newSession` from a command, then `compact` if that throws. Both leave the files in `.pi-workflows`. Whether the new session is empty of the old transcript depends on Pi; the handoff file is the durable copy.
+- Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). Other commands are not restricted, because that would break the host agent. Checks and setup run any non-destructive command. While `/plan` runs, bash is limited to a read-only allowlist.
+- `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands.
+- The `gh` client is argument-array `gh` with no shell. Tests use an in-memory GitHub client. A live `gh auth status` is still required before `/ship` against GitHub. Merge is always manual; the client has no merge method.
+- A plan made only of literal edits (a ```` ```tasks ```` block) has no tickets, so `/build` cannot run it.

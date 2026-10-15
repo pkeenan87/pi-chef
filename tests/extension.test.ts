@@ -7,7 +7,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
-import { emptyPr, fakeTimer, MemoryGitHub, permissiveRegistry, publishedWorkflow, tempRepo } from "./helpers.js";
+import { emptyPr, MemoryGitHub, permissiveRegistry, publishedWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -28,6 +28,8 @@ describe("pi extension surface", () => {
     for (const spec of COMMANDS) {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
+    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "ship", "route", "advisor", "cost", "status", "auth"]);
+    expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "cost-help"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");
     expect(completions?.map((item) => item.value)).toContain("anthropic");
@@ -48,6 +50,8 @@ describe("pi extension surface", () => {
   function fakePi() {
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
     const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const setModelCalls: { provider: string; id: string }[] = [];
+    const onSetModel: { run?: (model: { provider: string; id: string }) => void } = {};
     let virtual: { route: (request: unknown, ctx: unknown) => Promise<{ model: { provider: string; id: string } }> } | undefined;
     const pi = {
       registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
@@ -61,18 +65,22 @@ describe("pi extension surface", () => {
       registerVirtualModel(model: typeof virtual) {
         virtual = model;
       },
+      async setModel(model: { provider: string; id: string }) {
+        setModelCalls.push(model);
+        onSetModel.run?.(model);
+        return true;
+      },
     };
     registerWorkflow(pi as unknown as ExtensionAPI);
-    return { commands, handlers, route: () => virtual! };
+    return { commands, handlers, route: () => virtual!, setModelCalls, onSetModel };
   }
 
   const registry = permissiveRegistry();
   const user = (content: string) => ({ role: "user", content });
 
-  it("keeps one workflow across commands so /autopilot stop reaches the live timer", async () => {
-    const timer = fakeTimer();
+  it("keeps one workflow across commands", async () => {
     const github = new MemoryGitHub(emptyPr());
-    const { app, cwd } = await publishedWorkflow({ schedule: timer.schedule }, github);
+    const { app, cwd } = await publishedWorkflow({}, github);
     const { commands } = fakePi();
     bindWorkflow(app);
     const ctx = {
@@ -82,13 +90,10 @@ describe("pi extension surface", () => {
       newSession: async () => ({ cancelled: false }),
       compact() {},
     };
-    await commands.get("autopilot")!.handler("", ctx);
+    await commands.get("status")!.handler("", ctx);
     expect(currentWorkflow()).toBe(app);
-    expect(timer.state.delays).toHaveLength(1);
-    await commands.get("autopilot")!.handler("stop", ctx);
+    await commands.get("cost")!.handler("", ctx);
     expect(currentWorkflow()).toBe(app);
-    expect(timer.state.cancelled).toBe(1);
-    expect(timer.state.pending).toBeUndefined();
     bindWorkflow(undefined);
   });
 
@@ -136,6 +141,122 @@ describe("pi extension surface", () => {
       requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     await expect(route().route({ reason: "user", messages: [user("add a retry counter")] }, ctx)).rejects.toThrow(/budget/i);
+    bindWorkflow(undefined);
+  });
+
+  it("drives /build through fresh sessions: model slot, newSession on the live ctx, last text, and the user's model put back", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01", { suggestedTier: "standard" }), sampleTicket("02", { suggestedTier: "standard", blockedBy: ["01"] })]);
+    const { commands, handlers, setModelCalls, onSetModel } = fakePi();
+    bindWorkflow(app);
+    const slot = Symbol.for("pi-cost-router.restore-model");
+    const original = { provider: "cost-opt", id: "auto" };
+    const registryFor = { find: (provider: string, id: string) => ({ provider, id }), isUsingOAuth: () => true, getAvailable: () => [] };
+    const log: string[] = [];
+    const notices: string[] = [];
+    const bashHook = (command: string) => handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "t", input: { command } }, {});
+    let sessions = 0;
+    let current: Record<string, unknown> | undefined;
+    const sessionCtx = (opener: string): Record<string, unknown> => {
+      const ctx: Record<string, unknown> = {
+        cwd,
+        hasUI: true,
+        model: { provider: "default", id: "model" },
+        modelRegistry: registryFor,
+        ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+        async sendMessage() {},
+        async sendUserMessage(text: string) {
+          const ticket = text.match(/^# Ticket (\d+):/m)![1]!;
+          log.push(`send ${ticket} on ${(ctx.model as { id: string }).id} via ${opener}`);
+          // The hook sees the running ticket and refuses a push or a branch move, but not ordinary commands.
+          expect(await bashHook("git push origin HEAD")).toMatchObject({ block: true, reason: expect.stringContaining("/build commits and ships") });
+          expect(await bashHook("git switch main")).toMatchObject({ block: true });
+          expect(await bashHook("npm test")).toBeUndefined();
+          writeFileSync(path.join(cwd, `f${ticket}.txt`), "x\n");
+          handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `Done ${ticket}.\n- [x] retry works` }], provider: "foundry", model: "grok-4-7", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, {});
+        },
+        async waitForIdle() {
+          log.push("idle");
+          handlers.get("agent_settled")!({ type: "agent_settled", aborted: false }, {});
+        },
+        async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
+          sessions += 1;
+          const next = sessionCtx(`session ${sessions}`);
+          // Pi starts the session on its default model; session_start puts the routed one back.
+          onSetModel.run = (model) => {
+            next.model = model;
+          };
+          expect((globalThis as Record<symbol, unknown>)[slot]).toMatchObject({ provider: "foundry", id: "grok-4-7" });
+          handlers.get("session_start")!({}, next);
+          current = next;
+          await options?.withSession?.(next);
+          return { cancelled: false };
+        },
+        compact() {},
+      };
+      return ctx;
+    };
+    const first = sessionCtx("command");
+    first.model = original;
+    await commands.get("build")!.handler("", first);
+    expect(log).toEqual(["send 01 on grok-4-7 via session 1", "idle", "send 02 on grok-4-7 via session 2", "idle"]);
+    expect(sessions).toBe(2);
+    expect(setModelCalls.map((model) => model.id)).toEqual(["grok-4-7", "grok-4-7", "auto"]);
+    expect(current!.model).toEqual(original);
+    expect((globalThis as Record<symbol, unknown>)[slot]).toBeUndefined();
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(Object.values(state.ticketRuns!).map((run) => run.status)).toEqual(["done", "done"]);
+    expect(state.ticketRuns!["01"]!.summary).toContain("Done 01.");
+    expect(app.store.readLedger().filter((item) => item.reason.endsWith(" · ticket 02"))).toHaveLength(1);
+    // Outside a chunk the branch hook is quiet again.
+    expect(await bashHook("git switch main")).toBeUndefined();
+    expect(notices.some((text) => text.includes("Built 2 ticket(s)"))).toBe(true);
+    bindWorkflow(undefined);
+  });
+
+  it("stops /build with a clear message when Pi cancels the new session", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+    const { commands } = fakePi();
+    bindWorkflow(app);
+    const notices: string[] = [];
+    await commands.get("build")!.handler("", {
+      cwd,
+      hasUI: true,
+      model: { provider: "cost-opt", id: "auto" },
+      modelRegistry: { find: () => undefined },
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      newSession: async () => ({ cancelled: true }),
+      compact() {},
+    });
+    expect(notices.join("\n")).toContain("did not open a new session");
+    expect(app.store.load(app.activeTaskId()!)!.build!.currentTicket).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("treats an aborted run as a stop and leaves the ticket in progress", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01"), sampleTicket("02", { blockedBy: ["01"] })]);
+    const { commands, handlers } = fakePi();
+    bindWorkflow(app);
+    const make = (): Record<string, unknown> => ({
+      cwd,
+      hasUI: true,
+      model: { provider: "foundry", id: "grok-4-7" },
+      modelRegistry: { find: () => undefined },
+      ui: { notify() {}, setStatus() {}, confirm: async () => true },
+      async sendMessage() {},
+      async sendUserMessage() {},
+      async waitForIdle() {
+        handlers.get("agent_settled")!({ type: "agent_settled", aborted: true }, {});
+      },
+      async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
+        await options?.withSession?.(make());
+        return { cancelled: false };
+      },
+      compact() {},
+    });
+    await commands.get("build")!.handler("", { ...make(), model: undefined });
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(state.ticketRuns!["01"]!.status).toBe("in-progress");
+    expect(state.ticketRuns!["02"]).toBeUndefined();
     bindWorkflow(undefined);
   });
 

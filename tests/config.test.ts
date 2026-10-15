@@ -30,11 +30,6 @@ describe("parseConfig validation", () => {
     ["routing:\n  maxEscalations: -1\n", /routing\.maxEscalations/],
     ["routing:\n  maxEscalations: 1.5\n", /routing\.maxEscalations/],
     ["routing:\n  maxTier: ultra\n", /routing\.maxTier/],
-    ["workers:\n  concurrency: 0\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: 1.5\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: .nan\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: .inf\n", /workers\.concurrency/],
-    ["workers:\n  concurrency: two\n", /workers\.concurrency/],
     ["budgets:\n  taskUsd: 0\n", /budgets\.taskUsd/],
     ["budgets:\n  dailyUsd: -5\n", /budgets\.dailyUsd/],
     ["budgets:\n  softWarningRatio: 2\n", /budgets\.softWarningRatio/],
@@ -42,7 +37,6 @@ describe("parseConfig validation", () => {
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-01-01', inputPerMillionUsd: -1, outputPerMillionUsd: 1 }\n", /inputPerMillionUsd/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: 'soon', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-02-30', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],
-    ["commandAllowlist: npm test\n", /commandAllowlist/],
     ["orgProviderAllowlist: [mars]\n", /orgProviderAllowlist/],
   ])("rejects %j", (yaml, message) => {
     expect(() => parseConfig(yaml)).toThrow(message);
@@ -63,7 +57,7 @@ describe("parseConfig validation", () => {
 models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0, maxEscalations: 0, maxTier: standard }
 budgets: { softWarningRatio: 1 }
-workers: { concurrency: 1 }
+workers: { tokenBudget: 1 }
 pricing:
   - { provider: local, model: m, effectiveFrom: 2026-01-05, inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
 `);
@@ -77,7 +71,7 @@ pricing:
     process.env.HOME = mkdtempSync(path.join(tmpdir(), "pi-home-"));
     try {
       const config = loadConfig(path.resolve(__dirname, ".."));
-      expect(config.commandAllowlist).toContain("npm test");
+      expect(config.warnings ?? []).toEqual([]);
     } finally {
       process.env.HOME = prior;
     }
@@ -110,19 +104,50 @@ describe("loadConfig layering", () => {
 
   const base = `${PROVIDERS_BLOCK}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`;
 
-  it("project cannot widen user commandAllowlist, only narrow it", () => {
-    writeUser(`${base}commandAllowlist: ["npm test", "npx vitest *"]\n`);
-    writeProject("commandAllowlist: [\"npm test\", \"rm -rf /\", \"npx vitest run\", \"npx vitest *\", \"git status\"]\n");
-    expect(loadConfig(project).commandAllowlist).toEqual(["npm test", "npx vitest run", "npx vitest *"]);
+  it("an old commandAllowlist key loads with a warning, from either file", () => {
+    writeUser(`${base}commandAllowlist: ["npm test"]\n`);
+    writeProject("routing: { maxEscalations: 1 }\n");
+    const fromUser = loadConfig(project);
+    expect(fromUser.warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
+    expect("commandAllowlist" in fromUser).toBe(false);
+    writeUser(base);
+    writeProject('commandAllowlist: ["npm test", "curl *"]\n');
+    expect(loadConfig(project).warnings).toContain("commandAllowlist is no longer used; checks run any non-destructive command.");
   });
 
-  it("project allowlist applies when user defines none, and user list stands when project has none", () => {
-    writeUser(base);
-    writeProject('commandAllowlist: ["npm test"]\n');
-    expect(loadConfig(project).commandAllowlist).toEqual(["npm test"]);
-    writeUser(`${base}commandAllowlist: ["git status"]\n`);
+  it("an old autopilot section and budgets.autopilotPrUsd load with warnings; merge stays manual", () => {
+    writeUser(`${base}autopilot: { pollSeconds: 90, autoMerge: true }\nbudgets: { taskUsd: 5, autopilotPrUsd: 10 }\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
-    expect(loadConfig(project).commandAllowlist).toEqual(["git status"]);
+    const config = loadConfig(project);
+    expect(config.warnings).toContain("autopilot is no longer used; merge stays manual.");
+    expect(config.warnings).toContain("budgets.autopilotPrUsd is no longer used.");
+    expect("autopilot" in config).toBe(false);
+    expect("autopilotPrUsd" in config.budgets).toBe(false);
+    expect(config.approvals.merge).toBe("manual");
+  });
+
+  it("old worktrees and worker pool keys load with one warning each and do not fail", () => {
+    writeUser(`${base}worktrees: { strategy: per-independent-task, integrationBranch: true }\nworkers: { concurrency: 4, deadlineMs: 5000, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 1000 }\n`);
+    writeProject("routing: { maxEscalations: 1 }\n");
+    const config = loadConfig(project);
+    expect(config.warnings).toContain("worktrees is no longer used.");
+    expect(config.warnings?.find((item) => item.startsWith("workers."))).toBe("workers.concurrency/deadlineMs/isolatedWorktrees/preserveUntilReviewed are no longer used (only workers.tokenBudget and workers.ticketContextTokens remain).");
+    expect(config.workers).toEqual({ tokenBudget: 1000, ticketContextTokens: 150000 });
+    expect("worktrees" in config).toBe(false);
+    expect(config.branchPrefix).toBe("cost");
+  });
+
+  it("branchPrefix is a top-level key; an old worktrees.branchPrefix is honored only while it is unset", () => {
+    writeUser(`${base}worktrees: { branchPrefix: legacy }\n`);
+    const old = loadConfig(project);
+    expect(old.branchPrefix).toBe("legacy");
+    expect(old.warnings?.join("\n")).toMatch(/worktrees\.branchPrefix is honored as branchPrefix/);
+    writeUser(`${base}worktrees: { branchPrefix: legacy }\nbranchPrefix: team\n`);
+    expect(loadConfig(project).branchPrefix).toBe("team");
+    writeProject("branchPrefix: feat\n");
+    expect(loadConfig(project).branchPrefix).toBe("feat");
+    writeProject("branchPrefix: '--bad'\n");
+    expect(() => loadConfig(project)).toThrow(/branchPrefix/);
   });
 
   it("user org allowlist and proprietaryCode win", () => {
@@ -142,15 +167,14 @@ describe("loadConfig layering", () => {
   });
 
   it("deep-merges sections, takes min budgets, and never lets the project relax approvals", () => {
-    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { concurrency: 4, tokenBudget: 1000 }\n`);
-    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { concurrency: 1 }\napprovals: { publish: auto }\n");
+    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
+    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { publish: auto }\n");
     const config = loadConfig(project);
     expect(config.routing.minConfidence).toBe(0.9);
     expect(config.routing.maxEscalations).toBe(1);
     expect(config.budgets.taskUsd).toBe(5);
     expect(config.budgets.dailyUsd).toBe(10);
-    expect(config.budgets.autopilotPrUsd).toBe(10);
-    expect(config.workers.concurrency).toBe(1);
+    expect(config.workers.ticketContextTokens).toBe(60000);
     expect(config.workers.tokenBudget).toBe(1000);
     expect(config.approvals.publish).toBe("required");
     expect(config.approvals.merge).toBe("manual");
@@ -230,14 +254,6 @@ models: { classifier: local, cheap: local, standard: local, premium: local }
     expect(() => parseConfig(p('baseUrl: "http://127.0.0.1:11434/v1"', "local"))).not.toThrow();
     expect(() => parseConfig(p('baseUrl: "http://example.com/v1"', "vercel"))).toThrow(/baseUrl/);
     expect(() => parseConfig(p('apiKeyEnv: "X; rm -rf /"', "local"))).toThrow(/apiKeyEnv/);
-  });
-
-  it("S3: without a user list, the project commandAllowlist is intersected with the built-in defaults", () => {
-    writeUser(base);
-    writeProject('commandAllowlist: ["npm test", "curl *", "bash -c *", "npx vitest run foo"]\n');
-    const config = loadConfig(project);
-    expect(config.commandAllowlist).toEqual(["npm test", "npx vitest run foo"]);
-    expect(config.warnings?.join("\n")).toMatch(/curl \*, bash -c \*/);
   });
 
   it("S3: an empty user orgProviderAllowlist lets a project list only restrict", () => {

@@ -95,7 +95,7 @@ export function renderPlan(plan: PlanDocument): string {
   for (const group of plan.groups) {
     lines.push("", `### ${group.id}`, group.summary, `Files: ${group.files.join(", ") || "(none)"}`, `Depends on: ${group.dependsOn.join(", ") || "(none)"}`);
   }
-  lines.push("", "This draft does not edit the repository. Implementation waits for /approve-plan.");
+  lines.push("", "This draft does not edit the repository. Building waits for plan approval.");
   return `${lines.join("\n")}\n`;
 }
 
@@ -131,7 +131,7 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined): 
   }
   lines.push("", "## Execution order", "", ...order);
   if (plan.overlap.length > 0) lines.push("", `File overlap (serialized, not parallel): ${plan.overlap.join(", ")}`);
-  lines.push("", "## Policy", "", ...plan.risks.map((item) => `- ${item}`), "- This draft does not edit the repository. Implementation waits for /approve-plan.");
+  lines.push("", "## Policy", "", ...plan.risks.map((item) => `- ${item}`), "- This draft does not edit the repository. Building waits for plan approval.");
   return `${lines.join("\n")}\n`;
 }
 
@@ -147,29 +147,22 @@ export function materialChange(left: PlanDocument, right: PlanDocument): boolean
 
 /** Rejects duplicate group ids, missing dependencies, and cycles before any work starts. */
 /**
- * The run state a task carries into a new plan draft. Attempts start over. Worktrees of groups the new plan no longer
- * has are marked abandoned (kept on disk until /worktrees cleanup) and their ticket runs dropped, so a stale "done"
- * cannot skip a new ticket that reuses the id. Worktrees and runs of groups that survive are kept, so a re-approved
- * plan with the same tickets resumes instead of paying for them again. The integration branch is rebuilt on the next run.
+ * The run state a task carries into a new plan draft. Attempts start over. A ticket run survives only for a ticket that is
+ * the same work (`sameTicket`: same id and group, same text), so a re-approved plan with the same tickets resumes instead of
+ * paying for them again, and a stale "done" cannot skip a new ticket that reuses the id.
  */
-export function forNewPlan(task: TaskState, draft: PlanDocument): Pick<TaskState, "attempts" | "ticketRuns" | "worktrees" | "integration"> {
-  const groups = new Set(draft.groups.map((group) => group.id));
-  const worktrees = task.worktrees.map((item) => (groups.has(item.groupId) ? { ...item, abandoned: undefined } : { ...item, abandoned: true }));
-  const live = new Set(worktrees.filter((item) => !item.abandoned).map((item) => item.groupId));
+export function forNewPlan(task: TaskState, draft: PlanDocument): Pick<TaskState, "attempts" | "ticketRuns"> {
   const was = new Map((task.plan?.tickets ?? []).map((ticket) => [ticket.id, ticket]));
-  // A run survives only for a ticket that is the same work: same group and same text. A revised ticket runs again
-  // (in its existing worktree, building on the earlier commits).
   const kept = Object.entries(task.ticketRuns ?? {}).filter(([id]) => {
     const before = was.get(id);
     if (!before) return false;
-    const group = `${before.id}-${before.slug}`;
-    const after = (draft.tickets ?? []).find((ticket) => ticket.id === id && `${ticket.id}-${ticket.slug}` === group);
-    return after !== undefined && live.has(group) && sameTicket(before, after);
+    const after = (draft.tickets ?? []).find((ticket) => ticket.id === id && ticket.slug === before.slug);
+    return after !== undefined && sameTicket(before, after);
   });
-  return { attempts: [], ticketRuns: kept.length ? Object.fromEntries(kept) : undefined, worktrees, integration: undefined };
+  return { attempts: [], ticketRuns: kept.length ? Object.fromEntries(kept) : undefined };
 }
 
-/** True when two versions of a ticket ask for the same work (the fields a child acts on). */
+/** True when two versions of a ticket ask for the same work (the fields a build acts on). */
 export function sameTicket(a: Ticket, b: Ticket): boolean {
   const view = (ticket: Ticket) => JSON.stringify([ticket.title, ticket.whatToBuild, ticket.implementation ?? "", ticket.acceptanceCriteria, ticket.checks ?? [], ticket.files ?? [], ticket.blockedBy]);
   return view(a) === view(b);

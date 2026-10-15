@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { ProviderId } from "../src/domain.js";
+import type { ProviderId, Ticket } from "../src/domain.js";
+import { runBuild, type BuildDriver } from "../src/orchestrator/build.js";
 import { Workflow, type WorkflowOptions } from "../src/orchestrator/service.js";
 import type { CheckRunner } from "../src/review/review.js";
 import type { GitHubClient, PullRequestSnapshot } from "../src/github/types.js";
@@ -18,7 +19,7 @@ const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-cost-"));
-  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n");
+  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
   await exec("git", ["config", "user.email", "test@example.com"], { cwd });
@@ -41,8 +42,8 @@ providers:
   local: { type: openai-compatible, baseUrl: http://127.0.0.1:11434/v1, model: local-coder }
 models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0.75, maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
-workers: { concurrency: 2, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 8000, deadlineMs: 60000 }
-budgets: { taskUsd: 20, autopilotPrUsd: 10, dailyUsd: 75, softWarningRatio: 0.8 }
+workers: { tokenBudget: 8000 }
+budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 }
 checks:
   - name: unit
     command: npm
@@ -71,7 +72,6 @@ export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Wo
     confirm: async () => true,
     runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
     push: async () => undefined,
-    session: { async reset() { return { mode: "new-session", cancelled: false }; } },
     ...extras,
   });
 }
@@ -123,30 +123,32 @@ export function emptyPr(): PullRequestSnapshot {
   return { number: 0, url: "", branch: "", base: "main", headSha: "pending", baseSha: "base", mergeable: true, approved: false, protectionSatisfied: false, threads: [], checks: [] };
 }
 
-/** A fake timer: records every schedule() call and lets a test fire or inspect the pending callback. */
-export function fakeTimer() {
-  const state = { delays: [] as number[], cancelled: 0, pending: undefined as (() => void) | undefined };
-  const schedule = (delayMs: number, run: () => void) => {
-    state.delays.push(delayMs);
-    state.pending = run;
-    return () => {
-      state.cancelled += 1;
-      if (state.pending === run) state.pending = undefined;
-    };
+/** A build driver whose "session" writes `src/ingest.ts` into the checkout, like a model finishing a ticket. */
+export function writingDriver(cwd: string, files: Record<string, string> = { "src/ingest.ts": "export const ingest = 1;\n" }): BuildDriver {
+  return {
+    async fresh(_model, run) {
+      await run({
+        async send() {
+          for (const [name, body] of Object.entries(files)) {
+            mkdirSync(path.dirname(path.join(cwd, name)), { recursive: true });
+            writeFileSync(path.join(cwd, name), body);
+          }
+          return { lastText: "Done.\n- [x] retry works\nFiles changed: src/ingest.ts", aborted: false };
+        },
+      });
+    },
+    async finish() {},
   };
-  return { state, schedule };
 }
 
-/** Drives a one-group task through plan, approve, implement, review, and push. */
+/** Drives a one-ticket task through plan, approve, build, and ship. */
 export async function publishedWorkflow(extras: Partial<WorkflowOptions> = {}, github: MemoryGitHub = new MemoryGitHub(emptyPr())) {
   const cwd = await tempRepo();
-  const app = workflow(cwd, { github, ...extras });
-  await app.plan(singleTaskRequest);
-  await app.approvePlan();
-  if (!(await app.implement()).ok) throw new Error("implement failed in fixture");
-  if (!(await app.review()).ok) throw new Error("review failed in fixture");
-  const pushed = await app.push();
-  if (!pushed.ok) throw new Error(`push failed in fixture: ${pushed.text}`);
+  const { app } = await ticketWorkflow([sampleTicket("01")], { config: testConfig(), github, ...extras }, { cwd });
+  const built = await runBuild(() => app, writingDriver(cwd));
+  if (!built.ok) throw new Error(`build failed in fixture: ${built.text}`);
+  const shipped = await app.ship();
+  if (!shipped.ok) throw new Error(`ship failed in fixture: ${shipped.text}`);
   return { cwd, app, github };
 }
 
@@ -177,7 +179,7 @@ tiers:
   advisor:
     - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra }
-workers: { concurrency: 2, isolatedWorktrees: true, preserveUntilReviewed: true, tokenBudget: 8000, deadlineMs: 60000 }
+workers: { tokenBudget: 8000 }
 checks:
   - { name: unit, command: npm, args: ["test"] }
 pricing:
@@ -228,4 +230,21 @@ export function permissiveRegistry() {
     isUsingOAuth: () => true,
     getAvailable: () => seen,
   };
+}
+
+export function sampleTicket(id: string, extra: Partial<Ticket> = {}): Ticket {
+  return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: `Build part ${id}.`, acceptanceCriteria: ["retry works"], blockedBy: [], estimatedContextTokens: 40_000, ...extra };
+}
+
+export const sampleSpec = { summary: "Retry failed ingests.", context: "src/ingest.ts parses and drops failures.", approach: "Wrap parse() in retryParse() with a fixed backoff.", changes: [{ path: "src/ingest.ts", change: "add retryParse(input, attempts)" }], reuse: ["sleep() in src/util.ts"], verification: ["npm test"], decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: [], outOfScope: [], risks: [] };
+
+/** A workflow in a fresh repo with a ticket plan saved through the /plan tools and, unless `approve` is false, approved. */
+export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string } = {}) {
+  const cwd = options.cwd ?? (await tempRepo());
+  const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, ...extras });
+  if (!(await app.startPlan("Add retry to the Neo ingest parser")).ok) throw new Error("startPlan failed in fixture");
+  await app.savePlanSpec(sampleSpec);
+  await app.commitTickets(tickets);
+  if (options.approve !== false && !(await app.approveDraft()).ok) throw new Error("approveDraft failed in fixture");
+  return { cwd, app, taskId: app.activeTaskId()! };
 }

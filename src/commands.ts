@@ -1,10 +1,14 @@
 import type { CommandResult } from "./domain.js";
+import { fail } from "./orchestrator/context.js";
+import { runBuild, type BuildDriver } from "./orchestrator/build.js";
 import type { Workflow } from "./orchestrator/service.js";
 
 export interface CommandSpec {
   name: string;
   /** Runs the command against a workflow. `confirm` asks the person (always false without a UI). */
   run: (workflow: Workflow, args: string, confirm: (title: string, message: string) => Promise<boolean>) => Promise<CommandResult>;
+  /** For commands that open Pi sessions: the host passes the live workflow getter and a session driver, and `run` is not used. */
+  drive?: (getWorkflow: () => Workflow, driver: BuildDriver) => Promise<CommandResult>;
   description: string;
   complete: (prefix: string) => { label: string; value: string }[];
 }
@@ -21,29 +25,17 @@ export const COMMANDS: CommandSpec[] = [
     complete: (prefix) => completeWords(prefix, ["--no-questions"]),
   },
   { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets).", complete: () => [] },
-  { name: "approve-plan", run: (w) => w.approvePlan(), description: "Review the full plan, then approve it (freezes an immutable version) or request changes.", complete: () => [] },
-  { name: "implement", run: (w) => w.implement(), description: "Run an approved plan in isolated worktrees. Refuses a draft.", complete: () => [] },
-  { name: "review", run: (w) => w.review(), description: "Review each worktree and the integrated diff in a fresh context.", complete: () => [] },
-  { name: "push", run: (w) => w.push(), description: "After checks and approval, push the integration branch and open or update one PR.", complete: () => [] },
   {
-    name: "autopilot", run: (w, args) => w.autopilot(args),
-    description: "Watch the PR locally: bounded verified fixes, no auto-merge. Subcommands: stop, status.",
-    complete: (prefix) => completeWords(prefix, ["stop", "status"]),
+    name: "build", run: async () => fail("NO_SESSION", "/build needs a Pi session to open a fresh session per ticket."),
+    drive: (getWorkflow, driver) => runBuild(getWorkflow, driver),
+    description: "Build the approved plan one ticket at a time in fresh sessions on one branch: routed model per ticket, checks, a commit each. Run again to resume.",
+    complete: () => [],
   },
-  { name: "complete", run: (w) => w.complete(), description: "Mark the published task complete (after its PR is merged) so a new task can start.", complete: () => [] },
+  { name: "ship", run: (w) => w.ship(), description: "Review the branch (checks, static scan, advisory model pass) and, on a pass, commit leftovers, push, and open or update the PR. Works for /build output and ad-hoc fixes.", complete: () => [] },
   { name: "route", run: (w, args) => w.route(args), description: "Preview provider, tier, and cost for a task without changing state.", complete: () => [] },
   { name: "advisor", run: (w, args) => w.advisor(args), description: "Ask the advisor tier (Claude Fable or GPT Astra) one question about the active task. Costs money, runs only when you ask, never changes the phase.", complete: () => [] },
   { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by phase, provider, model, and task against budgets.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
-  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, auth, worktrees, and budget.", complete: () => [] },
-  { name: "reset-phase", run: (w) => w.resetPhase(), description: "Compact or open a fresh session while keeping durable task files.", complete: () => [] },
-  {
-    name: "worktrees", run: async (w, args, confirm) => {
-      const confirmed = args.includes("confirm") ? await confirm("Clean worktrees", "Delete unmerged worktrees that are not part of an active PR?") : false;
-      return w.worktrees(args.replace(/\s*confirm\s*/g, " ").trim(), confirmed);
-    },
-    description: "List worktrees or clean up merged and abandoned ones. Cleanup asks before deleting unmerged work.",
-    complete: (prefix) => completeWords(prefix, ["status", "list", "cleanup"]),
-  },
+  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, build branch and ticket progress, PR, auth, and budget.", complete: () => [] },
   {
     name: "auth", run: (w, args) => w.auth(args),
     description: "Show account-login status, or explain /login for a provider. API keys are not accepted.",

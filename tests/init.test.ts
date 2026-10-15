@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const exec = promisify(execFile);
 const script = path.resolve("bin/init.mjs");
-const GITIGNORE_COUNT = 8;
+const GITIGNORE_COUNT = 7;
 
 function project(): string {
   return mkdtempSync(path.join(tmpdir(), "pi-cost-init-"));
@@ -46,7 +46,7 @@ describe("pi-cost-init", () => {
     expect(path.basename(ranIn)).toBe(path.basename(cwd));
     expect(readFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "utf8")).toBe(readFileSync(".pi-workflows/config.yaml", "utf8"));
     const ignore = readFileSync(path.join(cwd, ".gitignore"), "utf8");
-    expect(ignore).toContain(".pi-workflows/worktrees/");
+    expect(ignore).toContain(".pi-workflows/reports/");
     expect(ignore).toContain(".pi-workflows/*.local.yaml");
   });
 

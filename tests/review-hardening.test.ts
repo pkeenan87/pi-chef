@@ -1,122 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { childEnvironment } from "../src/agents/pi-runner.js";
-import { childBashBlock } from "../src/child-mode.js";
 import extension, { bindWorkflow } from "../src/extension.js";
-import { GitWorkspace, pushDisabledGitEnv } from "../src/git/worktrees.js";
+import { GitWorkspace } from "../src/git/workspace.js";
 import type { InterviewQuestion } from "../src/orchestrator/interview.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown, setTicketStatus, validateTickets } from "../src/orchestrator/tickets.js";
 import { createPlanQuestionsTool } from "../src/tools/plan-questions.js";
 import { isReadOnlyCommand } from "../src/tools/readonly-bash.js";
 import { tempRepo, workflow } from "./helpers.js";
 
-// ---- H1a: child environment allowlist ---------------------------------------------------------------------------
-
-describe("child environment allowlist", () => {
-  const parent = {
-    PATH: "/bin", HOME: "/home/u", USER: "u", LOGNAME: "u", SHELL: "/bin/zsh", TERM: "xterm", LANG: "en_US.UTF-8", LC_ALL: "C", TMPDIR: "/tmp", TZ: "UTC",
-    NODE_OPTIONS: "--max-old-space-size=4096", NODE_PATH: "/n", XDG_CONFIG_HOME: "/c", PI_CODING_AGENT_DIR: "/pi", PI_COST_ROUTER_ROOT: "/root", AZURE_AI_ENDPOINT: "https://x.example",
-    npm_config_cache: "/npm", npm_config_registry: "https://registry.example", npm_config__authToken: "t", npm_config_userconfig: "/home/u/.npmrc",
-    GITHUB_TOKEN: "ghp_x", GH_TOKEN: "gho_x", GH_ENTERPRISE_TOKEN: "x", MY_SERVICE_TOKEN: "x", STRIPE_KEY: "x", DB_SECRET: "x", AWS_ACCESS_KEY_ID: "x", AWS_SECRET_ACCESS_KEY: "x", AWS_PROFILE: "p",
-    VERCEL_OIDC_TOKEN: "x", ANTHROPIC_API_KEY: "x", ANTHROPIC_BASE_URL: "x", OPENAI_API_KEY: "x", OPENAI_ORG: "x", SSH_AUTH_SOCK: "/s", GIT_ASKPASS: "/a", GIT_DIR: "/d", PI_SOMETHING_TOKEN: "x", RANDOM_VAR: "x",
-  };
-
-  it("passes only allowlisted variables", () => {
-    const env = childEnvironment(parent);
-    expect(Object.keys(env).sort()).toEqual(
-      ["AZURE_AI_ENDPOINT", "HOME", "LANG", "LC_ALL", "LOGNAME", "NODE_OPTIONS", "NODE_PATH", "PATH", "PI_CODING_AGENT_DIR", "PI_COST_ROUTER_CHILD", "PI_COST_ROUTER_ROOT", "SHELL", "TERM", "TMPDIR", "TZ", "USER", "XDG_CONFIG_HOME", "npm_config_cache", "npm_config_registry"].sort(),
-    );
-  });
-
-  it("never passes credentials, even by prefix, and lets a caller name one exact extra variable", () => {
-    const env = childEnvironment(parent, { PI_COST_ROUTER_TASK: "t1" }, ["LOCAL_API_KEY", "GITHUB_TOKEN"]);
-    for (const key of ["GITHUB_TOKEN", "GH_TOKEN", "MY_SERVICE_TOKEN", "STRIPE_KEY", "AWS_ACCESS_KEY_ID", "AWS_PROFILE", "VERCEL_OIDC_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "GIT_ASKPASS", "PI_SOMETHING_TOKEN"]) expect(env[key], key).toBeUndefined();
-    expect(env.PI_COST_ROUTER_TASK).toBe("t1");
-    expect(childEnvironment({ ...parent, LOCAL_API_KEY: "local" }, {}, ["LOCAL_API_KEY"]).LOCAL_API_KEY).toBe("local");
-  });
-});
-
-// ---- H1b: pushing is disabled by git config, verified with a real repository -------------------------------------
-
-describe("child git environment", () => {
-  const run = (cwd: string, args: string[], env: NodeJS.ProcessEnv) => {
-    try {
-      execFileSync("git", args, { cwd, env: { PATH: process.env.PATH, HOME: mkdtempSync(path.join(tmpdir(), "pi-home-")), ...env }, stdio: "pipe" });
-      return 0;
-    } catch (error) {
-      return (error as { status?: number }).status ?? 1;
-    }
-  };
-
-  it("makes git push fail for every remote, a new remote, and a literal URL, while commits still work", async () => {
-    const cwd = await tempRepo();
-    const bare = mkdtempSync(path.join(tmpdir(), "pi-bare-"));
-    execFileSync("git", ["init", "--bare", "-q"], { cwd: bare });
-    execFileSync("git", ["remote", "add", "origin", bare], { cwd });
-    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" }).trim();
-    // Control: without the environment the same push works.
-    expect(run(cwd, ["push", "origin", `${branch}:control`], {})).toBe(0);
-
-    const env = await new GitWorkspace(cwd).childGitEnv(cwd);
-    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
-    expect(Object.values(env)).toContain("remote.origin.pushurl");
-    expect(run(cwd, ["push", "origin", `${branch}:blocked1`], env)).not.toBe(0);
-    execFileSync("git", ["remote", "add", "other", bare], { cwd });
-    expect(run(cwd, ["push", "other", `${branch}:blocked2`], env)).not.toBe(0);
-    expect(run(cwd, ["push", bare, `${branch}:blocked3`], env)).not.toBe(0);
-    expect(run(cwd, ["push", "-u", "origin", branch], env)).not.toBe(0);
-    const heads = execFileSync("git", ["for-each-ref", "--format=%(refname)"], { cwd: bare, encoding: "utf8" });
-    expect(heads).toContain("refs/heads/control");
-    expect(heads).not.toMatch(/blocked/);
-    // Local work is unaffected.
-    writeFileSync(path.join(cwd, "a.txt"), "a\n");
-    expect(run(cwd, ["add", "a.txt"], env)).toBe(0);
-    expect(run(cwd, ["-c", "user.email=a@b", "-c", "user.name=n", "commit", "-qm", "a"], env)).toBe(0);
-  });
-
-  it("disables hooks and credential helpers through the same variables", () => {
-    const env = pushDisabledGitEnv(["origin", "up"]);
-    const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
-    expect(pairs).toEqual(expect.arrayContaining([["remote.origin.pushurl", "disabled-by-pi-cost-router://"], ["remote.up.pushurl", "disabled-by-pi-cost-router://"], ["credential.helper", ""], ["core.hooksPath", "/dev/null"]]));
-  });
-});
-
-// ---- H1c: child bash hook ---------------------------------------------------------------------------------------
-
-describe("childBashBlock", () => {
-  it("blocks git push however it is wrapped", () => {
-    const blocked = [
-      "git push", "git push origin main", "GIT_SSH_COMMAND=x git push", "FOO=1 BAR=2 git push", "command git push", "env git push", "env -i PATH=/bin git push", "env -u X FOO=1 git push",
-      "exec git push", "time git push", "nohup git push &", "nice -n 5 git push", "sudo -n git push", "xargs git push", "xargs -n 1 git push", "/usr/bin/git push", "git -C /tmp push", "git -c a=b push",
-      "sh -c 'git push'", "bash -lc \"git push origin\"", "zsh -c 'echo hi; git push'", "eval 'git push'", "eval git push", "bash -c \"sh -c 'git push'\"", "echo ok && git push",
-      "g=git; $g push", "$g push", "$(echo git) push", "`echo git` push", "echo 'git push' | sh", "git \"push\"", "'git' push", "\\git push",
-    ];
-    for (const command of blocked) expect(childBashBlock(command), command).toBeTruthy();
-  });
-
-  it("blocks gh writes but allows reads", () => {
-    const blocked = [
-      "gh pr create --fill", "gh pr merge 3", "gh pr edit 3 --title x", "gh pr comment 3 -b hi", "gh release create v1", "gh release upload v1 f", "gh repo create x", "gh repo delete x --yes",
-      "gh api -X POST repos/o/r/issues", "gh api --method=PATCH repos/o/r", "gh api repos/o/r/issues -f title=x", "gh api graphql -F query=@q", "gh api repos/o/r -XDELETE", "gh -R o/r pr create", "gh auth token", "env GH_TOKEN=x gh pr create",
-      "bash -c 'gh pr create'",
-    ];
-    for (const command of blocked) expect(childBashBlock(command), command).toBeTruthy();
-    for (const command of ["gh pr view 3", "gh pr list", "gh api repos/o/r/issues", "gh api -X GET repos/o/r", "gh issue view 3", "gh run view 5"]) expect(childBashBlock(command), command).toBeUndefined();
-  });
-
-  it("still allows builds, tests, and local git", () => {
-    for (const command of ["npm test", "npx vitest run", "git status", "git commit -am x", "git log --oneline | head -3", "echo push the button", "grep -rn push src", "sh -c 'npm run build'", "FOO=1 npm run lint", "git diff HEAD~1"]) expect(childBashBlock(command), command).toBeUndefined();
-  });
-});
-
-// ---- H1d: parent commits never run a child-written hook -----------------------------------------------------------
+// ---- H1d: commits never run a model-written hook -----------------------------------------------------------
 
 describe("commitAll", () => {
-  it("does not run hooks written by a ticket child", async () => {
+  it("does not run hooks written during a ticket", async () => {
     const cwd = await tempRepo();
     const git = new GitWorkspace(cwd);
     const marker = path.join(cwd, "hook-ran");
@@ -126,7 +24,7 @@ describe("commitAll", () => {
       writeFileSync(file, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`);
       chmodSync(file, 0o755);
     }
-    // A hook installed through config, as a child with git access could do.
+    // A hook installed through config, as a model with shell access could do.
     mkdirSync(path.join(cwd, "evil-hooks"));
     writeFileSync(path.join(cwd, "evil-hooks", "pre-commit"), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`);
     chmodSync(path.join(cwd, "evil-hooks", "pre-commit"), 0o755);

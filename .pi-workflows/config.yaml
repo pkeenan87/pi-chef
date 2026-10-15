@@ -74,22 +74,13 @@ routing:
   circuitBreakerFailures: 3
 
 workers:
-  concurrency: 2
-  isolatedWorktrees: true
-  preserveUntilReviewed: true
   tokenBudget: 8000
   ticketContextTokens: 150000
-  deadlineMs: 600000
 
-worktrees:
-  strategy: per-independent-task
-  integrationBranch: true
-  cleanupRequiresConfirmation: true
-  branchPrefix: cost
+branchPrefix: cost
 
 budgets:
   taskUsd: 20
-  autopilotPrUsd: 10
   dailyUsd: 75
   softWarningRatio: 0.8
 
@@ -99,28 +90,7 @@ approvals:
   merge: manual
   securitySensitiveFix: required
 
-autopilot:
-  pollSeconds: 90
-  maxFixCycles: 5
-  autoMerge: false
-  maxRuntimeMs: 7200000
-  backoffSeconds: 30
-
 checks: []
-
-# Allowlist entries match the full command line exactly. An entry ending in " *"
-# also accepts extra arguments, which are rejected if they contain shell
-# metacharacters or code-execution flags (--config, --output, --exec, -e,
-# --eval, --require, -r, --import, --loader). A project allowlist can only
-# narrow a user-level one (~/.pi/agent/cost-workflow.yaml); it never widens it.
-commandAllowlist:
-  - npm test
-  - npm run typecheck
-  - npm run lint
-  - npx vitest
-  - npx vitest run *
-  - git status
-  - git diff
 
 orgProviderAllowlist: []
 proprietaryCode: false

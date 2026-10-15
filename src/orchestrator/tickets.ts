@@ -1,7 +1,7 @@
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 import { isTier, type PlanGroup, type Ticket } from "../domain.js";
-import { assertCommandAllowed } from "../sandbox.js";
+import { assertCommandSafe } from "../sandbox.js";
 import { assertGraph } from "./plan.js";
 
 /** Fixed allowance for the system prompt and tool definitions in a fresh worker context. */
@@ -48,15 +48,34 @@ export function splitCheckLine(line: string): { command: string; args: string[] 
   return { command, args };
 }
 
-/** Why a ticket check cannot run under the command allowlist, or undefined when it can. */
-export function checkLineProblem(line: string, allowlist: string[]): string | undefined {
+/** True when `command` is a path, or an executable file on PATH (PATHEXT too on Windows). */
+export function commandOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!command) return false;
+  if (command.includes("/") || (process.platform === "win32" && command.includes("\\"))) return true;
+  const exts = process.platform === "win32" ? ["", ...(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)] : [""];
+  for (const dir of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      try {
+        accessSync(path.join(dir, command + ext), constants.X_OK);
+        return true;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return false;
+}
+
+/** Why a ticket check cannot run (deny rules, or a first word that is not a command), or undefined when it can. */
+export function checkLineProblem(line: string, onPath: (command: string) => boolean = commandOnPath): string | undefined {
   const { command, args } = splitCheckLine(line);
   try {
-    assertCommandAllowed(command, args, allowlist);
-    return undefined;
+    assertCommandSafe(command, args);
   } catch (error) {
     return (error as Error).message;
   }
+  if (!onPath(command)) return `"${command}" is not a command on PATH; describe manual steps in implementation, not checks`;
+  return undefined;
 }
 
 function strings(value: unknown): string[] {
@@ -64,7 +83,7 @@ function strings(value: unknown): string[] {
 }
 
 /** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
-export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; /** When given, every ticket check must be a command line this allowlist accepts. */ allowlist?: string[] }): TicketCheck {
+export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean }): TicketCheck {
   const errors: string[] = [];
   const tickets: Ticket[] = [];
   if (!Array.isArray(input) || input.length === 0) return { tickets, errors: ["tickets must be a non-empty array."] };
@@ -103,14 +122,12 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       }
     }
     const checks = strings(item.checks);
-    if (options.allowlist) {
-      for (const check of checks) {
-        const problem = checkLineProblem(check, options.allowlist);
-        if (problem === undefined) continue;
-        errors.push(
-          `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the child exits, one command per entry, from the command allowlist: ${options.allowlist.join(", ") || "(empty)"}. Put prose verification steps in implementation instead.`,
-        );
-      }
+    for (const check of checks) {
+      const problem = checkLineProblem(check, options.commandExists);
+      if (problem === undefined) continue;
+      errors.push(
+        `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the ticket, one command per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
+      );
     }
     tickets.push({
       id,
@@ -152,7 +169,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
   return { tickets, errors };
 }
 
-/** Maps tickets to plan groups so the existing worktree and wave machinery can schedule them. */
+/** Maps tickets to plan groups so plan.ts `waves` can order them. */
 export function ticketsToGroups(tickets: Ticket[]): PlanGroup[] {
   const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   return tickets.map((ticket) => ({
@@ -264,7 +281,7 @@ export type TicketStatus = "ready-for-agent" | "in-progress" | "done" | "failed"
 const norm = (text: string) => text.toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
 
 /**
- * Best-effort read of a child's closing summary: for each acceptance criterion, true when a line that
+ * Best-effort read of a ticket's closing summary: for each acceptance criterion, true when a line that
  * mentions it is ticked ("- [x]") or says "met" (and not "not met"/"unmet"). Unmatched criteria are not met.
  */
 export function parseCriteriaMet(finalText: string, criteria: string[]): boolean[] {

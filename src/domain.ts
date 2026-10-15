@@ -170,15 +170,6 @@ export interface CostRecord {
   reason: string;
 }
 
-export interface WorktreeRecord {
-  groupId: string;
-  branch: string;
-  path: string;
-  baseSha: string;
-  headSha: string;
-  abandoned?: boolean;
-}
-
 export interface CheckEvidence {
   name: string;
   command: string;
@@ -199,7 +190,7 @@ export interface Finding {
   evidence: string;
 }
 
-/** One finding from the model pass of /review. Advisory: it is shown for a person to judge and never gates publish. */
+/** One finding from the model pass of /ship. Advisory: it is shown for a person to judge and never gates the push. */
 export interface ModelFinding {
   severity: "high" | "medium" | "low";
   category: string;
@@ -227,8 +218,8 @@ export interface ReviewReport {
   claimedPass: boolean;
   findings: Finding[];
   checks: CheckEvidence[];
-  worktreeDiffs: { groupId: string; diff: string }[];
-  integratedDiff: string;
+  /** The reviewed diff, redacted. Older task files may carry `integratedDiff` and `worktreeDiffs` instead; both are ignored. */
+  diff?: string;
   summary: string;
   /** The model pass, when it ran. Separate from `findings` so policy stays deterministic. */
   modelReview?: ModelReview;
@@ -253,14 +244,6 @@ export interface PullRequestRef {
   baseSha: string;
 }
 
-export interface ContextReset {
-  boundary: "post-approval" | "post-implementation" | "post-publish" | "manual";
-  at: string;
-  mode: "new-session" | "compact" | "handoff-only";
-  cancelled: boolean;
-  handoffFile: string;
-}
-
 export interface AttemptRecord {
   tier: Tier;
   provider: string;
@@ -274,11 +257,11 @@ export interface PlanningProgress {
   stage: "interview" | "tickets";
   /** True when /plan --no-questions skipped the interview. */
   noQuestions: boolean;
-  /** The person's requested changes when a drafted plan was sent back from /approve-plan. */
+  /** The person's requested changes when a drafted plan was sent back from the plan review. */
   revision?: string;
 }
 
-/** Where one ticket stands during /implement (tickets run in child pi processes). */
+/** Where one ticket stands during /build. */
 export interface TicketRun {
   status: "in-progress" | "done" | "failed";
   tier?: Tier;
@@ -287,13 +270,13 @@ export interface TicketRun {
   /** Attempts so far, one per tier tried. */
   attempts: number;
   turns: number;
-  /** All tokens the child reported across attempts (input, output, cache). */
+  /** All tokens the model used across attempts (input, output, cache). */
   tokens: number;
   /** Known cost across attempts; null when any attempt's cost was unknown. */
   costUsd: number | null;
   maxContextTokens: number;
   crossedTarget: boolean;
-  /** Redacted tail of the child's final message, passed to tickets this one blocks. */
+  /** Redacted tail of the model's final message, passed to tickets this one blocks. */
   summary?: string;
   error?: string;
   /** When the first attempt started. */
@@ -302,6 +285,23 @@ export interface TicketRun {
   elapsedMs?: number;
   /** One entry per attempt, oldest first: the trail /status shows. */
   attemptLog?: TicketAttempt[];
+  /** Commit that /build made for this ticket. */
+  commit?: string;
+}
+
+/** Where /build works: one branch in the main checkout. */
+export interface BuildRecord {
+  branch: string;
+  /** The branch the PR will target. */
+  base: string;
+  /** Merge base of the branch and `base` when the build started. */
+  baseSha: string;
+  /** The ticket a chunk is running now. Set only between nextChunk and finishChunk. */
+  currentTicket?: string;
+  /** When the running chunk began. */
+  chunkStartedAt?: string;
+  /** The config `setup` steps already ran for this build. */
+  setupDone?: boolean;
 }
 
 export interface TicketAttempt {
@@ -330,18 +330,14 @@ export interface TaskState {
   plan?: PlanDocument;
   approvedVersion?: number;
   publishApproved: boolean;
-  worktrees: WorktreeRecord[];
   /** Per-ticket progress, keyed by ticket id. */
   ticketRuns?: Record<string, TicketRun>;
-  integration?: { branch: string; sha?: string; path?: string };
+  build?: BuildRecord;
   review?: ReviewReport;
   pullRequest?: PullRequestRef;
   attempts: AttemptRecord[];
   blockedReason?: string;
-  contextResets: ContextReset[];
   phaseEnteredAt: string;
-  mergeReadyAt?: string;
-  autopilot?: import("./github/autopilot.js").AutopilotCursor;
 }
 
 export interface CommandResult {

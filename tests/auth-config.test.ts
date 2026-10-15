@@ -42,7 +42,7 @@ describe("auth and config", () => {
   it("rejects secrets and api-key auth in yaml", () => {
     expect(() => parseConfig("providers:\n  openai:\n    type: openai\n    auth: api-key\n")).toThrow(/account-login/);
     expect(() => parseConfig("providers:\n  openai:\n    type: openai\n    auth: account-login\n    apiKey: sk-live-SECRETVALUE123456\n")).toThrow(/secret|apiKey/i);
-    expect(() => parseConfig("autopilot:\n  autoMerge: true\n")).toThrow(/autoMerge/);
+    expect(() => parseConfig("approvals:\n  merge: auto\n")).toThrow(/merge/);
   });
 
   it("does not call a transport for an api-key session and never logs a foundry token", async () => {

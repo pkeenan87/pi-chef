@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { GitWorkspace } from "../git/worktrees.js";
+import type { GitWorkspace } from "../git/workspace.js";
 import type { CheckRunner } from "../review/review.js";
 
 const exec = promisify(execFile);

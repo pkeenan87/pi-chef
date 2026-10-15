@@ -17,14 +17,12 @@ async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined
     state.plan ? `Plan v${state.plan.version}: ${state.plan.summary.slice(0, 600)}\nGroups: ${state.plan.groups.map((group) => `${group.id} (${group.files.join(", ")})`).join("; ")}\nRisks: ${state.plan.risks.join("; ")}` : "",
     state.blockedReason ? `Last failure: ${state.blockedReason.slice(0, 600)}` : "",
   ];
-  const dir = state.integration?.path ?? state.worktrees[0]?.path;
-  if (dir) {
-    try {
-      const stat = await ctx.git.git(["diff", "--stat", state.worktrees[0]?.baseSha ?? "HEAD"], dir);
-      if (stat.code === 0 && stat.stdout.trim()) parts.push(`Diff stat:\n${stat.stdout.trim().slice(0, 1200)}`);
-    } catch {
-      /* the diff stat is optional */
-    }
+  try {
+    const base = state.build?.base ?? (await ctx.git.defaultBranch());
+    const stat = await ctx.git.git(["diff", "--stat", await ctx.git.mergeBase(base), "--"]);
+    if (stat.code === 0 && stat.stdout.trim()) parts.push(`Diff stat:\n${stat.stdout.trim().slice(0, 1200)}`);
+  } catch {
+    /* the diff stat is optional */
   }
   return truncateForClassifier(redact(parts.filter(Boolean).join("\n")), 8000);
 }

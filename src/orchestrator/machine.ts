@@ -15,12 +15,14 @@ const EDGES: Record<Phase, Phase[]> = {
   IDLE: ["PLANNING", "PAUSED"],
   PLANNING: ["AWAITING_PLAN_APPROVAL", "FAILED", "BLOCKED", "PAUSED"],
   AWAITING_PLAN_APPROVAL: ["IMPLEMENTING", "PLANNING", "AWAITING_PLAN_APPROVAL", "PAUSED", "FAILED", "BLOCKED"],
-  IMPLEMENTING: ["REVIEWING", "IMPLEMENTING", "AWAITING_PLAN_APPROVAL", "FAILED", "BLOCKED", "PAUSED"],
-  REVIEWING: ["AWAITING_PUBLISH_APPROVAL", "IMPLEMENTING", "AWAITING_PLAN_APPROVAL", "FAILED", "BLOCKED", "PAUSED"],
-  AWAITING_PUBLISH_APPROVAL: ["PUBLISHED", "IMPLEMENTING", "REVIEWING", "AWAITING_PLAN_APPROVAL", "PAUSED", "FAILED", "BLOCKED"],
-  PUBLISHED: ["AUTOPILOT", "COMPLETE", "PAUSED", "BLOCKED", "FAILED"],
-  AUTOPILOT: ["MERGE_READY", "COMPLETE", "IMPLEMENTING", "AUTOPILOT", "PAUSED", "BLOCKED", "FAILED"],
-  MERGE_READY: ["COMPLETE", "AUTOPILOT", "PAUSED"],
+  IMPLEMENTING: ["REVIEWING", "PUBLISHED", "IMPLEMENTING", "AWAITING_PLAN_APPROVAL", "FAILED", "BLOCKED", "PAUSED"],
+  REVIEWING: ["IMPLEMENTING", "AWAITING_PLAN_APPROVAL", "FAILED", "BLOCKED", "PAUSED"],
+  // AUTOPILOT, MERGE_READY and AWAITING_PUBLISH_APPROVAL are no longer entered; a task loaded from an old file in one of
+  // them can still leave it, so no task is stuck.
+  AWAITING_PUBLISH_APPROVAL: ["PUBLISHED", "COMPLETE", "PLANNING", "IDLE", "IMPLEMENTING", "REVIEWING", "AWAITING_PLAN_APPROVAL", "PAUSED", "FAILED", "BLOCKED"],
+  PUBLISHED: ["COMPLETE", "PUBLISHED", "IMPLEMENTING", "PAUSED", "BLOCKED", "FAILED"],
+  AUTOPILOT: ["PUBLISHED", "COMPLETE", "PLANNING", "IDLE", "IMPLEMENTING", "PAUSED", "BLOCKED", "FAILED"],
+  MERGE_READY: ["PUBLISHED", "COMPLETE", "PLANNING", "IDLE", "PAUSED"],
   COMPLETE: ["IDLE", "PLANNING"],
   FAILED: ["IDLE", "PLANNING", "IMPLEMENTING", "PAUSED"],
   BLOCKED: ["PAUSED", "PLANNING", "IMPLEMENTING", "AWAITING_PLAN_APPROVAL", "IDLE"],
@@ -29,7 +31,7 @@ const EDGES: Record<Phase, Phase[]> = {
 
 export function canTransition(from: Phase, to: Phase, state?: Pick<TaskState, "pausedFrom">): boolean {
   if (from === to && from !== "PAUSED") {
-    return EDGES[from].includes(to) || from === "IMPLEMENTING" || from === "AUTOPILOT" || from === "AWAITING_PLAN_APPROVAL";
+    return EDGES[from].includes(to) || from === "IMPLEMENTING" || from === "AWAITING_PLAN_APPROVAL";
   }
   if (from === "PAUSED") {
     return to === state?.pausedFrom || to === "FAILED" || to === "IDLE" || to === "PLANNING";
@@ -54,6 +56,5 @@ export function move(state: TaskState, to: Phase, at: string, reason?: string): 
   } else {
     next.blockedReason = undefined;
   }
-  if (to === "MERGE_READY") next.mergeReadyAt = at;
   return next;
 }

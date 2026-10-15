@@ -1,10 +1,8 @@
-import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { CommandResult, CostRecord, Phase, TaskState, TokenUsage } from "../domain.js";
 import { budgetStatusFor, buildCostRecord, recordsForDay, summarize, type SpendSummary } from "../cost/ledger.js";
 import { quotaUsage, type QuotaUsage } from "../cost/quota.js";
 import type { ClassifierUsage } from "../router/classify.js";
 import { active, fail, type WorkflowContext } from "./context.js";
-import type { InFlightRun } from "./inflight.js";
 
 /** Pseudo task id for interactive turns that happen with no active task. */
 export const SESSION_TASK_ID = "session";
@@ -24,22 +22,6 @@ export function budgetState(ctx: WorkflowContext, taskId?: string, records = ctx
   const task = summarize(taskId ? records.filter((record) => record.taskId === taskId) : [], { pricing });
   const statuses = [budgetStatusFor(daily, dailyUsd, softWarningRatio), budgetStatusFor(task, taskUsd, softWarningRatio)];
   return { status: statuses.includes("hard") ? "hard" : statuses.includes("soft") ? "soft" : "ok", daily, task };
-}
-
-/**
- * Adds one model call's cost (USD) to a running child's in-flight spend and stops every child that would push the task or
- * the day over its limit: the ledger plus all in-flight spend must stay within the limit. Returns the stop reason, if any.
- * The overshoot is at most the cost of the call that crossed the line.
- */
-export function chargeInFlight(ctx: WorkflowContext, run: InFlightRun, usd: number): string | undefined {
-  if (!Number.isFinite(usd) || usd <= 0) return run.tripped;
-  run.micro += toMicroUsd(usd);
-  const { task, daily } = budgetState(ctx, run.taskId);
-  const taskSpent = toMicroUsd(task.knownUsd + task.estimatedUnknownUsd) + ctx.inflight.taskMicro(run.taskId);
-  const dailySpent = toMicroUsd(daily.knownUsd + daily.estimatedUnknownUsd) + ctx.inflight.totalMicro();
-  if (taskSpent > toMicroUsd(ctx.config.budgets.taskUsd)) ctx.inflight.tripAll(`The task budget ($${ctx.config.budgets.taskUsd}) would be exceeded mid-run.`, run.taskId);
-  if (dailySpent > toMicroUsd(ctx.config.budgets.dailyUsd)) ctx.inflight.tripAll(`The daily budget ($${ctx.config.budgets.dailyUsd}) would be exceeded mid-run.`);
-  return run.tripped;
 }
 
 export function statusFor(ctx: WorkflowContext, summary: SpendSummary, limit: number): BudgetStatus {
@@ -126,9 +108,11 @@ export function recordClassifier(ctx: WorkflowContext, taskId: string, phase: Ph
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
   const state = active(ctx);
   const known = input.usage.input !== null && input.usage.output !== null;
-  const reason = known ? "observed assistant usage" : "observed assistant usage missing tokens";
+  const base = known ? "observed assistant usage" : "observed assistant usage missing tokens";
   // No task: still ledger the turn so it counts toward the daily limit.
-  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
+  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, base);
+  // While /build runs a ticket, the turn is that ticket's spend (/cost and the build report read it back).
+  const reason = state.build?.currentTicket ? `${base} · ticket ${state.build.currentTicket}` : base;
   return remember(ctx, state, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
 }
 
@@ -136,38 +120,8 @@ export function observeUsage(ctx: WorkflowContext, input: { provider: string; mo
  * Ledgers one web_search call (Anthropic subscription, Haiku). The query text is deliberately not stored.
  * Per-search fees are not priced: only token cost from `pricing` rows is computed.
  */
-export function recordWebSearch(ctx: WorkflowContext, input: { provider: string; model: string; inputTokens: number; outputTokens: number; webSearchRequests: number; /** Charge this task instead of the active one (ticket child processes). */ taskId?: string }): CostRecord {
+export function recordWebSearch(ctx: WorkflowContext, input: { provider: string; model: string; inputTokens: number; outputTokens: number; webSearchRequests: number; taskId?: string }): CostRecord {
   const state = input.taskId ? ctx.store.load(input.taskId) : active(ctx);
   const usage: TokenUsage = { input: input.inputTokens, output: input.outputTokens, cacheRead: 0, cacheWrite: 0, requests: 1 };
   return record(ctx, state?.taskId ?? "web_search", state?.phase ?? "IDLE", "web_search", input.provider, input.model, usage, "success", 0, `web_search (${input.webSearchRequests} search request(s))`);
-}
-
-/**
- * Ledgers one ticket attempt from the child's JSON events (the child itself ledgers nothing).
- * Cost comes from the config pricing row for the model (a subscription model's $0, or its api-key row while the
- * provider is on a key), so the ledger agrees with how the router ranked the model. Pi's own `cost.total` (list
- * price) fills in only when no row applies, and is kept as `listPriceUsd` either way. A child that reported no
- * usage at all is an unknown charge, never zero.
- */
-export function recordTicketUsage(
-  ctx: WorkflowContext,
-  state: TaskState,
-  input: { tier: string; provider: string; model: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number | null; turns: number }; outcome: CostRecord["outcome"]; retries: number; reason: string; noModelCall?: boolean },
-): CostRecord {
-  // A child that never started a model request reported zero usage, and that zero is known.
-  const reported = input.usage.turns > 0 || input.noModelCall === true;
-  const usage: TokenUsage = reported
-    ? { input: input.usage.input, output: input.usage.output, cacheRead: input.usage.cacheRead, cacheWrite: input.usage.cacheWrite, requests: input.usage.turns }
-    : { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 };
-  const entry = buildCostRecord({ provider: input.provider, model: input.model, phase: state.phase, taskId: state.taskId, tier: input.tier, usage, outcome: input.outcome, retries: input.retries, reason: input.reason, estimatedUsd: state.routing?.estimatedUsd ?? null }, ctx.config.pricing, ctx.now(), ctx.id());
-  if (reported && input.usage.costUsd !== null) entry.listPriceUsd = fromMicroUsd(toMicroUsd(input.usage.costUsd));
-  if (input.noModelCall === true && input.usage.turns === 0) {
-    entry.actualUsd = 0;
-    entry.usageKnown = true;
-  } else if (reported && entry.actualUsd === null && input.usage.costUsd !== null && input.usage.costUsd > 0) {
-    entry.actualUsd = fromMicroUsd(toMicroUsd(input.usage.costUsd));
-    entry.usageKnown = true;
-  }
-  ctx.store.appendLedger(entry);
-  return entry;
 }

@@ -4,8 +4,7 @@ import type { ClassifierUsage } from "../router/classify.js";
 import { budgetState, recordClassifier } from "./budget.js";
 import { active, done, fail, guard, iso, PUBLISHED_PHASES, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { blank, classify, plan } from "./planning.js";
-import { finish } from "./publish.js";
+import { blank, classify, closePublished, plan } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
@@ -157,9 +156,8 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     }
     let existing = current;
     if (existing && PUBLISHED_PHASES.includes(existing.phase)) {
-      const allowed = await ctx.confirm("Start a new task", `Task ${existing.taskId} has a published pull request. Mark it complete and start a new task?`);
-      if (!allowed) return fail("TASK_ACTIVE", `Task ${existing.taskId} is still tracking its pull request. Run /complete once it is merged, or confirm to replace it.`);
-      await finish(ctx, existing, "superseded by a new plan");
+      const blocked = await closePublished(ctx, existing);
+      if (blocked) return blocked;
       existing = active(ctx);
     }
     const terminal = !existing || ["COMPLETE", "FAILED", "IDLE"].includes(existing.phase);
@@ -407,7 +405,7 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const feedback = revision ? ["", "The user sent the drafted plan back with these requested changes:", revision] : [];
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
-    return [TICKET_RULES(ctx.config.workers.ticketContextTokens, ctx.config.commandAllowlist), ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
+    return [TICKET_RULES(ctx.config.workers.ticketContextTokens), ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
   }
   if (revision) {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
@@ -431,11 +429,11 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
 
 /**
  * Sends a drafted plan back to planning with the person's requested changes. The model rewrites the spec and
- * tickets (no new interview questions), and the plan returns to /approve-plan. Plan approval stays required.
+ * tickets (no new interview questions), and the plan returns for approval. Plan approval stays required.
  */
 export async function requestPlanChanges(ctx: WorkflowContext, task: TaskState, feedback: string): Promise<CommandResult> {
   const text = redact(feedback.trim());
-  if (!text) return fail("USAGE", "Describe the changes you want, then run /approve-plan again.");
+  if (!text) return fail("USAGE", "Describe the changes you want, then run /show-plan again.");
   if (!readInterview(ctx, task.taskId)) return fail("NO_INTERVIEW", "This plan was not drafted by the /plan interview. Run /plan again with the changes in the request.");
   if (!ctx.startTurn) return fail("NO_SESSION", "Revising the plan needs a Pi session.");
   const at = iso(ctx);
@@ -446,5 +444,5 @@ export async function requestPlanChanges(ctx: WorkflowContext, task: TaskState, 
   }));
   showStatus(ctx);
   ctx.startTurn(`Revise the plan with these changes:\n\n${text}`);
-  return done("Sent the plan back for changes. The revised plan will be shown for /approve-plan again.", { taskId: task.taskId });
+  return done("Sent the plan back for changes. The revised plan will be shown for review again.", { taskId: task.taskId });
 }
