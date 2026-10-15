@@ -36,8 +36,7 @@ describe("cost, review, and workers", () => {
 
   it("blocks a failing check and a secret in the diff without claiming a pass", async () => {
     const failing = await reviewDiff({
-      diffs: [{ groupId: "main", diff: "export const value = 1;\n" }],
-      integratedDiff: "",
+      diff: "export const value = 1;\n",
       checks: [{ name: "unit", command: "npm", args: ["test"] }],
       cwd: "/tmp",
       planAcceptance: [],
@@ -49,8 +48,7 @@ describe("cost, review, and workers", () => {
 
     const secret = "sk-live-SECRETVALUE123456";
     const leak = await reviewDiff({
-      diffs: [{ groupId: "main", diff: `const password = "${secret}";\n` }],
-      integratedDiff: "",
+      diff: `const password = "${secret}";\n`,
       checks: [{ name: "unit", command: "npm", args: ["test"] }],
       cwd: "/tmp",
       planAcceptance: [],

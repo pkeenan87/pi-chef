@@ -141,9 +141,9 @@ export interface WorkflowConfig {
     backoffSeconds: number;
   };
   checks: CheckConfig[];
-  /** Commands /review runs in the integration worktree before the checks (an install, for example). Same rules as checks. */
+  /** Commands /ship runs in the repo root before the checks (an install, for example). Same rules as checks. */
   setup: CheckConfig[];
-  /** The model pass of /review: a review-tier model reads the integrated diff and lists advisory findings. */
+  /** The model pass of /ship: a review-tier model reads the branch diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;

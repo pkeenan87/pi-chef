@@ -233,14 +233,12 @@ describe("O5 autopilot resumes after a restart", () => {
 describe("O6 re-planning after review", () => {
   const changed = singleTaskRequest.replaceAll("src/ingest.ts", "src/ingest2.ts");
 
-  it("moves AWAITING_PUBLISH_APPROVAL back to AWAITING_PLAN_APPROVAL on /plan", async () => {
+  it("drops the approval when an approved plan is replanned", async () => {
     const cwd = await tempRepo();
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
     await app.approveDraft();
-    expect((await app.implement()).ok).toBe(true);
-    expect((await app.review()).ok).toBe(true);
-    expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PUBLISH_APPROVAL");
+    expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBeDefined();
     const replanned = await app.plan(changed);
     expect(replanned.ok).toBe(true);
     const task = app.store.load(app.activeTaskId()!)!;
@@ -253,40 +251,9 @@ describe("O6 re-planning after review", () => {
     const app = workflow(cwd);
     await app.plan(singleTaskRequest);
     await app.approveDraft();
-    await app.implement();
-    await app.review();
     await app.store.update(app.activeTaskId()!, "pause", (task) => move(task, "PAUSED", "2026-10-14T12:00:00.000Z", "paused"));
     expect((await app.plan(changed)).ok).toBe(true);
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
-  });
-});
-
-describe("O7 publish survives a handoff failure", () => {
-  it("records the PR and moves to PUBLISHED before the handoff, and treats a handoff error as a warning", async () => {
-    const cwd = await tempRepo();
-    const notes: string[] = [];
-    const github = new MemoryGitHub(emptyPr());
-    const app = workflow(cwd, {
-      github,
-      notify: (m) => notes.push(m),
-      session: {
-        async reset({ boundary }) {
-          if (boundary === "post-publish") throw new Error("session exploded");
-          return { mode: "new-session", cancelled: false };
-        },
-      },
-    });
-    await app.plan(singleTaskRequest);
-    await app.approveDraft();
-    await app.implement();
-    await app.review();
-    const pushed = await app.push();
-    expect(pushed.ok).toBe(true);
-    expect(pushed.text).toMatch(/Warning: .*session exploded/);
-    const task = app.store.load(app.activeTaskId()!)!;
-    expect(task.phase).toBe("PUBLISHED");
-    expect(task.pullRequest?.number).toBe(7);
-    expect(notes.some((note) => /session exploded/.test(note))).toBe(true);
   });
 });
 

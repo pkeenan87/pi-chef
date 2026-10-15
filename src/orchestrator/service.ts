@@ -19,7 +19,8 @@ import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAns
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
 import { Poller } from "./poller.js";
-import { complete, push, review } from "./publish.js";
+import { complete } from "./publish.js";
+import { ship } from "./ship.js";
 import { auth, cost, resetPhase, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
@@ -278,12 +279,9 @@ export class Workflow {
     this.ctx.report?.(markdown);
   }
 
-  review(): Promise<CommandResult> {
-    return review(this.ctx);
-  }
-
-  push(): Promise<CommandResult> {
-    return push(this.ctx);
+  /** `/ship`: reviews the current branch and, on a pass and after confirmation, commits leftovers, pushes, and opens or updates the PR. */
+  ship(): Promise<CommandResult> {
+    return ship(this.ctx);
   }
 
   /** Marks a published task complete (after the PR is merged) so a new task can start. */

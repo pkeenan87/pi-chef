@@ -591,34 +591,6 @@ describe("/implement with tickets", () => {
     expect(run.error).toMatch(/no acceptance criterion/);
   });
 
-  it("reviews the integration branch with the tickets' checks when the config has none, and explains a review that cannot pass", async () => {
-    const ran: string[] = [];
-    const t = await ticketTask({
-      tickets: [ticket("01", { checks: ["npm run typecheck"] }), ticket("02", { blockedBy: ["01"], checks: ["npm run typecheck", "npm test"] })],
-      mutate: (config) => void (config.checks = []),
-      runner: checkRunner(async (command, args, cwd) => (ran.push(`${[command, ...args].join(" ")} @ ${path.basename(cwd)}`), { code: 0, stdout: "ok", stderr: "" })),
-    });
-    expect((await t.app.implement()).ok).toBe(true);
-    const review = await t.app.review();
-    expect(review.ok, review.text).toBe(true);
-    expect(review.text).toContain("Review passed with 2 check(s)");
-    // Both ticket checks are review evidence on the integration tree (served from the cache when that tree already passed them).
-    const report = review.data as { checks: { name: string; exitCode: number | null; cwd: string }[] };
-    expect(report.checks.map((check) => [check.name, check.exitCode, path.basename(check.cwd)]).sort()).toEqual([["npm run typecheck", 0, "integration"], ["npm test", 0, "integration"]]);
-    expect(ran.some((line) => line.startsWith("npm test @"))).toBe(true);
-
-    const bare = await ticketTask({ tickets: [ticket("01")], mutate: (config) => void (config.checks = []) });
-    expect((await bare.app.implement()).ok).toBe(true);
-    const failed = await bare.app.review();
-    expect(failed).toMatchObject({ ok: false, code: "REVIEW_BLOCKING" });
-    expect(failed.text).toContain("no checks ran");
-    // With a report hook the result stays short; the structured block carries the detail.
-    expect(failed.text).toContain("details above and in reports/review.md");
-    expect(bare.reports.at(-1)).toContain("## Review did not pass");
-    expect(bare.reports.at(-1)).toContain("- suggestion tests: No checks are configured");
-    expect(bare.reports.at(-1)).toContain("### Next");
-  });
-
   it("posts progress lines for waves and ticket attempts", async () => {
     const t = await ticketTask({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] });
     expect((await t.app.implement()).ok).toBe(true);

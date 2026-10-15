@@ -32,8 +32,7 @@ export const COMMANDS: CommandSpec[] = [
     description: "Build the approved plan one ticket at a time in fresh sessions on one branch: routed model per ticket, checks, a commit each. Run again to resume.",
     complete: () => [],
   },
-  { name: "review", run: (w) => w.review(), description: "Review each worktree and the integrated diff in a fresh context.", complete: () => [] },
-  { name: "push", run: (w) => w.push(), description: "After checks and approval, push the integration branch and open or update one PR.", complete: () => [] },
+  { name: "ship", run: (w) => w.ship(), description: "Review the branch (checks, static scan, advisory model pass) and, on a pass, commit leftovers, push, and open or update the PR. Works for /build output and ad-hoc fixes.", complete: () => [] },
   {
     name: "autopilot", run: (w, args) => w.autopilot(args),
     description: "Watch the PR locally: bounded verified fixes, no auto-merge. Subcommands: stop, status.",

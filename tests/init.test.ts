@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const exec = promisify(execFile);
 const script = path.resolve("bin/init.mjs");
-const GITIGNORE_COUNT = 8;
+const GITIGNORE_COUNT = 9;
 
 function project(): string {
   return mkdtempSync(path.join(tmpdir(), "pi-cost-init-"));

@@ -13,6 +13,10 @@ describe("state machine", () => {
     expect(canTransition("REVIEWING", "IMPLEMENTING")).toBe(true);
     expect(canTransition("AWAITING_PUBLISH_APPROVAL", "PUBLISHED")).toBe(true);
     expect(canTransition("PUBLISHED", "AUTOPILOT")).toBe(true);
+    // /ship needs no review phase; shipping again, or building more tickets, stays on the same pull request.
+    expect(canTransition("IMPLEMENTING", "PUBLISHED")).toBe(true);
+    expect(canTransition("PUBLISHED", "PUBLISHED")).toBe(true);
+    expect(canTransition("PUBLISHED", "IMPLEMENTING")).toBe(true);
     expect(canTransition("AUTOPILOT", "MERGE_READY")).toBe(true);
     expect(canTransition("MERGE_READY", "COMPLETE")).toBe(true);
   });

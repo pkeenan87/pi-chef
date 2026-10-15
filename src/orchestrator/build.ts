@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
-import type { BuildRecord, CheckEvidence, CommandResult, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, Tier } from "../domain.js";
+import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
@@ -13,6 +13,9 @@ import { assertGraph, waves } from "./plan.js";
 import { ticketPrompt } from "./prompts.js";
 import { decide } from "./routing.js";
 import { groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, ticketsToGroups } from "./tickets.js";
+
+/** Phases /build may start or resume from. PUBLISHED: more tickets for the same pull request. */
+const BUILDABLE: Phase[] = [...IMPLEMENTABLE, "PUBLISHED"];
 
 const MAX_SUMMARY_CHARS = 3000;
 const OUTPUT_CHARS = 2000;
@@ -122,7 +125,7 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       }
     }
     const resumeFrom = state.phase === "PAUSED" ? state.pausedFrom : state.phase;
-    if (!resumeFrom || !IMPLEMENTABLE.includes(resumeFrom)) {
+    if (!resumeFrom || !BUILDABLE.includes(resumeFrom)) {
       return fail("ILLEGAL_TRANSITION", `Cannot build from ${state.phase}${state.phase === "PAUSED" && resumeFrom ? ` (paused from ${resumeFrom})` : ""}.`);
     }
     if (!state.classification) return fail("NOT_READY", "The task has no classification. Run /plan again.");

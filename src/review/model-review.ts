@@ -3,7 +3,7 @@ import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
 
 /**
- * The model pass of /review: a review-tier model reads the integrated diff against the plan and lists findings for a
+ * The model pass of /ship: a review-tier model reads the branch diff against the plan and lists findings for a
  * person to judge. Advisory by design: nothing here changes `passed`, which stays with the deterministic checks.
  */
 
@@ -153,7 +153,7 @@ export async function runModelReview(
   };
 }
 
-/** The lines /review prints for the model pass: a header with how it ran, then one line per finding, severity first. */
+/** The lines /ship prints for the model pass: a header with how it ran, then one line per finding, severity first. */
 export function modelReviewLines(review: ModelReview): string[] {
   const how = [review.chunks && review.chunks > 1 ? `${review.chunks} parts` : undefined, review.elapsedMs !== undefined ? `${(review.elapsedMs / 1000).toFixed(1)}s` : undefined, review.costUsd === null ? "cost unknown" : review.costUsd !== undefined ? `$${review.costUsd.toFixed(4)}` : undefined].filter(Boolean).join(", ");
   const label = `Model review (${review.provider}/${review.model}${how ? `; ${how}` : ""})`;

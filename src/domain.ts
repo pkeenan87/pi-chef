@@ -199,7 +199,7 @@ export interface Finding {
   evidence: string;
 }
 
-/** One finding from the model pass of /review. Advisory: it is shown for a person to judge and never gates publish. */
+/** One finding from the model pass of /ship. Advisory: it is shown for a person to judge and never gates the push. */
 export interface ModelFinding {
   severity: "high" | "medium" | "low";
   category: string;
@@ -227,8 +227,8 @@ export interface ReviewReport {
   claimedPass: boolean;
   findings: Finding[];
   checks: CheckEvidence[];
-  worktreeDiffs: { groupId: string; diff: string }[];
-  integratedDiff: string;
+  /** The reviewed diff, redacted. Older task files may carry `integratedDiff` and `worktreeDiffs` instead; both are ignored. */
+  diff?: string;
   summary: string;
   /** The model pass, when it ran. Separate from `findings` so policy stays deterministic. */
   modelReview?: ModelReview;

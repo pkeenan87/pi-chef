@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
 import type { ProviderId, Ticket } from "../src/domain.js";
+import { runBuild, type BuildDriver } from "../src/orchestrator/build.js";
 import { Workflow, type WorkflowOptions } from "../src/orchestrator/service.js";
 import type { CheckRunner } from "../src/review/review.js";
 import type { GitHubClient, PullRequestSnapshot } from "../src/github/types.js";
@@ -18,7 +19,7 @@ const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-cost-"));
-  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
+  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/worktrees/\n.pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
   await exec("git", ["config", "user.email", "test@example.com"], { cwd });
@@ -137,16 +138,32 @@ export function fakeTimer() {
   return { state, schedule };
 }
 
-/** Drives a one-group task through plan, approve, implement, review, and push. */
+/** A build driver whose "session" writes `src/ingest.ts` into the checkout, like a model finishing a ticket. */
+export function writingDriver(cwd: string, files: Record<string, string> = { "src/ingest.ts": "export const ingest = 1;\n" }): BuildDriver {
+  return {
+    async fresh(_model, run) {
+      await run({
+        async send() {
+          for (const [name, body] of Object.entries(files)) {
+            mkdirSync(path.dirname(path.join(cwd, name)), { recursive: true });
+            writeFileSync(path.join(cwd, name), body);
+          }
+          return { lastText: "Done.\n- [x] retry works\nFiles changed: src/ingest.ts", aborted: false };
+        },
+      });
+    },
+    async finish() {},
+  };
+}
+
+/** Drives a one-ticket task through plan, approve, build, and ship. */
 export async function publishedWorkflow(extras: Partial<WorkflowOptions> = {}, github: MemoryGitHub = new MemoryGitHub(emptyPr())) {
   const cwd = await tempRepo();
-  const app = workflow(cwd, { github, ...extras });
-  await app.plan(singleTaskRequest);
-  await app.approveDraft();
-  if (!(await app.implement()).ok) throw new Error("implement failed in fixture");
-  if (!(await app.review()).ok) throw new Error("review failed in fixture");
-  const pushed = await app.push();
-  if (!pushed.ok) throw new Error(`push failed in fixture: ${pushed.text}`);
+  const { app } = await ticketWorkflow([sampleTicket("01")], { config: testConfig(), github, ...extras }, { cwd });
+  const built = await runBuild(() => app, writingDriver(cwd));
+  if (!built.ok) throw new Error(`build failed in fixture: ${built.text}`);
+  const shipped = await app.ship();
+  if (!shipped.ok) throw new Error(`ship failed in fixture: ${shipped.text}`);
   return { cwd, app, github };
 }
 

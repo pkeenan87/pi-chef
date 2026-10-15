@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { Workflow, type GroupExecutor } from "../src/orchestrator/service.js";
 import { GitWorkspace } from "../src/git/worktrees.js";
 import { WorkflowError } from "../src/domain.js";
-import { checkRunner, emptyPr, fakeTimer, MemoryGitHub, publishedWorkflow, readyAuth, singleTaskRequest, tasksRequest, tempRepo, testConfig, workflow } from "./helpers.js";
+import { runBuild } from "../src/orchestrator/build.js";
+import { checkRunner, emptyPr, fakeTimer, MemoryGitHub, publishedWorkflow, readyAuth, sampleTicket, singleTaskRequest, tasksRequest, tempRepo, testConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
 import type { PullRequestSnapshot } from "../src/github/types.js";
 
 function walk(dir: string): string[] {
@@ -69,35 +70,9 @@ describe("workflow", () => {
     expect(status.text).toContain("PAUSED");
   });
 
-  it("reviews a failing integration check, gates push, and stops autopilot at merge-ready", async () => {
+  it("reviews a failing check, gates the push, and stops autopilot at merge-ready", async () => {
     const cwd = await tempRepo();
-    const calls: string[] = [];
-    const app = workflow(cwd, {
-      runner: checkRunner(async (_command, _args, worktree) => {
-        calls.push(worktree);
-        if (worktree.endsWith(`${path.sep}integration`)) return { code: 1, stdout: "", stderr: "FAIL injected test" };
-        return { code: 0, stdout: "ok", stderr: "" };
-      }),
-    });
-    await app.plan(tasksRequest);
-    await app.approveDraft();
-    expect((await app.implement()).ok).toBe(true);
-    const review = await app.review();
-    expect(review.ok).toBe(false);
-    expect(review.text).toMatch(/blocking/);
-    expect(JSON.stringify(review.data)).toContain("FAIL injected");
-    const pushed = await app.push();
-    expect(pushed.ok).toBe(false);
-
-    const passing = workflow(cwd, {
-      runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
-      confirm: async () => false,
-    });
-    expect((await passing.implement()).ok).toBe(true);
-    expect((await passing.review()).ok).toBe(true);
-    const denied = await passing.push();
-    expect(denied.code).toBe("APPROVAL_REQUIRED");
-
+    const flags = { checksPass: true, confirm: true };
     const github = new MemoryGitHub({
       number: 0,
       url: "",
@@ -113,10 +88,13 @@ describe("workflow", () => {
     } satisfies PullRequestSnapshot);
     const polls: number[] = [];
     let cancelled = 0;
-    const publisher = workflow(cwd, {
-      runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
+    const pushed: string[] = [];
+    const { app: publisher } = await ticketWorkflow([sampleTicket("01")], {
+      config: testConfig(),
+      runner: checkRunner(async () => (flags.checksPass ? { code: 0, stdout: "ok", stderr: "" } : { code: 1, stdout: "", stderr: "FAIL injected test" })),
       github,
-      confirm: async () => true,
+      confirm: async () => flags.confirm,
+      push: async (branch) => void pushed.push(branch),
       fixer: async () => ({ verified: true, evidence: "npm test exit 0", summary: "fix comment", edits: [] }),
       schedule: (delayMs) => {
         polls.push(delayMs);
@@ -124,8 +102,25 @@ describe("workflow", () => {
           cancelled += 1;
         };
       },
-    });
-    const published = await publisher.push();
+    }, { cwd });
+    expect((await runBuild(() => publisher, writingDriver(cwd))).ok).toBe(true);
+
+    flags.checksPass = false;
+    const review = await publisher.ship();
+    expect(review.ok).toBe(false);
+    expect(review.code).toBe("REVIEW_BLOCKING");
+    expect(review.text).toMatch(/blocking/);
+    expect(JSON.stringify(review.data)).toContain("FAIL injected");
+    expect(pushed).toEqual([]);
+    expect(publisher.store.load(publisher.activeTaskId()!)!.phase).toBe("IMPLEMENTING");
+
+    flags.checksPass = true;
+    flags.confirm = false;
+    expect((await publisher.ship()).code).toBe("NOT_SHIPPED");
+    expect(pushed).toEqual([]);
+
+    flags.confirm = true;
+    const published = await publisher.ship();
     expect(published.ok).toBe(true);
     expect(github.pr.number).toBe(7);
     github.pr = {
@@ -356,14 +351,6 @@ describe("implementation robustness", () => {
     expect(second.ok).toBe(true);
   });
 
-  it("refuses to implement from a published task without touching it", async () => {
-    const { app } = await publishedWorkflow();
-    await app.autopilot("stop");
-    const result = await app.implement();
-    expect(result.code).toBe("ILLEGAL_TRANSITION");
-    expect((await app.status()).text).toContain("PUBLISHED");
-  });
-
   it("moves the task to FAILED when implementation throws", async () => {
     const cwd = await tempRepo();
     const git = new GitWorkspace(cwd);
@@ -479,17 +466,19 @@ describe("implementation robustness", () => {
     expect(rejected.code).toBe("PLAN_CYCLE");
   });
 
-  it("skips the review re-run of a check that already passed on the same tree", async () => {
+  it("skips the /ship re-run of a check that already passed on the same tree", async () => {
     const cwd = await tempRepo();
     let runs = 0;
-    const app = workflow(cwd, { runner: checkRunner(async () => (runs += 1, { code: 0, stdout: "ok", stderr: "" })) });
-    await app.plan(singleTaskRequest);
-    await app.approveDraft();
-    await app.implement();
-    const afterImplement = runs;
-    expect(afterImplement).toBe(1);
-    expect((await app.review()).ok).toBe(true);
-    expect(runs).toBe(afterImplement);
+    const github = new MemoryGitHub(emptyPr());
+    const { app } = await ticketWorkflow([sampleTicket("01")], { config: testConfig(), github, runner: checkRunner(async () => (runs += 1, { code: 0, stdout: "ok", stderr: "" })) }, { cwd });
+    expect((await runBuild(() => app, writingDriver(cwd))).ok).toBe(true);
+    expect(runs).toBe(1);
+    // The build ran its check on a dirty tree; /ship runs it once on the committed tree, and a second /ship reuses that pass.
+    expect((await app.ship()).ok).toBe(true);
+    const afterShip = runs;
+    expect(afterShip).toBe(2);
+    expect((await app.ship()).ok).toBe(true);
+    expect(runs).toBe(afterShip);
   });
 });
 

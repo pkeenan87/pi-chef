@@ -3,8 +3,7 @@ import { reviewDiff } from "../src/review/review.js";
 
 async function review(diff: string, checks: { name: string; command: string; args: string[] }[] = [], run?: (c: string, a: string[]) => Promise<{ code: number; stdout: string; stderr: string }>) {
   return reviewDiff({
-    diffs: [{ groupId: "g", diff }],
-    integratedDiff: "",
+    diff,
     checks,
     cwd: "/tmp",
     planAcceptance: [],
