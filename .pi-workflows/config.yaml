@@ -46,8 +46,8 @@ providers:
 #                               climbs ticketLow -> ticketMedium -> ticketHigh -> premium
 #   /review model pass          routing.reviewTier (premium: Opus 5.5)
 #   /plan and previews          standard (premium for high complexity or security-sensitive work)
-# Foundry `model` values are YOUR deployment names. The names below assume deployments named like the models:
-# rename them to your own deployment names in your config. The Foundry entries are fallbacks for when the account
+# Foundry `model` values are model names. They are called as Azure deployments of the same name unless your config maps
+# them with providers.foundry.deployments: { "gpt-6.1-sol": "my-sol" }. The Foundry entries are fallbacks for when the account
 # login does not work (ChatGPT Enterprise, no SuperGrok). A Foundry candidate with no endpoint or no az login is
 # unavailable and skipped, so they change nothing without Foundry. Foundry is billed per token (see pricing).
 # `api` on a Foundry entry overrides providers.foundry.api for that deployment; gpt-6.1-sol needs openai-responses
