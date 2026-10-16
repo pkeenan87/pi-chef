@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { WorkflowConfig } from "../config.js";
-import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, tierCandidates } from "../config.js";
+import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeploymentApis, tierCandidates } from "../config.js";
 import { redact } from "../redact.js";
 import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from "../domain.js";
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
@@ -103,8 +103,9 @@ interface RegisterApi {
   registerProvider(name: string, config: unknown): void;
 }
 
-function modelEntry(id: string, label: string | undefined) {
+function modelEntry(id: string, label: string | undefined, api?: string) {
   return {
+    ...(api ? { api } : {}),
     id,
     name: label ?? id,
     input: ["text" as const],
@@ -142,13 +143,19 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
       endpoint = undefined;
     }
     if (endpoint) {
+      const providerApi = foundry.api ?? "openai-completions";
+      const { apis } = foundryDeploymentApis(config);
       const audience = foundry.audience ?? FOUNDRY_DEFAULT_AUDIENCE;
       pi.registerProvider("foundry", {
         name: "Azure AI Foundry",
         baseUrl: foundryV1Base(endpoint),
-        api: "openai-completions",
+        api: providerApi,
         apiKey: `!az account get-access-token --resource ${shellQuote(audience)} --query accessToken -o tsv`,
-        models: foundryModels.map((item) => modelEntry(item.model, item.label)),
+        // Per-model api only where it differs from the provider's. The registry chat resolves the api from here.
+        models: foundryModels.map((item) => {
+          const api = apis.get(item.model);
+          return modelEntry(item.model, item.label, api && api !== providerApi ? api : undefined);
+        }),
       });
       registered.push("foundry");
     }

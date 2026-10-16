@@ -239,6 +239,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
         changedLines: changedLineCount(changedFiles(diff)),
         adHocMinLines: ctx.config.advisors.adHocMinLines,
         reviewerProvider: decision.provider,
+        reviewerModel: decision.model,
         candidates: foundAdvisors.candidates,
       })
     : undefined;

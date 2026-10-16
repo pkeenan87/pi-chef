@@ -158,7 +158,7 @@ describe("loadConfig layering", () => {
     const config = loadConfig(project);
     const models = (tier: "ticketLow" | "ticketMedium" | "ticketHigh") => tierCandidates(config, tier).map((item) => item.model);
     // No ticket lists: the built-in ticket tiers apply, whether or not the config defines their providers.
-    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["grok-4.7"], ["claude-sonnet-5-5"], ["gpt-6.1-sol"]]);
+    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["grok-4.7", "grok-4-7"], ["claude-sonnet-5-5"], ["gpt-6.1-sol", "gpt-6.1-sol"]]);
     // With all three set, the config's models are used.
     writeProject(`${base}tiers:
   cheap: [{ provider: local, model: m }]

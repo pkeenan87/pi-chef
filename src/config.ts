@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
-import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
+import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
 export interface ProviderConfig {
   type: string;
@@ -195,15 +195,28 @@ export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
 export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
   deterministic: [{ provider: "local", model: "qwen2.5-coder:7b" }],
   cheap: [{ provider: "anthropic", model: "claude-haiku-5-5" }],
-  batch: [{ provider: "openai", model: "gpt-6-luna" }],
+  // Foundry entries are fallbacks for when the account login does not work (for example ChatGPT Enterprise, or no SuperGrok).
+  // A Foundry candidate with no endpoint or no az login is unavailable and skipped. The `model` is YOUR deployment name:
+  // these assume deployments named like the models, so rename them in your config.
+  batch: [
+    { provider: "openai", model: "gpt-6-luna" },
+    { provider: "foundry", model: "gpt-6-luna", label: "GPT Luna (Foundry)" },
+  ],
   standard: [
     { provider: "anthropic", model: "claude-sonnet-5-5" },
     { provider: "openai", model: "gpt-6.1-sol" },
+    { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
   ],
   premium: [{ provider: "anthropic", model: "claude-opus-5-5" }],
-  ticketLow: [{ provider: "xai", model: "grok-4.7", label: "Grok 4.7 (SuperGrok)" }],
+  ticketLow: [
+    { provider: "xai", model: "grok-4.7", label: "Grok 4.7 (SuperGrok)" },
+    { provider: "foundry", model: "grok-4-7", label: "Grok 4.7 (Foundry)" },
+  ],
   ticketMedium: [{ provider: "anthropic", model: "claude-sonnet-5-5" }],
-  ticketHigh: [{ provider: "openai", model: "gpt-6.1-sol" }],
+  ticketHigh: [
+    { provider: "openai", model: "gpt-6.1-sol" },
+    { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
+  ],
   advisor: [
     { provider: "openai", model: "gpt-6-astra" },
     { provider: "anthropic", model: "claude-fable-5-1" },
@@ -542,7 +555,10 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
           invalid(where, `${field}.provider`, `must be one of ${PROVIDERS.join(", ")}`);
         }
         if (typeof item.model !== "string" || item.model.trim() === "") invalid(where, `${field}.model`, "must be a non-empty string");
-        if (item.api !== undefined && item.api !== "chat") invalid(where, `${field}.api`, 'must be "chat"');
+        if (item.api !== undefined && item.api !== "chat") {
+          if (typeof item.api !== "string" || !(CHAT_APIS as readonly string[]).includes(item.api)) invalid(where, `${field}.api`, `must be one of ${CHAT_APIS.join(", ")}`);
+          if (item.provider !== "foundry") invalid(where, `${field}.api`, "applies only to foundry candidates");
+        }
         if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
       });
     }
@@ -707,6 +723,7 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
         model: String(entry.model),
       };
       if (typeof entry.label === "string") candidate.label = entry.label;
+      if (typeof entry.api === "string" && (CHAT_APIS as readonly string[]).includes(entry.api)) candidate.api = entry.api as ChatApi;
       return candidate;
     });
   }
@@ -975,6 +992,7 @@ export function loadConfig(cwd: string): WorkflowConfig {
   if (unpriced.length > 0) {
     warnings.push(`No pricing rows for ${unpriced.join(", ")}: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.`);
   }
+  warnings.push(...foundryApiConflicts(config));
   if (warnings.length > 0) config.warnings = warnings;
   if (config.proprietaryCode && config.orgProviderAllowlist.length === 0) {
     throw new WorkflowError(
@@ -1093,6 +1111,31 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
   if (tier === "batch") return tierCandidates(config, "cheap");
   // Ticket tiers with nothing usable run on the general tier of the same strength.
   return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+}
+
+/**
+ * The wire API each Foundry deployment is registered with: the first tier candidate that names the deployment decides,
+ * and its own `api` (else the provider's) is used. A later candidate for the same deployment that resolves to a
+ * different api is ignored, and `conflicts` says so.
+ */
+export function foundryDeploymentApis(config: WorkflowConfig): { apis: Map<string, ChatApi>; conflicts: string[] } {
+  const base: ChatApi = config.providers.foundry?.api ?? "openai-completions";
+  const apis = new Map<string, ChatApi>();
+  const conflicts: string[] = [];
+  for (const tier of TIER_KEYS) {
+    for (const candidate of tierCandidates(config, tier)) {
+      if (candidate.provider !== "foundry" || !candidate.model) continue;
+      const api = candidate.api ?? base;
+      const first = apis.get(candidate.model);
+      if (first === undefined) apis.set(candidate.model, api);
+      else if (first !== api) conflicts.push(`tiers.${tier}: foundry/${candidate.model} asks for api ${api} but ${first} was set by an earlier tier; ${first} is used.`);
+    }
+  }
+  return { apis, conflicts };
+}
+
+export function foundryApiConflicts(config: WorkflowConfig): string[] {
+  return [...new Set(foundryDeploymentApis(config).conflicts)];
 }
 
 /** `provider/model` of every tier candidate that has no pricing row at all (any date, any billing). */

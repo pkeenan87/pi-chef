@@ -285,7 +285,7 @@ async function reviewTicketUnsafe(ctx: WorkflowContext, state: TaskState, ticket
 
   const { text: diffText } = await clipDiffSummarized(ctx, state.taskId, await ticketDiff(ctx), ctx.config.advisors.maxDiffChars);
   const found = await availableAdvisors(ctx, state.taskId, state.classification?.task_type ?? "general");
-  const advisors = advisorsFor({ difficulty: ticketDifficulty(ticket), implementerProvider: run.provider ?? "", candidates: found.candidates });
+  const advisors = advisorsFor({ difficulty: ticketDifficulty(ticket), implementerProvider: run.provider ?? "", implementerModel: run.model, candidates: found.candidates });
   const packet = advisorPacket(ticket, diffText);
 
   ctx.indicator?.stage(`${shortModel(decision.model)} review`);

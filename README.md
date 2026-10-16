@@ -292,6 +292,48 @@ Configs written for the legacy deployments route keep working: set `apiVersion` 
 
 Foundry serves chat models only (for example a `gpt-6-astra` deployment as an advisor).
 
+### Foundry as the fallback for OpenAI and xAI
+
+The built-in tiers and the sample config list a Foundry deployment after each OpenAI or xAI entry (ticketLow: `xai/grok-4.7` then `foundry/grok-4-7`; ticketHigh and standard: `openai/gpt-6.1-sol` then `foundry/gpt-6.1-sol`; batch: `openai/gpt-6-luna` then `foundry/gpt-6-luna`; advisor: Astra on OpenAI, Fable, then `foundry/gpt-6-astra`). The router tries a tier's candidates by cost per success and skips any whose provider is unavailable. A Foundry candidate with no endpoint configured, or no `az login`, is unavailable, so nothing changes for you without Foundry. The `model` values assume deployments named like the models: rename them to your own deployment names in your config (a tier list in your config replaces the built-in one).
+
+Foundry is billed per token, not by subscription, so its pricing rows are real list prices (the sample config has Azure list prices; verify them against your Azure rate card) and it has no `quota.models` rows. The medium-ticket advisor rule compares vendors by model name, so a Foundry Astra counts as OpenAI's model and a Foundry Grok as xAI's.
+
+`providers.foundry.api` sets the wire API for every Foundry deployment (default `openai-completions`). A Foundry tier entry may override it for one deployment with `api`. `gpt-6.1-sol` supports tool calling only through the Responses API, so give it `openai-responses`:
+
+```yaml
+tiers:
+  ticketHigh:
+    - { provider: openai, model: gpt-6.1-sol }
+    - { provider: foundry, model: gpt-6.1-sol, api: openai-responses }
+```
+
+If the same deployment appears in several tiers with different `api` values, the first one wins and `/status` shows a warning. `api` is accepted only on `provider: foundry` entries. Pi's Responses client posts to `<baseUrl>/responses`, and the Foundry base is `<endpoint>/openai/v1`, so a Sol request goes to `<endpoint>/openai/v1/responses` with no `api-version`.
+
+Put `endpoint` (or `endpointEnv`) and `audience` in your user config, `~/.pi/agent/chef.yaml`: a project config cannot set `endpoint` or `audience`. `az` must be on the PATH of the Pi process, because Pi runs `az account get-access-token` for each request.
+
+### Enterprise ChatGPT or no SuperGrok
+
+If your ChatGPT Enterprise login does not work in Pi for OpenAI, or you have no SuperGrok login for xAI:
+
+1. Deploy the models in Azure AI Foundry (for example `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`, `grok-4-7`) and note each deployment name.
+2. Run `az login`, and make sure `az` is on the PATH Pi runs with.
+3. In `~/.pi/agent/chef.yaml`, define the provider:
+
+   ```yaml
+   providers:
+     foundry:
+       type: azure-foundry
+       auth: azure-cli
+       endpoint: https://<resource>.services.ai.azure.com
+       routeStyle: v1
+       audience: https://ai.azure.com
+   ```
+
+4. If your deployment names differ from the model names, copy the tier lists from `.pi-workflows/config.yaml` into your config and change the Foundry `model` values. Keep `api: openai-responses` on `gpt-6.1-sol`.
+5. Copy the Foundry `pricing` rows (check them against your Azure rate card), run `/auth status` to see `foundry: ready`, then `/status`.
+
+OpenAI and xAI candidates stay in the lists; with no working login they are unavailable and the Foundry entry that follows each one is used.
+
 ## Vercel CLI and AI Gateway
 
 ```bash
