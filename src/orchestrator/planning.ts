@@ -31,6 +31,7 @@ export async function classify(ctx: WorkflowContext, text: string): Promise<{ cl
   if (!candidate || !client) return classifyTaskWithUsage(text, { minConfidence, classifier: ctx.classifier });
   await announce(ctx, undefined, "classify", { tier: "classifier", provider: candidate.provider, model: candidate.model, selectionReason: selection.reason, considered: selection.considered });
   let threw = false;
+  let failure: string | undefined;
   const decider: Decider = {
     async decide(input, questions, signal) {
       try {
@@ -38,6 +39,7 @@ export async function classify(ctx: WorkflowContext, text: string): Promise<{ cl
         return { answers: result.answers, usage: result.usage, provider: candidate.provider, model: candidate.model };
       } catch (error) {
         threw = true;
+        failure = redact((error as Error).message || String(error)).replace(/\s+/g, " ").trim().slice(0, 200) || "unknown error";
         throw error;
       }
     },
@@ -51,11 +53,25 @@ export async function classify(ctx: WorkflowContext, text: string): Promise<{ cl
   } else if (!codes.includes("low_confidence")) {
     await ctx.store.bumpMetric("classification", "classifier", false, ctx.now(), candidate);
   }
+  // Say why the model's answer was lost instead of dropping the error text: one redacted line in the chat and the task log.
+  if (threw) await reportClassifierFailure(ctx, candidate, failure ?? "unknown error", result.classification.reason_codes);
   // A call that threw or timed out may still have been billed: ledger it as unknown cost, never as zero.
   if (threw && !result.usage) {
     return { ...result, usage: { usage: { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 1 }, provider: candidate.provider, model: candidate.model } };
   }
   return result;
+}
+
+/** One redacted line about a failed Decisions classifier call, in the chat and (when a task is active) its event log. Once per distinct reason. */
+async function reportClassifierFailure(ctx: WorkflowContext, candidate: { provider: string; model: string }, reason: string, codes: string[]): Promise<void> {
+  const line = `Classifier ${candidate.provider}/${candidate.model} failed (${codes.includes("classifier_timeout") ? "timed out: " : ""}${reason}); used the keyword fallback.`;
+  const key = `classifier-failure:${candidate.provider}/${candidate.model}:${reason}`;
+  if (!ctx.warned.has(key)) {
+    ctx.warned.add(key);
+    ctx.progress?.(line);
+  }
+  const taskId = ctx.store.readActive();
+  if (taskId) await ctx.store.appendRoute(taskId, { purpose: "classify_failed", tier: "classifier", provider: candidate.provider, model: candidate.model, reason: line, considered: [] }, iso(ctx));
 }
 
 export function blank(taskId: string, request: string, at: string): TaskState {

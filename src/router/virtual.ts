@@ -100,6 +100,8 @@ export interface VirtualDeps<M extends ModelLike> {
   onRoute?(event: RouteEvent): void | Promise<void>;
   /** Runs before a candidate is returned, e.g. to refresh a provider token. */
   prepare?(candidate: TierCandidate): void | Promise<void>;
+  /** True while /plan is running (the workflow's planning stage is active). Read lazily; absent means never. */
+  planning?(): boolean;
   /** Account providers whose Pi-stored API key the user allowed (providers.<name>.apiKeyFallback). */
   apiKeyFallback?(provider: string): boolean;
 }
@@ -125,8 +127,18 @@ function textOf(content: unknown): string {
   return content.flatMap((block) => (block && typeof block === "object" && (block as { type?: string }).type === "text" ? [String((block as { text?: unknown }).text ?? "")] : [])).join("\n");
 }
 
+/**
+ * The hidden `plan-interview-context` message (rules and interview state, added by before_agent_start) reaches the
+ * router as one more user message: Pi converts custom messages to user messages, so only its text tells it apart.
+ * Every such prompt starts with a "[PLAN ...]" marker (see prompts.ts). Classifying it would match keywords in our
+ * own rules instead of the user's request.
+ */
+export const PLAN_CONTEXT_MARKER = /^\s*\[PLAN [A-Z ]+\]/;
+
 function lastUserIndex(messages: readonly RouterMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i]!.role === "user") return i;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]!.role === "user" && !PLAN_CONTEXT_MARKER.test(textOf(messages[i]!.content))) return i;
+  }
   return -1;
 }
 
@@ -216,6 +228,23 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
   const done = async (_model: M, candidate: TierCandidate): Promise<void> => {
     await deps.prepare?.(candidate);
   };
+
+  // While /plan runs, the chat model is at least standard, and premium for high-complexity or sensitive work.
+  const planning = deps.planning?.() === true;
+  if (planning && state && request.reason !== "direct" && !(request.reason === "retry" && request.failed)) {
+    const floor: ChatTier = state.classification.complexity === "high" || state.classification.securitySensitive ? "premium" : "standard";
+    if (rank(state.tier) < rank(floor)) {
+      const snapshot = await deps.snapshot();
+      if (snapshot.budget === "hard") throw new Error("Task or daily budget is exhausted. Run /cost for details.");
+      for (const tier of CHAT_TIERS.slice(rank(floor))) {
+        const pick = await choose(snapshot, tier, {}, "planning needs at least standard");
+        if (!pick) continue;
+        const next: RouterState = { ...state, tier, provider: pick.candidate.provider, model: pick.candidate.model, phase: "plan", switches: state.switches + 1 };
+        await emit("planning", next, pick.reason);
+        return { model: pick.model, thinkingLevel, state: next };
+      }
+    }
+  }
 
   // Tool follow-ups stay put; they carry the plan-to-build handoff, nothing else.
   if (request.reason === "continuation") {
@@ -405,7 +434,8 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
 
   async function initial(snapshot: RouterSnapshot, classification: AcceptedClassification, exclude: ModelLike | undefined): Promise<RouterResult<M>> {
     const summary = summarize(classification, snapshot.config);
-    const tier = wantedTier(classification, snapshot.config, thinkingLevel);
+    let tier = wantedTier(classification, snapshot.config, thinkingLevel);
+    if (planning) tier = maxTier(tier, summary.complexity === "high" || summary.securitySensitive ? "premium" : "standard");
     const decision = await decide(snapshot, { ...classification, recommended_tier: tier }, exclude);
     const next: RouterState = {
       v: 1,

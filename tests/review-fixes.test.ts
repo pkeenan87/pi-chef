@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -239,5 +239,33 @@ describe("R6/R8 classifier metrics and ledger", () => {
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ provider: "foundry", model: "Microsoft-Decision-1", actualUsd: null, usageKnown: false });
     expect(cell(w)).toMatchObject({ failure: 1 });
+  });
+
+  it("records why a Decisions classifier call failed, redacted and on one line", async () => {
+    const lines: string[] = [];
+    const w = workflow(await tempRepo(), {
+      config: tieredConfig(),
+      auth: { async inspect(provider: ProviderId): Promise<ProviderAuthView> { return { provider, status: provider === "vercel" ? "missing" : "ready", method: "oauth", detail: "" }; } },
+      deciders: {
+        foundry: {
+          id: "foundry",
+          decide: async () => {
+            throw new Error("HTTP 404 /decisions\nAuthorization: Bearer abc.def.ghi-secret");
+          },
+        },
+      },
+      progress: (line) => lines.push(line),
+    });
+    await w.route("add a feature");
+    // A task is active once planning starts; a classifier failure then also lands in its event log.
+    await w.plan("add a feature");
+    await w.classifyChat("add another feature");
+    const line = lines.find((item) => item.startsWith("Classifier foundry/Microsoft-Decision-1 failed"));
+    expect(line).toMatch(/HTTP 404 \/decisions/);
+    expect(line).not.toMatch(/\n|abc\.def|ghi-secret/);
+    const events = readFileSync(path.join(w.store.taskDir(w.activeTaskId()!), "events.jsonl"), "utf8");
+    expect(events).toMatch(/classify_failed/);
+    expect(events).toMatch(/HTTP 404/);
+    expect(events).not.toMatch(/ghi-secret/);
   });
 });

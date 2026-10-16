@@ -484,6 +484,7 @@ function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
       const result = await routeVirtual<PiModel>(request as unknown as RouterRequest<PiModel>, {
         registry,
         now: () => workflow?.now() ?? new Date(),
+        planning: () => workflow?.planningStage() !== undefined,
         classify: async (text) => (workflow ? workflow.classifyChat(text) : fallbackClassification(text, "virtual_route")),
         async snapshot() {
           const taskId = workflow?.activeTaskId();

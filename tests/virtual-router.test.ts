@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AcceptedClassification, Tier } from "../src/domain.js";
+import { INTERVIEW_RULES, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "../src/orchestrator/prompts.js";
+import { BUILD_CHUNK_RULES } from "../src/orchestrator/build.js";
+import { fallbackClassification } from "../src/router/classify.js";
 import { routeVirtual, type ModelLike, type RouterRequest, type RouterSnapshot, type VirtualDeps } from "../src/router/virtual.js";
 import { seededRng, tieredConfig } from "./helpers.js";
 
@@ -250,4 +253,46 @@ describe("routeVirtual", () => {
     expect(next.model.id).toBe("claude-sonnet-5-5");
     expect(next.state).not.toBe(first.state);
   });
+});
+
+describe("routeVirtual while /plan runs", () => {
+  it("classifies the user's text, not the hidden plan-interview context after it", async () => {
+    const t = setup();
+    await routeVirtual(
+      t.request({ messages: [{ role: "user", content: "Plan this request: add a retry counter" }, { role: "user", content: [{ type: "text", text: `${INTERVIEW_RULES}\n\nRequest: x` }] }] }),
+      t.deps,
+    );
+    expect(t.classify).toHaveBeenCalledWith("Plan this request: add a retry counter", undefined);
+  });
+
+  it("keeps the chat model at least standard, and premium for high complexity or sensitive work", async () => {
+    const cheap = setup({ tier: "cheap" });
+    const first = await routeVirtual(cheap.request(), cheap.deps);
+    expect(first.state!.tier).toBe("cheap");
+    const planning = { ...cheap.deps, planning: () => true };
+    const lifted = await routeVirtual(cheap.request({ state: first.state, reason: "continuation" }), planning);
+    expect(lifted.state).toMatchObject({ tier: "standard", switches: 1 });
+    // A first plan turn classified mechanical/low is routed to standard too.
+    const mechanical = setup({ tier: "cheap", extra: { task_type: "mechanical", complexity: "low", risk: "low" } });
+    const initial = await routeVirtual(mechanical.request(), { ...mechanical.deps, planning: () => true });
+    expect(initial.state!.tier).toBe("standard");
+    // High complexity and sensitive work get premium.
+    for (const extra of [{ complexity: "high" as const }, { risk: "high" as const }]) {
+      const hard = setup({ tier: "cheap", extra });
+      const result = await routeVirtual(hard.request(), { ...hard.deps, planning: () => true });
+      expect(result.state!.tier).toBe("premium");
+    }
+    // Outside planning nothing changes.
+    const after = await routeVirtual(cheap.request({ state: first.state, reason: "continuation" }), cheap.deps);
+    expect(after.state).toBeUndefined();
+  });
+});
+
+describe("our own prompts never trip the keyword classifier", () => {
+  const prompts = { INTERVIEW_RULES, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES: TICKET_RULES(150000), BUILD_CHUNK_RULES };
+  for (const [name, text] of Object.entries(prompts)) {
+    it(`${name} does not classify as mechanical`, () => {
+      expect(fallbackClassification(text).task_type).not.toBe("mechanical");
+    });
+  }
 });

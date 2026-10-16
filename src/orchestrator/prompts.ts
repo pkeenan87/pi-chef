@@ -14,7 +14,7 @@ export const INTERVIEW_RULES = `[PLAN INTERVIEW]
 You are planning, not building. Edit and write tools are off; use read, grep, find, ls, safe bash, web_search and web_fetch.
 1. Look up FACTS yourself with tools. Ask the user only DECISIONS (scope, trade-offs, preferences) that tools cannot answer.
 2. Ask in rounds with plan_questions. A round holds every question whose prerequisites are settled. A question that depends on another answer sets dependsOn and waits for the next round.
-3. Ask 3-${MAX_INTERVIEW_QUESTIONS} questions in TOTAL across all rounds. Fewer for small or mechanical tasks. Never more than ${MAX_INTERVIEW_QUESTIONS}; the tool rejects a round that would exceed it.
+3. Ask 3-${MAX_INTERVIEW_QUESTIONS} questions in TOTAL across all rounds. Fewer for small tasks. Never more than ${MAX_INTERVIEW_QUESTIONS}; the tool rejects a round that would exceed it.
 4. Every question has 2-4 options, exactly one recommended option, and a one-line reason. Word each question so accepting the recommendation is the easy path.
 5. Stop when no open decision remains or the cap is reached. Then call plan_spec once.
 6. After plan_spec, call plan_tickets. Do not write code or edit files.
@@ -32,7 +32,7 @@ export const TICKET_RULES = (target: number) => `[PLAN TICKETS]
 The spec is saved. Break the work into tickets and call plan_tickets once.
 - Vertical tracer-bullet slices: each ticket delivers one end-to-end behavior and is independently demoable and testable. Never slice layer by layer.
 - Each ticket must fit ONE fresh context window. Soft target: ${target} tokens (estimatedContextTokens counts the ticket text, the files it touches, and about 20K of system and tool overhead). The tool rejects a ticket estimated above the target; split it.
-- For wide mechanical refactors use expand-contract: add the new path, migrate callers in small tickets, then remove the old path.
+- For wide refactors use expand-contract: add the new path, migrate callers in small tickets, then remove the old path.
 - whatToBuild states the end-to-end behavior. implementation is the technical how: the files to create or change, the functions, types and signatures to add (with names), how they wire into existing code, and the tests to write. Name real paths and symbols from the code you read.
 - List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
