@@ -52,7 +52,7 @@ describe("taskState", () => {
 
   it("shows a stopped ticket with a short reason", () => {
     const failed = task({ ticketRuns: { "01": run(), "02": run({ status: "failed", error: "npm test failed:\nexit 1 | 3 tests" }) } });
-    expect(taskState(failed, undefined).line).toBe("Stopped · ticket 02: npm test failed: exit 1 \\| 3 tests · /build resumes");
+    expect(taskState(failed, undefined).line).toBe("Stopped · ticket 02: npm test failed: exit 1 | 3 tests · /build resumes");
     const halted = task({ ticketRuns: { "01": run({ status: "in-progress" }) } });
     expect(taskState(halted, undefined).line).toBe("Stopped · ticket 01: stopped · /build resumes");
   });

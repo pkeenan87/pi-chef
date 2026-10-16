@@ -4,10 +4,11 @@ import { classifyKeywords, isSecuritySensitive, plannerClassification, type Plan
 import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { blank, closeFinished, plan } from "./planning.js";
+import { announceParked, newTask, plan, retireCurrent } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
+import { activeTask, displayName } from "./tasks.js";
 
 export interface InterviewOption {
   value: string;
@@ -133,7 +134,7 @@ function resumeMessage(request: string): string {
  */
 export function startPlan(ctx: WorkflowContext, request: string, options: { noQuestions?: boolean } = {}): Promise<CommandResult> {
   return guard(async () => {
-    const current = active(ctx);
+    const current = await activeTask(ctx);
     const text = request.trim();
     if (!text && !current?.planning) return fail("USAGE", "Usage: /plan [--no-questions] <request>");
     if (text && (/```tasks/.test(text) || !ctx.startTurn)) return plan(ctx, request);
@@ -141,40 +142,32 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     const safe = redact(text);
     const noQuestions = options.noQuestions ?? false;
     const at = iso(ctx);
-    // Resume: same request (or none) and an interview already on disk.
+    // Resume: no request, or the same request again, and an interview already on disk. A different request is a new task.
     if (current?.planning && (!text || current.request === safe)) {
       const interview = readInterview(ctx, current.taskId);
       if (interview) {
         await ctx.store.update(current.taskId, "plan resumed", (task) => toPlanning(task, at));
         showStatus(ctx);
         ctx.startTurn(resumeMessage(current.request));
-        return done(`Resuming the plan for ${current.taskId}. ${planningStatusText(ctx) ?? ""}`.trim(), { taskId: current.taskId, resumed: true });
+        return done(`Resuming the plan for ${displayName(current)}. ${planningStatusText(ctx) ?? ""}`.trim(), { taskId: current.taskId, resumed: true });
       }
     }
-    if (budgetState(ctx, ctx.store.readActive()).status === "hard") {
+    if (budgetState(ctx).status === "hard") {
       return fail("BUDGET", "Task or daily budget is exhausted. /plan was not run. Run /cost for details.");
     }
-    const existing = await closeFinished(ctx, current);
-    const terminal = !existing || ["COMPLETE", "FAILED", "IDLE"].includes(existing.phase);
-    const reused: AcceptedClassification | undefined = !terminal && existing?.request === safe ? existing.classification : undefined;
+    // A request always starts a new task. A finished task is closed; any other is parked untouched (/plans switches back).
+    const parked = await retireCurrent(ctx, current);
     // Until plan_spec saves the planner's rating, the task has the keyword classification.
-    const classification: AcceptedClassification = reused ?? classifyKeywords(safe);
-    const routing = await decide(ctx, classification, "plan", { taskId: existing?.taskId });
-    let state: TaskState;
-    if (terminal) {
-      const taskId = `task-${at.replace(/[-:.TZ]/g, "").slice(0, 14)}-${ctx.id()}`;
-      state = await ctx.store.create({ ...blank(taskId, safe, at), classification, routing, planning: { stage: "interview", noQuestions } });
-    } else {
-      state = await ctx.store.update(existing!.taskId, "plan interview started", (task) =>
-        ({ ...toPlanning(task, at), classification, routing, request: safe, planning: { stage: "interview", noQuestions } }),
-      );
-    }
+    const classification: AcceptedClassification = classifyKeywords(safe);
+    const routing = await decide(ctx, classification, "plan", {});
+    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, routing, planning: { stage: "interview", noQuestions } });
+    announceParked(ctx, parked);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     await announce(ctx, state.taskId, "interview", routing);
     showStatus(ctx);
     ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}:\n\n${safe}`);
     return done(
-      noQuestions ? `Planning ${state.taskId} without an interview. The model will write the spec and tickets.` : `Interview started for ${state.taskId}. ${planningStatusText(ctx)}`,
+      noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`,
       { taskId: state.taskId, routing },
     );
   });

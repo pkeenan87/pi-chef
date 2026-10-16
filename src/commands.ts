@@ -10,7 +10,8 @@ export interface CommandSpec {
   /** For commands that open Pi sessions: the host passes the live workflow getter and a session driver, and `run` is not used. */
   drive?: (getWorkflow: () => Workflow, driver: BuildDriver) => Promise<CommandResult>;
   description: string;
-  complete: (prefix: string) => { label: string; value: string }[];
+  /** Completions for the text typed so far. The live workflow is passed when there is one, for commands that complete task names. */
+  complete: (prefix: string, workflow?: Workflow) => { label: string; value: string }[];
 }
 
 const PROVIDER_VALUES = ["openai", "anthropic", "xai", "foundry", "vercel", "local"];
@@ -24,7 +25,18 @@ export const COMMANDS: CommandSpec[] = [
     description: "Plan a task: a short interview of decisions (3-7 questions with recommendations), a spec, then tickets for approval. --no-questions skips the interview. Does not edit the repo.",
     complete: (prefix) => completeWords(prefix, ["--no-questions"]),
   },
-  { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets).", complete: () => [] },
+  { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets), under its name and state.", complete: () => [] },
+  {
+    name: "plans", run: (w, args) => w.plans(args),
+    description: "List your tasks (/plans --all adds closed ones), switch to one with /plans <name> (checks out its branch when the tree is clean and shows its plan), or close one with /plans close <name>. /plan always starts a new task and parks an unfinished one.",
+    complete: (prefix, workflow) => {
+      const words = prefix.split(/\s+/);
+      const token = words.at(-1) ?? "";
+      const names = (all: boolean) => workflow?.taskNames(all) ?? [];
+      const pool = words[0] === "close" && words.length > 1 ? names(false) : words.length > 1 ? [] : ["close", "--all", ...names(false)];
+      return [...new Set(pool)].filter((word) => word.startsWith(token)).map((value) => ({ label: value, value }));
+    },
+  },
   {
     name: "build", run: async () => fail("NO_SESSION", "/build needs a Pi session to open a fresh session per ticket."),
     drive: (getWorkflow, driver) => runBuild(getWorkflow, driver),

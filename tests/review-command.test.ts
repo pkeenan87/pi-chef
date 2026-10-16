@@ -311,7 +311,7 @@ describe("/review after /build", () => {
     expect(existsSync(path.join(dir, "reports", "review.json"))).toBe(true);
     expect(readFileSync(path.join(dir, "reports", "review.md"), "utf8")).toContain("## Review passed");
     expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(head);
-    expect(await git(t.cwd, "branch", "--show-current")).toBe(`chef/${t.taskId}`);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe(`chef/${t.app.store.load(t.taskId)!.name}`);
   });
 
   it("falls back to the tickets' checks when the config has none, and cannot pass with no checks at all", async () => {

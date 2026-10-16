@@ -42,7 +42,7 @@ describe("workflow", () => {
     const restarted = new Workflow({ cwd, config: testConfig(), auth: readyAuth(), now: () => new Date("2026-10-14T12:00:00.000Z"), confirm: async () => true, runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })) });
     const status = await restarted.status();
     expect(status.text).toContain("| Task | ");
-    expect(status.text).toContain("(AWAITING_PLAN_APPROVAL) |");
+    expect(status.text).toMatch(/\| Task \| \S+ \(task-\d{14}-[^)]+\) \|/);
     expect(status.text).toMatch(/\| Plan \| v1 approved \d\d:\d\d \|/);
     expect(status.text).toContain("## Status · Approved v1 · run /build");
   });
@@ -91,7 +91,7 @@ describe("workflow", () => {
     await app.approveDraft();
     const result = await app.startBuild();
     expect(result.code).toBe("SECURITY_PAUSE");
-    expect((await app.status()).text).toContain("(PAUSED) |");
+    expect((await app.status()).text).toContain("## Status · Paused · ");
   });
 });
 
@@ -105,8 +105,10 @@ describe("a new /plan closes a finished task", () => {
     expect(app.store.load(firstId)!.phase).toBe("IMPLEMENTING");
     const result = await app.startPlan(request);
     expect(result.ok, result.text).toBe(true);
-    expect(lines).toContain(`Closed ${firstId}.`);
-    expect(app.store.load(firstId)!.phase).toBe("COMPLETE");
+    const closed = app.store.load(firstId)!;
+    expect(lines).toContain(`Closed ${closed.name}.`);
+    expect(closed.phase).toBe("COMPLETE");
+    expect(closed.closedReason).toBe("closed by a new plan");
     expect(app.activeTaskId()).not.toBe(firstId);
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
   });
@@ -119,7 +121,7 @@ describe("a new /plan closes a finished task", () => {
       await app.store.update(firstId, "old file", (task) => ({ ...task, phase }));
       expect((await app.startPlan(request)).ok).toBe(true);
       expect(app.store.load(firstId)!.phase).toBe("COMPLETE");
-      expect(lines).toContain(`Closed ${firstId}.`);
+      expect(lines).toContain(`Closed ${app.store.load(firstId)!.name}.`);
     }
     const { app } = await builtWorkflow();
     const id = app.activeTaskId()!;
@@ -129,14 +131,33 @@ describe("a new /plan closes a finished task", () => {
     expect(app.activeTaskId()).not.toBe(id);
   });
 
-  it("revises, rather than closes, a task that still has unfinished tickets", async () => {
+  it("parks, rather than closes or revises, a task that still has unfinished tickets", async () => {
     const cwd = await tempRepo();
-    const { app } = await ticketWorkflow([sampleTicket("01"), sampleTicket("02")], { config: testConfig(), startTurn: () => undefined }, { cwd });
+    const lines: string[] = [];
+    const { app } = await ticketWorkflow([sampleTicket("01"), sampleTicket("02")], { config: testConfig(), startTurn: () => undefined, progress: (line) => void lines.push(line) }, { cwd });
     const id = app.activeTaskId()!;
     await app.store.update(id, "mid-build", (task) => ({ ...task, phase: "IMPLEMENTING" }));
+    const before = app.store.load(id)!;
     expect((await app.startPlan(request)).ok).toBe(true);
-    expect(app.activeTaskId()).toBe(id);
-    expect(app.store.load(id)!.phase).toBe("PLANNING");
+    // The new task is active and the old one is exactly as it was.
+    expect(app.activeTaskId()).not.toBe(id);
+    expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
+    expect(app.store.load(app.activeTaskId()!)!.request).toBe(request);
+    expect(app.store.load(id)).toEqual(before);
+    const parked = lines.find((line) => line.startsWith("Parked "))!;
+    expect(parked).toBe(`Parked ${before.name} (Approved v1 · run /build). /plans ${before.name} switches back.`);
+  });
+
+  it("never replans another task: the same request twice makes two tasks, a literal plan too", async () => {
+    const cwd = await tempRepo();
+    const app = workflow(cwd, { startTurn: () => undefined });
+    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
+    const first = app.activeTaskId()!;
+    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
+    const second = app.activeTaskId()!;
+    expect(second).not.toBe(first);
+    expect(app.store.load(first)!.phase).toBe("AWAITING_PLAN_APPROVAL");
+    expect(app.store.load(first)!.name).not.toBe(app.store.load(second)!.name);
   });
 });
 

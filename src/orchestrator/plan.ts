@@ -178,16 +178,6 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined, c
   return `${lines.join("\n")}\n`;
 }
 
-export function materialChange(left: PlanDocument, right: PlanDocument): boolean {
-  const signature = (plan: PlanDocument) =>
-    JSON.stringify({
-      groups: plan.groups.map((group) => ({ id: group.id, files: [...group.files].sort(), dependsOn: [...group.dependsOn].sort() })),
-      acceptance: plan.acceptance,
-      securitySensitive: plan.securitySensitive,
-    });
-  return signature(left) !== signature(right);
-}
-
 /** Rejects duplicate group ids, missing dependencies, and cycles before any work starts. */
 /**
  * The run state a task carries into a new plan draft. Attempts start over. A ticket run survives only for a ticket that is

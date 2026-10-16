@@ -522,6 +522,11 @@ export interface TicketAttempt {
 
 export interface TaskState {
   taskId: string;
+  /** Short readable name from the request (`fix-login-redirect`); also names the default build branch. Older tasks have none. */
+  name?: string;
+  /** Set when the task was closed (a person, or a new /plan after it finished). Its files and branch are kept. */
+  closedAt?: string;
+  closedReason?: string;
   phase: Phase;
   planning?: PlanningProgress;
   /** A freshly drafted plan that has not been shown yet: the extension posts it and asks for the decision when the planning turn settles. */

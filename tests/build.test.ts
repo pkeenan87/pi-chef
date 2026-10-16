@@ -111,7 +111,7 @@ describe("/build commits", () => {
     expect(result.ok, result.text).toBe(true);
     expect(result.text).toContain("/review");
     const branch = await git(t.cwd, "branch", "--show-current");
-    expect(branch).toBe(`chef/${t.taskId}`);
+    expect(branch).toBe(`chef/${t.app.store.load(t.taskId)!.name}`);
     expect(await git(t.cwd, "log", "--format=%s", "-3")).toBe("02: Ticket 02\n01: Ticket 01\nbase");
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD~1")).toBe("f01.txt");
     expect(await git(t.cwd, "status", "--porcelain")).toBe("");
@@ -473,7 +473,7 @@ describe("/build branch and approval", () => {
     expect(build.baseSha).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it("refuses to resume on a different branch", async () => {
+  it("refuses to resume on a different branch with uncommitted changes, naming the branch", async () => {
     const t = await buildTask();
     t.passing.ok = false;
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
@@ -482,9 +482,28 @@ describe("/build branch and approval", () => {
     await git(t.cwd, "switch", "-c", "elsewhere");
     const again = fakeDriver(t.cwd, () => undefined);
     const result = await t.run(again.driver);
-    expect(result.code).toBe("WRONG_BRANCH");
-    expect(result.text).toContain(`git switch ${branch}`);
+    expect(result.code).toBe("DIRTY_TREE");
+    expect(result.text).toContain(branch);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe("elsewhere");
     expect(again.state.fresh).toBe(0);
+  });
+
+  it("switches to the build's branch when the tree is clean, and says so", async () => {
+    const t = await buildTask();
+    t.passing.ok = false;
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    await t.run(d.driver);
+    const branch = t.load().build!.branch;
+    await git(t.cwd, "add", "-A");
+    await git(t.cwd, "commit", "-q", "-m", "wip");
+    await git(t.cwd, "switch", "-c", "elsewhere");
+    expect(await git(t.cwd, "branch", "--show-current")).toBe("elsewhere");
+    t.passing.ok = true;
+    const again = fakeDriver(t.cwd, (send) => again.write(`g${send.ticket}.txt`));
+    const result = await t.run(again.driver);
+    expect(result.ok, result.text).toBe(true);
+    expect(t.progress.some((line) => line.includes(`Switched from elsewhere to ${branch}`))).toBe(true);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe(branch);
   });
 
   it("refuses to start a fresh build on a dirty tree the user will not commit, but not a resumed one", async () => {

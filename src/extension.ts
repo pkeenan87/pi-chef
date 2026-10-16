@@ -467,7 +467,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   for (const spec of COMMANDS) {
     pi.registerCommand(spec.name, {
       description: spec.description,
-      getArgumentCompletions: (prefix) => spec.complete(prefix),
+      getArgumentCompletions: (prefix) => spec.complete(prefix, active),
       handler: async (args, ctx) => {
         if (args.trim() === "help" || args.trim() === "--help") {
           ctx.ui.notify(spec.description, "info");

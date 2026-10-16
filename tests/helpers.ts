@@ -5,7 +5,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { ProviderId, Ticket, TokenUsage } from "../src/domain.js";
+import type { ProviderId, TaskState, Ticket, TokenUsage } from "../src/domain.js";
+import { GitWorkspace } from "../src/git/workspace.js";
 import type { WorkflowContext } from "../src/orchestrator/context.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
 import { runBuild, type BuildDriver } from "../src/orchestrator/build.js";
@@ -267,4 +268,31 @@ export function fakeChat(answer: (call: FakeCall) => string | { text: string; us
     return { text, usage, provider: candidate.provider, model: candidate.model };
   };
   return { chat, calls };
+}
+
+/** A GitWorkspace that records the argv of every git call, for tests that must show a command made none. */
+export class SpyGit extends GitWorkspace {
+  readonly calls: string[][] = [];
+  override async git(args: string[], cwd?: string) {
+    this.calls.push(args);
+    return super.git(args, cwd);
+  }
+}
+
+/** Writes a task straight into the store (it becomes the active one, as `store.create` makes it). `branch` gives it a build branch. */
+export async function addTask(app: Workflow, name: string, options: { branch?: string; phase?: TaskState["phase"]; at?: string; request?: string; named?: boolean } = {}): Promise<TaskState> {
+  const at = options.at ?? "2026-10-14T12:00:00.000Z";
+  const base: TaskState = {
+    taskId: `task-${at.replace(/[-:.TZ]/g, "").slice(0, 14)}-${name}`,
+    ...(options.named === false ? {} : { name }),
+    phase: options.phase ?? "PLANNING",
+    createdAt: at,
+    updatedAt: at,
+    phaseEnteredAt: at,
+    request: options.request ?? `Request for ${name}`,
+    publishApproved: false,
+    attempts: [],
+    ...(options.branch ? { build: { branch: options.branch, base: "main", baseSha: "0".repeat(40) } } : {}),
+  };
+  return contextOf(app).store.create(base);
 }

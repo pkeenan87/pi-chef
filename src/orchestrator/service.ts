@@ -18,6 +18,7 @@ import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAns
 import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { presentPendingPlan } from "./present-plan.js";
+import { plans, taskNames } from "./plans.js";
 import { approveDraft, plan, route, showPlan } from "./planning.js";
 import { ProgressIndicator } from "./progress.js";
 import { review } from "./review.js";
@@ -246,6 +247,16 @@ export class Workflow {
 
   showPlan(): Promise<CommandResult> {
     return showPlan(this.ctx);
+  }
+
+  /** `/plans`: list the tasks, switch to one, or close one. */
+  plans(arg = ""): Promise<CommandResult> {
+    return plans(this.ctx, arg);
+  }
+
+  /** Task names for completion (open ones, and closed ones with `all`). */
+  taskNames(all = false): string[] {
+    return taskNames(this.ctx, all);
   }
 
   /** `/build`: starts or resumes the build (branch, budget, approval). The session loop is in extension.ts. */

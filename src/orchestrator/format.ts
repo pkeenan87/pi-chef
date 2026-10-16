@@ -23,17 +23,24 @@ export function formatTokens(count: number): string {
   return String(count);
 }
 
+/** Plain one-line text: newlines and runs of space collapsed, clipped to `max` characters with an ellipsis. No markdown escapes. */
+export function flat(text: string, max?: number): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  return max !== undefined && one.length > max ? `${one.slice(0, Math.max(0, max - 1)).trimEnd()}…` : one;
+}
+
 /**
- * Text for one markdown table cell: newlines and runs of space collapsed, `|` escaped, clipped to `max` characters
- * (with an ellipsis) before escaping so a clip never splits an escape.
+ * Text for one markdown table cell: `flat` text with `|` escaped (the clip happens first, so it never splits an escape).
+ * Escape only here, at the table; text for a notify or a result stays plain.
  */
 export function cell(text: string, max?: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  const clipped = max !== undefined && flat.length > max ? `${flat.slice(0, Math.max(0, max - 1)).trimEnd()}…` : flat;
-  return clipped.replace(/\|/g, "\\|");
+  return flat(text, max).replace(/\|/g, "\\|");
 }
 
 /** "$0.19", "<$0.01" for a positive amount under a cent, "$0.00" for none. For report tables; the ledger keeps full precision. */
 export function formatUsdShort(usd: number): string {
   return usd > 0 && usd < 0.005 ? "<$0.01" : `$${usd.toFixed(2)}`;
 }
+
+/** A markdown table: pass cells through `cell` so a `|` cannot split a row. */
+export const mdTable = (head: string[], rows: string[][]): string[] => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];

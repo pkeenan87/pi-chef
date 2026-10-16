@@ -320,19 +320,35 @@ export class TaskStore {
     return readdirSync(dir).filter((name) => existsSync(path.join(dir, name, "events.jsonl")));
   }
 
-  readActive(): string | undefined {
+  /** The pointer file: the active task and the branch that was checked out when it was last resolved (absent in older files). */
+  readActiveFile(): { taskId?: string; seenBranch?: string } {
     const file = path.join(this.root, "active-task.json");
-    if (!existsSync(file)) return undefined;
+    if (!existsSync(file)) return {};
     try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as { taskId?: string };
-      return parsed.taskId;
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as { taskId?: unknown; seenBranch?: unknown };
+      return {
+        ...(typeof parsed.taskId === "string" ? { taskId: parsed.taskId } : {}),
+        ...(typeof parsed.seenBranch === "string" ? { seenBranch: parsed.seenBranch } : {}),
+      };
     } catch {
-      return undefined;
+      return {};
     }
   }
 
-  setActive(taskId: string): void {
-    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify({ taskId }, null, 2));
+  readActive(): string | undefined {
+    return this.readActiveFile().taskId;
+  }
+
+  /** Points at a task. `seenBranch` is the branch checked out now; left out, the recorded one is kept. */
+  setActive(taskId: string, seenBranch?: string): void {
+    const seen = seenBranch ?? this.readActiveFile().seenBranch;
+    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify({ taskId, ...(seen ? { seenBranch: seen } : {}) }, null, 2));
+  }
+
+  /** No active task (the file stays, with no id). */
+  clearActive(): void {
+    const seen = this.readActiveFile().seenBranch;
+    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify(seen ? { seenBranch: seen } : {}, null, 2));
   }
 
   /** Number of corrupt (non-tail) lines in a task's event log. */

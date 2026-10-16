@@ -3,15 +3,18 @@ import type { AcceptedClassification, CommandResult, PlanDocument, TaskState } f
 import { classifyKeywords } from "../router/classify.js";
 import { redact } from "../redact.js";
 import { budgetState, remember } from "./budget.js";
-import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireActive, transition, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, knownZero, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
+import { acceptanceCriteria, applyOverlap, assertGraph, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
 import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
+import { taskState } from "./state-label.js";
+import { activeTask, closeTask, displayName, isFinished, nameForNewTask, requireActiveTask } from "./tasks.js";
 
-export function blank(taskId: string, request: string, at: string): TaskState {
+export function blank(taskId: string, request: string, at: string, name?: string): TaskState {
   return {
     taskId,
+    ...(name ? { name } : {}),
     phase: "PLANNING",
     createdAt: at,
     updatedAt: at,
@@ -22,54 +25,56 @@ export function blank(taskId: string, request: string, at: string): TaskState {
   };
 }
 
+/** A new task for a request: a fresh id (the directory name) and a readable name that no other task uses. */
+export function newTask(ctx: WorkflowContext, request: string, at: string): TaskState {
+  const taskId = `task-${at.replace(/[-:.TZ]/g, "").slice(0, 14)}-${ctx.id()}`;
+  return blank(taskId, request, at, nameForNewTask(ctx, request));
+}
+
 /** Moves a task back to AWAITING_PLAN_APPROVAL for a new draft; a paused task resumes through PLANNING first. */
 export function backToApproval(task: TaskState, at: string, note?: string): TaskState {
   return move(task.phase === "PAUSED" ? move(task, "PLANNING", at) : task, "AWAITING_PLAN_APPROVAL", at, note);
 }
 
-/** True when the task has a plan with tickets and every one of them is done. */
-function allTicketsDone(task: TaskState): boolean {
-  const tickets = task.plan?.tickets ?? [];
-  return tickets.length > 0 && tickets.every((ticket) => task.ticketRuns?.[ticket.id]?.status === "done");
-}
-
 /**
- * Closes a finished task so a new /plan starts fresh: one from an old file that was published (PUBLISHED, AUTOPILOT,
- * MERGE_READY), or one whose tickets are all built. Any other unfinished task is not closed here; /plan revises it.
- * Returns the task as it stands afterwards.
+ * What the active task becomes when a new /plan starts. A finished task (all tickets built, or an older published one)
+ * is closed. Any other unfinished task is left exactly as it is and is returned: it is parked, and the caller says so
+ * once the new task exists. /plan never revises another task's plan.
  */
-export async function closeFinished(ctx: WorkflowContext, task: TaskState | undefined): Promise<TaskState | undefined> {
-  if (!task) return task;
-  if (!PUBLISHED_PHASES.includes(task.phase) && !(task.phase === "IMPLEMENTING" && allTicketsDone(task))) return task;
-  await transition(ctx, task.taskId, "closed by a new plan", "COMPLETE");
-  ctx.progress?.(`Closed ${task.taskId}.`);
-  return active(ctx);
+export async function retireCurrent(ctx: WorkflowContext, task: TaskState | undefined): Promise<TaskState | undefined> {
+  if (!task || task.phase === "COMPLETE" || task.phase === "IDLE") return undefined;
+  if (isFinished(task)) {
+    await closeTask(ctx, task.taskId, "closed by a new plan");
+    ctx.progress?.(`Closed ${displayName(task)}.`);
+    return undefined;
+  }
+  return task;
 }
 
+/** The chat line for a task that a new /plan parked. */
+export function announceParked(ctx: WorkflowContext, parked: TaskState | undefined): void {
+  if (!parked) return;
+  const name = displayName(parked);
+  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.`);
+}
+
+/** Starts a new task for a literal ```tasks request and drafts its plan. The old active task is closed if finished, else parked. */
 export function plan(ctx: WorkflowContext, request: string): Promise<CommandResult> {
   return guard(async () => {
     const safe = redact(request);
     const at = iso(ctx);
-    if (budgetState(ctx, ctx.store.readActive()).status === "hard") {
+    if (budgetState(ctx).status === "hard") {
       return fail("BUDGET", "Task or daily budget is exhausted. /plan was not run. Run /cost for details.");
     }
     const parsed = applyOverlap(parseGroups(safe));
     assertGraph(parsed.groups);
-    const current = await closeFinished(ctx, active(ctx));
-    const terminal = !current || current.phase === "COMPLETE" || current.phase === "FAILED" || current.phase === "IDLE";
-    // Keep the stored classification (possibly the planner's) when the request text is unchanged.
-    const reused = !terminal && current?.request === safe ? current.classification : undefined;
-    const classification: AcceptedClassification = reused ?? classifyKeywords(safe);
-    const routing = await decide(ctx, classification, "plan", { taskId: current?.taskId });
-    let state: TaskState;
-    if (terminal) {
-      const taskId = `task-${at.replace(/[-:.TZ]/g, "").slice(0, 14)}-${ctx.id()}`;
-      state = await ctx.store.create(blank(taskId, safe, at));
-    } else {
-      state = current!;
-    }
+    const parked = await retireCurrent(ctx, await activeTask(ctx));
+    const classification: AcceptedClassification = classifyKeywords(safe);
+    const routing = await decide(ctx, classification, "plan", {});
+    let state = await ctx.store.create(newTask(ctx, safe, at));
+    announceParked(ctx, parked);
     const draft: PlanDocument = {
-      version: state.approvedVersion ? state.approvedVersion + 1 : state.plan?.version ?? 1,
+      version: 1,
       createdAt: at,
       summary: safe.slice(0, 400),
       risks: classification.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Plan approval stays required."],
@@ -79,27 +84,14 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
       overlap: parsed.overlap,
       securitySensitive: routing.requireHumanApproval,
     };
-    if (state.approvedVersion && state.plan && !materialChange(state.plan, draft)) {
-      return done("Approved plan is unchanged. No new version was written.");
-    }
-    if (state.phase === "PLANNING") {
-      state = await ctx.store.update(state.taskId, "plan drafted", (task) => move({ ...task, plan: draft, classification, routing, request: safe, approvedVersion: undefined }, "AWAITING_PLAN_APPROVAL", at));
-    } else if (state.phase === "AWAITING_PLAN_APPROVAL" && !state.approvedVersion) {
-      state = await ctx.store.update(state.taskId, "draft replaced", (task) => ({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe, updatedAt: at }));
-    } else if (state.approvedVersion) {
-      state = await ctx.store.update(state.taskId, "scope change requires re-approval", (task) =>
-        backToApproval({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe, approvedVersion: undefined, publishApproved: false }, at, "scope change"),
-      );
-    } else {
-      state = await ctx.store.update(state.taskId, "plan drafted", (task) => backToApproval({ ...task, ...forNewPlan(task, draft), plan: draft, classification, routing, request: safe }, at));
-    }
+    state = await ctx.store.update(state.taskId, "plan drafted", (task) => move({ ...task, plan: draft, classification, routing, request: safe }, "AWAITING_PLAN_APPROVAL", at));
     ctx.store.writeText(state.taskId, "plan.json", JSON.stringify(draft, null, 2));
     ctx.store.writeText(state.taskId, PLAN_FILE, renderPlan(draft));
     remember(ctx, state, state.phase, routing.tier, routing.provider, routing.model, knownZero(), "success", 0, "plan");
     await announce(ctx, state.taskId, "plan", routing);
     if (draft.securitySensitive) suggestAdvisor(ctx, state.taskId, "security-sensitive plan");
     const overlap = draft.overlap.length ? ` Overlap on ${draft.overlap.join(", ")} will be serialized.` : " No file overlap.";
-    return done(`Draft v${draft.version} is waiting for approval (/show-plan).${overlap} Nothing was committed.`, { taskId: state.taskId, plan: draft, routing });
+    return done(`Draft v${draft.version} of ${displayName(state)} is waiting for approval (/show-plan).${overlap} Nothing was committed.`, { taskId: state.taskId, plan: draft, routing });
   });
 }
 
@@ -120,7 +112,7 @@ export async function freezeApproval(ctx: WorkflowContext, state: TaskState): Pr
 /** Approves the active draft (the choice was already made on a review screen). */
 export function approveDraft(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
-    const current = requireActive(ctx);
+    const current = await requireActiveTask(ctx);
     if (current.phase !== "AWAITING_PLAN_APPROVAL" || !current.plan) {
       return fail("APPROVAL_REQUIRED", "There is no draft waiting for approval.");
     }
@@ -134,43 +126,46 @@ export function approveDraft(ctx: WorkflowContext): Promise<CommandResult> {
 
 /** Posts the active task's plan in the chat. A draft opens the review screen, so it can be approved from here. */
 export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
-  return guard(async () => {
-    const current = requireActive(ctx);
-    if (!current.plan) return fail("NO_PLAN", "The active task has no plan yet. Run /plan <request>.");
-    const markdown = planMarkdown(ctx, current);
-    const version = current.plan.version;
-    const approved = current.approvedVersion === version;
-    const where = path.join(ctx.store.taskDir(current.taskId), PLAN_FILE);
-    if (!approved && current.phase === "AWAITING_PLAN_APPROVAL" && ctx.review) {
-      assertGraph(current.plan.groups);
-      const revisable = !!current.plan.tickets?.length;
-      const choice = await ctx.review({
-        title: `Plan v${version} (draft)`,
-        markdown,
-        actions: [
-          { value: "approve", label: `Approve plan v${version}` },
-          ...(revisable ? [{ value: "revise", label: "Request changes", input: "What should change in the plan?" }] : []),
-          { value: "close", label: "Close" },
-        ],
-      });
-      if (choice?.value === "revise") return requestPlanChanges(ctx, current, choice.text ?? "");
-      if (choice?.value === "approve") {
-        const state = await freezeApproval(ctx, current);
-        return done(`Approved plan v${version}. Run /build.`, state);
-      }
-      return done(`Plan v${version} is still a draft. /show-plan to approve later. File: ${where}`, { taskId: current.taskId, file: where });
+  return guard(async () => showTaskPlan(ctx, await requireActiveTask(ctx)));
+}
+
+/** Posts one task's plan in the chat, under a header that names the task and its state. Shared by /show-plan and /plans <name>. */
+export async function showTaskPlan(ctx: WorkflowContext, current: TaskState): Promise<CommandResult> {
+  if (!current.plan) return fail("NO_PLAN", `${displayName(current)} has no plan yet. Run /plan <request>.`);
+  const header = `**Task ${displayName(current)}** · ${taskState(current, current.review).line}`;
+  const markdown = `${header}\n\n${planMarkdown(ctx, current)}`;
+  const version = current.plan.version;
+  const approved = current.approvedVersion === version;
+  const where = path.join(ctx.store.taskDir(current.taskId), PLAN_FILE);
+  if (!approved && current.phase === "AWAITING_PLAN_APPROVAL" && ctx.review) {
+    assertGraph(current.plan.groups);
+    const revisable = !!current.plan.tickets?.length;
+    const choice = await ctx.review({
+      title: `${displayName(current)} · Plan v${version} (draft)`,
+      markdown,
+      actions: [
+        { value: "approve", label: `Approve plan v${version}` },
+        ...(revisable ? [{ value: "revise", label: "Request changes", input: "What should change in the plan?" }] : []),
+        { value: "close", label: "Close" },
+      ],
+    });
+    if (choice?.value === "revise") return requestPlanChanges(ctx, current, choice.text ?? "");
+    if (choice?.value === "approve") {
+      const state = await freezeApproval(ctx, current);
+      return done(`Approved plan v${version}. Run /build.`, state);
     }
-    if (ctx.show) ctx.show(markdown);
-    const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "a draft; /show-plan in a session with a UI approves it" : current.phase.toLowerCase();
-    return done(ctx.show ? `Plan v${version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
-  });
+    return done(`Plan v${version} is still a draft. /show-plan to approve later. File: ${where}`, { taskId: current.taskId, file: where });
+  }
+  if (ctx.show) ctx.show(markdown);
+  const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "a draft; /show-plan in a session with a UI approves it" : current.phase.toLowerCase();
+  return done(ctx.show ? `Plan v${version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
 }
 
 /** Previews the keyword classification and route for a task without changing its state. The planner sets complexity during /plan. */
 export function route(ctx: WorkflowContext, task: string): Promise<CommandResult> {
   return guard(async () => {
     const classification = classifyKeywords(redact(task));
-    const current = active(ctx);
+    const current = await activeTask(ctx);
     const decision = await decide(ctx, classification, "preview", { taskId: current?.taskId });
     await announce(ctx, current?.taskId, "preview", decision);
     const routing = routingSummary(ctx);

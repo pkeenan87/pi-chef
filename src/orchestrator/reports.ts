@@ -9,10 +9,11 @@ import { availability, candidateCheck, routingSummary } from "./routing.js";
 import { clock, reviewOutOfDate, taskState, type GitFacts } from "./state-label.js";
 import { reviewRows } from "./review-report.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
-import { active, done, fail, guard, type WorkflowContext } from "./context.js";
+import { done, fail, guard, type WorkflowContext } from "./context.js";
+import { activeTask, displayName, listTasks, unfinishedTasks } from "./tasks.js";
 import { isSecuritySensitive } from "../router/classify.js";
 import { costLabel, reviewLabel } from "./build.js";
-import { cell, formatUsdShort } from "./format.js";
+import { cell, formatUsdShort, mdTable } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
 function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.readLedger()): string[] {
@@ -64,7 +65,7 @@ export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> 
 
 async function costReport(ctx: WorkflowContext, format: string): Promise<CommandResult> {
   const records = ctx.store.readLedger();
-  const task = active(ctx);
+  const task = await activeTask(ctx);
   const summary = summarize(records, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd });
   const budget = budgetState(ctx, task?.taskId, records);
   const quota = quotaState(ctx, records);
@@ -123,7 +124,6 @@ export async function routingCheckRows(ctx: WorkflowContext): Promise<RoutingRow
   return rows;
 }
 
-const mdTable = (head: string[], rows: string[][]) => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];
 
 /** "Review" row: how the last review went, in a phrase. */
 function reviewSummary(review: ReviewReport | undefined, git: GitFacts): string {
@@ -175,7 +175,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
     ...(unknown + budget.daily.unknownRecords > 0 ? [`${unknown} task / ${budget.daily.unknownRecords} daily record(s) with unknown cost, counted at an estimate`] : []),
   ].join(" · ");
   const pairs: [string, string][] = [
-    ["Task", state ? `${state.taskId} (${state.phase})` : "none"],
+    ["Task", state ? `${displayName(state)} (${state.taskId})` : "none"],
     ["Plan", plan],
     ["Branch", state?.build ? `${state.build.branch} (base ${state.build.base})${ahead !== undefined ? ` · ${ahead} commit${ahead === 1 ? "" : "s"} ahead` : ""}` : "not started"],
     ["Review", reviewSummary(state?.review, git)],
@@ -195,12 +195,14 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
     ...(state?.blockedReason && !["BLOCKED", "PAUSED", "FAILED"].includes(state.phase) ? [`Note: ${state.blockedReason}`] : []),
   ];
   const tickets = state ? ticketTable(state) : [];
+  const others = unfinishedTasks(listTasks(ctx)).filter((task) => task.taskId !== state?.taskId).length;
   const markdown = [
     `## Status · ${label.line}`,
     "",
     "| | |",
     "| --- | --- |",
     ...pairs.map(([key, value]) => `| ${key} | ${cell(value, 400)} |`),
+    ...(others > 0 ? ["", `Also open: ${others} task(s) — /plans`] : []),
     ...(tickets.length > 0 ? ["", ...tickets] : []),
     "",
     "### Routing",
@@ -217,7 +219,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
 
 async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandResult> {
   if (arg !== "" && arg !== "foundry") return fail("USAGE", "Use /status or /status foundry.");
-  const state = active(ctx);
+  const state = await activeTask(ctx);
   const auth = await Promise.all(PROVIDERS.map((provider) => ctx.authProbe.inspect(provider)));
   const { markdown: base, stateLine } = await statusMarkdown(ctx, state, auth);
   const markdown = arg === "foundry" ? [base, "", ...(await foundrySection(ctx))].join("\n") : base;

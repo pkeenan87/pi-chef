@@ -30,6 +30,8 @@ const EDGES: Record<Phase, Phase[]> = {
 };
 
 export function canTransition(from: Phase, to: Phase, state?: Pick<TaskState, "pausedFrom">): boolean {
+  // Any task can be closed (/plans close, or a new /plan after it finished), whatever phase it stopped in.
+  if (to === "COMPLETE" && from !== "COMPLETE") return true;
   if (from === to && from !== "PAUSED") {
     return EDGES[from].includes(to) || from === "IMPLEMENTING" || from === "AWAITING_PLAN_APPROVAL";
   }

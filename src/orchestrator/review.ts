@@ -10,7 +10,8 @@ import { reviewMetricType } from "../router/stats.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
-import { active, done, guard, iso, type WorkflowContext } from "./context.js";
+import { done, guard, iso, type WorkflowContext } from "./context.js";
+import { activeTask } from "./tasks.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { findingsTable, reviewItems, reviewMarkdown, reviewNotes, type ReviewItem, type ReviewTicketRow } from "./review-report.js";
 import { costLabel, reviewLabel } from "./build.js";
@@ -210,7 +211,7 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
 }
 
 async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
-  const found = active(ctx);
+  const found = await activeTask(ctx);
   const state = found && found.phase !== "COMPLETE" && found.phase !== "IDLE" ? found : undefined;
   const taskId = state?.taskId ?? SESSION_TASK_ID;
   const base = state?.build?.base ?? (await ctx.git.defaultBranch());

@@ -181,11 +181,12 @@ describe("/show-plan on a draft", () => {
     const { app } = await drafted();
     const headlessResult = await app.showPlan();
     expect(headlessResult.text).toContain("# Plan v1");
+    expect(headlessResult.text.startsWith("**Task retry-ingest-parser** · Draft v1 · waiting for approval (/show-plan)\n\n")).toBe(true);
     const shown: string[] = [];
     app.bind({ show: (markdown) => void shown.push(markdown) });
     const result = await app.showPlan();
     expect(result.text).toContain("is shown above");
-    expect(shown[0]).toBe(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8"));
+    expect(shown[0]).toBe(`**Task retry-ingest-parser** · Draft v1 · waiting for approval (/show-plan)\n\n${readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")}`);
   });
 });
 
