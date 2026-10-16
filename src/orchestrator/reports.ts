@@ -66,12 +66,12 @@ export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> 
 async function costReport(ctx: WorkflowContext, format: string): Promise<CommandResult> {
   const records = ctx.store.readLedger();
   const task = active(ctx);
-  const summary = summarize(records, { pricing: ctx.config.pricing });
+  const summary = summarize(records, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd });
   const budget = budgetState(ctx, task?.taskId, records);
   const quota = quotaState(ctx, records);
   const quotaText = quotaLines(quota);
   const lines = [
-    `Known spend $${summary.knownUsd.toFixed(4)} across ${records.length} record(s). Unknown usage records: ${summary.unknownRecords} (not counted as zero).`,
+    `Known spend $${summary.knownUsd.toFixed(4)} across ${records.length} record(s). Unknown usage records: ${summary.unknownRecords}, shown as unknown and never as zero (budgets count them at an estimate, $${summary.estimatedUnknownUsd.toFixed(4)} in all).`,
     ...(unpricedModels(records, ctx.config.pricing).length ? [`Models with no pricing row (their spend is unknown and estimated at the provider's dearest rate): ${unpricedModels(records, ctx.config.pricing).join(", ")}. Add a pricing row for each.`] : []),
     `Task budget: ${budget.task.knownUsd.toFixed(4)} / ${ctx.config.budgets.taskUsd} (${statusFor(ctx, budget.task, ctx.config.budgets.taskUsd)}).`,
     `Daily budget: ${budget.daily.knownUsd.toFixed(4)} / ${ctx.config.budgets.dailyUsd} (${statusFor(ctx, budget.daily, ctx.config.budgets.dailyUsd)}).`,

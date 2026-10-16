@@ -194,7 +194,7 @@ npm run typecheck
 | `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
 | `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
 | `approvals` | Plan approval stays required and merge stays `manual`. `approvals.publish` from an older file is accepted, ignored, and warned about: nothing pushes |
-| `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier) |
+| `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier). The exception is `unknownCallUsd`: the higher of the two wins (the user's value, or the default 0.05 when the user sets none), because a lower estimate would loosen the budget |
 
 The YAML must not contain secrets, API keys, or tokens.
 
@@ -501,7 +501,7 @@ Every model call the workflow records goes to `.pi-workflows/cost/ledger.jsonl`:
 
 Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. A deterministic step that made no model call is a known zero.
 
-Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are not added in as zero.
+Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, and a row with nothing to price it from (for example a classifier call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null` and `/cost` still lists those rows as unknown, with a count. An unknown row no longer makes the budget soft by itself.
 
 `/cost` also names models seen in the ledger that have no pricing row: their spend is unknown and estimated at the provider's dearest row for its current billing (subscription rows while on account login), which keeps the budget "soft", so add a row for each. Failures before any model request (a git error, a plan cycle) are ledgered as a known $0 and do not count against the model, and the classifier never calls a provider that is not signed in (keywords are used instead).
 

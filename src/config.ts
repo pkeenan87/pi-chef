@@ -125,7 +125,16 @@ export interface WorkflowConfig {
   };
   /** /build names the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
   branchPrefix: string;
-  budgets: { taskUsd: number; dailyUsd: number; softWarningRatio: number };
+  budgets: {
+    taskUsd: number;
+    dailyUsd: number;
+    softWarningRatio: number;
+    /**
+     * Budget math only: what one ledger entry with unknown cost and nothing to price it from (no token counts, or no
+     * pricing row) counts as. The ledger keeps `actualUsd: null`. A project can only raise it (the higher value wins).
+     */
+    unknownCallUsd: number;
+  };
   approvals: {
     plan: "required";
     merge: "manual";
@@ -144,6 +153,9 @@ export interface WorkflowConfig {
   /** Notes from loading, for example project settings that were ignored. Shown by /status. */
   warnings?: string[];
 }
+
+/** Default for `budgets.unknownCallUsd`. */
+export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
 
 const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
@@ -164,7 +176,7 @@ const DEFAULTS: WorkflowConfig = {
     ticketContextTokens: 150000,
   },
   branchPrefix: "cost",
-  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 },
+  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
   checks: [],
   setup: [],
@@ -439,6 +451,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   if (budgets) {
     for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
     checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
+    checkNumber(budgets, "unknownCallUsd", where, { min: 0 }, "budgets");
   }
   for (const key of ["checks", "setup"] as const) {
     const list = raw[key];
@@ -656,8 +669,13 @@ export function layerConfigs(
   if (isRecord(user.budgets) || isRecord(project.budgets)) {
     const budgets: Record<string, unknown> = { ...ub, ...pb };
     for (const key of Object.keys(budgets)) {
-      if (key === "softWarningRatio") continue;
+      if (key === "softWarningRatio" || key === "unknownCallUsd") continue;
       if (typeof ub[key] === "number" && typeof pb[key] === "number") budgets[key] = Math.min(ub[key], pb[key]);
+    }
+    // A lower estimate for an unknown-cost call would loosen the budget, so a project can only raise it. A project
+    // value is compared with the user's, or the default when the user sets none.
+    if (typeof pb.unknownCallUsd === "number") {
+      budgets.unknownCallUsd = Math.max(typeof ub.unknownCallUsd === "number" ? ub.unknownCallUsd : DEFAULT_UNKNOWN_CALL_USD, pb.unknownCallUsd);
     }
     // A lower ratio warns earlier, which is the more restrictive choice.
     if (typeof ub.softWarningRatio === "number" && typeof pb.softWarningRatio === "number") {

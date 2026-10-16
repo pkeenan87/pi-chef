@@ -87,6 +87,9 @@ budgets:
   taskUsd: 20
   dailyUsd: 75
   softWarningRatio: 0.8
+  # Budget math only: what one ledger entry with unknown cost and nothing to price it from (for example a
+  # classifier call whose usage was lost) counts as. The ledger keeps it as unknown. A project can only raise it.
+  unknownCallUsd: 0.05
 
 approvals:
   plan: required

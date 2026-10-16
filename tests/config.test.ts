@@ -33,6 +33,7 @@ describe("parseConfig validation", () => {
     ["budgets:\n  taskUsd: 0\n", /budgets\.taskUsd/],
     ["budgets:\n  dailyUsd: -5\n", /budgets\.dailyUsd/],
     ["budgets:\n  softWarningRatio: 2\n", /budgets\.softWarningRatio/],
+    ["budgets:\n  unknownCallUsd: -0.01\n", /budgets\.unknownCallUsd/],
     ["models:\n  cheap: nowhere\n", /models\.cheap/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-01-01', inputPerMillionUsd: -1, outputPerMillionUsd: 1 }\n", /inputPerMillionUsd/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: 'soon', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],

@@ -1,4 +1,4 @@
-import { billingFor, estimateUsd, priceFor, type PricingRow } from "../config.js";
+import { billingFor, DEFAULT_UNKNOWN_CALL_USD, estimateUsd, priceFor, type PricingRow } from "../config.js";
 import type { CostRecord, Phase, TokenUsage } from "../domain.js";
 
 export interface UsageInput {
@@ -69,9 +69,12 @@ export interface SpendSummary {
   unknownRecords: number;
   /** Same as unknownRecords; named to match budget callers. */
   unknownCount: number;
-  /** Worst-case estimate for unknown-cost entries: tokens x most expensive configured price for the provider. */
+  /**
+   * Budget-only estimate for unknown-cost entries: tokens x the most expensive configured price for the provider, or
+   * the flat `budgets.unknownCallUsd` for an entry with nothing to price it from. The ledger entries stay null.
+   */
   estimatedUnknownUsd: number;
-  /** Unknown entries that could not be estimated (no token counts or no configured price for the provider). */
+  /** Unknown entries that were counted at the flat `unknownCallUsd` (no token counts or no configured price for the provider). */
   unestimatedUnknownCount: number;
   byPhase: Record<string, SpendBucket>;
   byProvider: Record<string, SpendBucket>;
@@ -134,9 +137,13 @@ function finish(bucket: Record<string, MicroBucket>): Record<string, SpendBucket
   return out;
 }
 
-/** Pass `pricing` to estimate unknown-cost entries from their token counts. */
-export function summarize(records: CostRecord[], options: { pricing?: PricingRow[] } = {}): SpendSummary {
+/**
+ * Pass `pricing` to estimate unknown-cost entries from their token counts. An unknown entry that cannot be priced counts
+ * as `unknownCallUsd` (default 0.05, never zero) in the estimate; `knownUsd` and the entries themselves are untouched.
+ */
+export function summarize(records: CostRecord[], options: { pricing?: PricingRow[]; unknownCallUsd?: number } = {}): SpendSummary {
   const pricing = options.pricing ?? [];
+  const flat = toMicro(options.unknownCallUsd ?? DEFAULT_UNKNOWN_CALL_USD);
   let known = 0;
   let unknown = 0;
   let estimated = 0;
@@ -153,8 +160,10 @@ export function summarize(records: CostRecord[], options: { pricing?: PricingRow
       u = 1;
       unknown += 1;
       const guess = estimateUnknownMicro(record, pricing);
-      if (guess === null) unestimated += 1;
-      else e = guess;
+      if (guess === null) {
+        unestimated += 1;
+        e = flat;
+      } else e = guess;
       estimated += e;
     } else {
       k = toMicro(record.actualUsd);
@@ -179,22 +188,19 @@ export function summarize(records: CostRecord[], options: { pricing?: PricingRow
 }
 
 /**
- * Budget state. Estimated unknown spend counts as spend. Unknown charges that cannot be estimated
- * (no token counts) raise the status to at least "soft" so they are never invisible to caps.
+ * Budget state. Estimated unknown spend counts as spend, including the flat per-call estimate for entries that cannot
+ * be priced, so unknown charges are never invisible to caps and never flip the status by themselves.
  */
 export function budgetStatus(
   knownUsd: number,
   limit: number,
   ratio: number,
-  unknown: { estimatedUnknownUsd?: number; unestimatedUnknownCount?: number } = {},
+  unknown: { estimatedUnknownUsd?: number } = {},
 ): "ok" | "soft" | "hard" {
   const spent = toMicro(knownUsd) + toMicro(unknown.estimatedUnknownUsd ?? 0);
   const cap = toMicro(limit);
-  let status: "ok" | "soft" | "hard" = "ok";
-  if (spent >= cap) status = "hard";
-  else if (spent >= Math.round(cap * ratio)) status = "soft";
-  if (status === "ok" && (unknown.unestimatedUnknownCount ?? 0) > 0) status = "soft";
-  return status;
+  if (spent >= cap) return "hard";
+  return spent >= Math.round(cap * ratio) ? "soft" : "ok";
 }
 
 export function budgetStatusFor(summary: SpendSummary, limit: number, ratio: number): "ok" | "soft" | "hard" {

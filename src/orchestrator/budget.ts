@@ -17,9 +17,9 @@ export interface BudgetState {
 
 export function budgetState(ctx: WorkflowContext, taskId?: string, records = ctx.store.readLedger()): BudgetState {
   const pricing = ctx.config.pricing;
-  const { dailyUsd, taskUsd, softWarningRatio } = ctx.config.budgets;
-  const daily = summarize(recordsForDay(records, ctx.now()), { pricing });
-  const task = summarize(taskId ? records.filter((record) => record.taskId === taskId) : [], { pricing });
+  const { dailyUsd, taskUsd, softWarningRatio, unknownCallUsd } = ctx.config.budgets;
+  const daily = summarize(recordsForDay(records, ctx.now()), { pricing, unknownCallUsd });
+  const task = summarize(taskId ? records.filter((record) => record.taskId === taskId) : [], { pricing, unknownCallUsd });
   const statuses = [budgetStatusFor(daily, dailyUsd, softWarningRatio), budgetStatusFor(task, taskUsd, softWarningRatio)];
   return { status: statuses.includes("hard") ? "hard" : statuses.includes("soft") ? "soft" : "ok", daily, task };
 }
