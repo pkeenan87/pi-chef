@@ -131,6 +131,7 @@ export async function reviewDiff(options: {
   };
   // Setup runs first and in order: a check cannot run before the install it needs.
   let setupFailed = false;
+  const setupStarted = now();
   for (const step of options.setup ?? []) {
     const outcome = await runOne({ ...step, name: `setup: ${step.name}` });
     checks.push(outcome.evidence);
@@ -140,9 +141,12 @@ export async function reviewDiff(options: {
       break;
     }
   }
+  const setupMs = now() - setupStarted;
+  const checksStarted = now();
   const outcomes: { evidence: CheckEvidence; finding?: Finding }[] = setupFailed
     ? options.checks.map((check) => ({ evidence: { name: check.name, command: check.command, args: check.args, cwd: options.cwd, exitCode: null, stdout: "", stderr: "skipped: setup failed", ran: false } }))
     : await mapBounded(options.checks, CHECK_CONCURRENCY, runOne);
+  const checksMs = now() - checksStarted;
   for (const outcome of outcomes) {
     checks.push(outcome.evidence);
     if (outcome.finding) findings.push(outcome.finding);
@@ -179,6 +183,7 @@ export async function reviewDiff(options: {
     findings,
     checks,
     diff: redact(options.diff),
+    stages: { ...((options.setup ?? []).length > 0 ? { setup: { elapsedMs: setupMs } } : {}), checks: { elapsedMs: checksMs } },
     summary: passed ? `Review passed with ${checks.length} check(s) and no blocking findings.` : `Review did not pass: ${why.join("; ")}.`,
   };
 }

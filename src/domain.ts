@@ -298,6 +298,12 @@ export interface ModelReview {
   costUsdAdvisors?: number | null;
 }
 
+/** Wall time and spend of one stage of /review. `costUsd` is null when a call's price is unknown, absent when the stage made no billed call. */
+export interface ReviewStage {
+  elapsedMs?: number;
+  costUsd?: number | null;
+}
+
 export interface ReviewReport {
   passed: boolean;
   claimedPass: boolean;
@@ -310,6 +316,8 @@ export interface ReviewReport {
   modelReview?: ModelReview;
   /** Wall time of the whole review. */
   elapsedMs?: number;
+  /** Time per stage, and spend for the model stages (from the ledger entries this review recorded). */
+  stages?: { setup?: ReviewStage; checks?: ReviewStage; model?: ReviewStage; advisors?: ReviewStage };
 }
 
 export interface WorkerArtifact {

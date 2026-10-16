@@ -161,7 +161,7 @@ describe("/review model review after a failed call", () => {
     expect(report.modelReview!.parts![0]!.failures).toEqual([expect.stringContaining(STREAM_ERROR)]);
     // One call has an unknown cost, so the pass's cost is unknown, not the other call's price.
     expect(report.modelReview!.costUsd).toBeNull();
-    expect(newest(".md")).toMatch(/- part 1 of 1: \S+\/\S+, 1 finding\(s\) \(after \S+\/\S+: OpenAI Responses stream ended/);
+    expect(newest(".md")).toMatch(/\| Model review \| \S+\/\S+ · 1 finding · part 1 retried \(after \S+\/\S+: OpenAI Responses stream ended/);
 
     const ledger = app.store.readLedger().filter((entry) => entry.reason === "model review");
     expect(ledger.map((entry) => [entry.provider, entry.outcome, entry.retries])).toEqual([
