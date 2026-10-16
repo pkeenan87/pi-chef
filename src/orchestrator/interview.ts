@@ -2,9 +2,9 @@ import { WorkflowError, type AcceptedClassification, type CommandResult, type Ta
 import { redact, redactUnknown } from "../redact.js";
 import type { ClassifierUsage } from "../router/classify.js";
 import { budgetState, recordClassifier } from "./budget.js";
-import { active, done, fail, guard, iso, PUBLISHED_PHASES, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { blank, classify, closePublished, plan } from "./planning.js";
+import { blank, classify, closeFinished, plan } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
@@ -154,12 +154,7 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     if (budgetState(ctx, ctx.store.readActive()).status === "hard") {
       return fail("BUDGET", "Task or daily budget is exhausted. /plan was not run. Run /cost for details.");
     }
-    let existing = current;
-    if (existing && PUBLISHED_PHASES.includes(existing.phase)) {
-      const blocked = await closePublished(ctx, existing);
-      if (blocked) return blocked;
-      existing = active(ctx);
-    }
+    const existing = await closeFinished(ctx, current);
     const terminal = !existing || ["COMPLETE", "FAILED", "IDLE"].includes(existing.phase);
     const reused: AcceptedClassification | undefined = !terminal && existing?.request === safe ? existing.classification : undefined;
     let classification: AcceptedClassification;

@@ -3,10 +3,10 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PlanDocument, ReviewReport, RoutingDecision } from "../src/domain.js";
 import type { WorkflowContext } from "../src/orchestrator/context.js";
-import { reviewCandidates } from "../src/orchestrator/ship.js";
+import { reviewCandidates } from "../src/orchestrator/review.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
 import { modelReviewLines, parseModelFindings, runModelReview, type ModelReviewCall } from "../src/review/model-review.js";
-import { emptyPr, MemoryGitHub, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 const STREAM_ERROR = "OpenAI Responses stream ended before a terminal response event";
@@ -138,16 +138,16 @@ describe("model review retries", () => {
   });
 });
 
-describe("/ship model review after a failed call", () => {
+describe("/review model review after a failed call", () => {
   it("retries on another provider, ledgers each call against its own model, and leaves `passed` alone", async () => {
     // Whichever candidate the router picks first fails like the live xai stream did; the retry succeeds.
     let first: string | undefined;
     const { chat, calls } = fakeChat((provider) => (first ??= provider) === provider);
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), chat, github: new MemoryGitHub(emptyPr()) });
+    const app = workflow(cwd, { config: tieredConfig(), chat });
     mkdirSync(path.join(cwd, "src"), { recursive: true });
     writeFileSync(path.join(cwd, "src", "ingest.ts"), "export const ingest = 1;\n");
-    const result = await app.ship();
+    const result = await app.review();
     expect(result.ok, result.text).toBe(true);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.provider).not.toBe(calls[0]!.provider);

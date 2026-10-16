@@ -80,7 +80,7 @@ export class GitWorkspace {
     return result.stdout.trim();
   }
 
-  /** Why /build and /ship cannot run here (not a repository, or no commit yet), or undefined when they can. */
+  /** Why /build and /review cannot run here (not a repository, or no commit yet), or undefined when they can. */
   async preflight(): Promise<string | undefined> {
     const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
     if (inside.code !== 0 || inside.stdout.trim() !== "true") {
@@ -198,9 +198,5 @@ export class GitWorkspace {
       parts.push(added.stdout);
     }
     return parts.join("");
-  }
-
-  async push(branch: string, remote = "origin"): Promise<GitResult> {
-    return this.git(["push", "-u", "--", remote, branch]);
   }
 }

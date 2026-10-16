@@ -36,7 +36,7 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
     version: task.approvedVersion ? task.approvedVersion + 1 : task.plan?.version ?? 1,
     createdAt: at,
     summary: specSummary(ctx, task.taskId, task.request),
-    risks: classification?.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Policy still gates publish."],
+    risks: classification?.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Plan approval stays required."],
     acceptance: [...new Set([...ticketCriteria, "Configured checks pass with recorded exit codes", "Review reports no blocking findings"])],
     estimatedUsd: routing?.expectedUsd ?? null,
     groups: parsed.groups,

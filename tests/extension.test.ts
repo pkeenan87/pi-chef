@@ -7,7 +7,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
-import { emptyPr, MemoryGitHub, permissiveRegistry, publishedWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
+import { builtWorkflow, permissiveRegistry, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -28,7 +28,7 @@ describe("pi extension surface", () => {
     for (const spec of COMMANDS) {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
-    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "ship", "route", "advisor", "cost", "status", "auth"]);
+    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "review", "route", "advisor", "cost", "status", "auth"]);
     expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "cost-help"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");
@@ -79,8 +79,7 @@ describe("pi extension surface", () => {
   const user = (content: string) => ({ role: "user", content });
 
   it("keeps one workflow across commands", async () => {
-    const github = new MemoryGitHub(emptyPr());
-    const { app, cwd } = await publishedWorkflow({}, github);
+    const { app, cwd } = await builtWorkflow();
     const { commands } = fakePi();
     bindWorkflow(app);
     const ctx = {
@@ -114,7 +113,7 @@ describe("pi extension surface", () => {
   });
 
   it("reloads config when the file changes and refuses to route once the budget is exhausted", async () => {
-    const { app, cwd } = await publishedWorkflow();
+    const { app, cwd } = await builtWorkflow();
     const { handlers, route } = fakePi();
     bindWorkflow(app);
     handlers.get("session_start")!({}, { cwd });
@@ -310,7 +309,7 @@ describe("web tools", () => {
   });
 
   it("ledgers search usage without the query text and shows the route status", async () => {
-    const { app } = await publishedWorkflow();
+    const { app } = await builtWorkflow();
     const statuses: string[] = [];
     app.bind({ status: (text) => text && statuses.push(text) });
     bindWorkflow(app);
@@ -325,7 +324,7 @@ describe("web tools", () => {
   });
 
   it("denies web_search when the budget is hard-exhausted", async () => {
-    const { app } = await publishedWorkflow();
+    const { app } = await builtWorkflow();
     bindWorkflow(app);
     app.store.appendLedger({
       id: "big", at: new Date().toISOString(), taskId: app.activeTaskId()!, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",

@@ -3,7 +3,7 @@ import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
 
 /**
- * The model pass of /ship: a review-tier model reads the branch diff against the plan and lists findings for a
+ * The model pass of /review: a review-tier model reads the branch diff against the plan and lists findings for a
  * person to judge. Advisory by design: nothing here changes `passed`, which stays with the deterministic checks.
  */
 
@@ -308,7 +308,7 @@ function partLines(review: ModelReview): string[] {
 }
 
 /**
- * The lines /ship prints for the model pass: a header with who reviewed and how it ran, one line per part when there
+ * The lines /review prints for the model pass: a header with who reviewed and how it ran, one line per part when there
  * were several or a retry, then one line per finding, severity first.
  */
 export function modelReviewLines(review: ModelReview): string[] {

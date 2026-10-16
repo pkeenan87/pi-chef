@@ -117,19 +117,18 @@ export interface WorkflowConfig {
     /** Soft context-window target for one ticket, in tokens. Planning rejects a ticket estimated above it. */
     ticketContextTokens: number;
   };
-  /** /build and /ship name the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
+  /** /build names the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
   branchPrefix: string;
   budgets: { taskUsd: number; dailyUsd: number; softWarningRatio: number };
   approvals: {
     plan: "required";
-    publish: "required" | "auto";
     merge: "manual";
     securitySensitiveFix: "required";
   };
   checks: CheckConfig[];
-  /** Commands /ship runs in the repo root before the checks (an install, for example). Same rules as checks. */
+  /** Commands /review runs in the repo root before the checks (an install, for example). Same rules as checks. */
   setup: CheckConfig[];
-  /** The model pass of /ship: a review-tier model reads the branch diff and lists advisory findings. */
+  /** The model pass of /review: a review-tier model reads the branch diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
@@ -159,7 +158,7 @@ const DEFAULTS: WorkflowConfig = {
   },
   branchPrefix: "cost",
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 },
-  approvals: { plan: "required", publish: "required", merge: "manual", securitySensitiveFix: "required" },
+  approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
@@ -379,9 +378,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   const approvals = section(raw, "approvals", where);
   if (approvals?.merge && approvals.merge !== "manual") {
     throw new WorkflowError("CONFIG_INVALID", "approvals.merge must stay manual.");
-  }
-  if (approvals?.publish !== undefined && approvals.publish !== "required" && approvals.publish !== "auto") {
-    invalid(where, "approvals.publish", 'must be "required" or "auto"');
   }
 
   const models = section(raw, "models", where);
@@ -662,11 +658,12 @@ export function layerConfigs(
     merged.budgets = budgets;
   }
 
-  // Approvals: a project can never relax them. Publishing is automatic only if the user opts in.
-  const ua = isRecord(user.approvals) ? user.approvals : {};
+  // Approvals: a project can never relax them. approvals.publish is gone (/review never pushes); old files still load.
+  if ([user.approvals, project.approvals].some((item) => isRecord(item) && item.publish !== undefined)) {
+    warnings.push("approvals.publish is no longer used; /review never pushes.");
+  }
   merged.approvals = {
     plan: "required",
-    publish: ua.publish === "auto" ? "auto" : "required",
     merge: "manual",
     securitySensitiveFix: "required",
   };

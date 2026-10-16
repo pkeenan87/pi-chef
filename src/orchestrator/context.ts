@@ -1,7 +1,6 @@
 import { WorkflowError, type CommandResult, type Phase, type ProviderId, type TaskState, type TokenUsage } from "../domain.js";
 import type { WorkflowConfig } from "../config.js";
 import type { GitWorkspace } from "../git/workspace.js";
-import type { GitHubClient } from "../github/types.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { DecisionsClient } from "../providers/clients.js";
 import type { ChatFn } from "../providers/pi-chat.js";
@@ -19,14 +18,12 @@ export interface WorkflowContext {
   config: WorkflowConfig;
   readonly store: TaskStore;
   readonly git: GitWorkspace;
-  readonly github?: GitHubClient;
   readonly now: () => Date;
   readonly id: () => string;
   authProbe: AuthProbe;
   readonly classifier?: Classifier;
   readonly rng?: () => number;
   deciders: Partial<Record<ProviderId, DecisionsClient>>;
-  readonly pushBranch: (branch: string) => Promise<void>;
   /** Check runner that skips a check already passed on an identical clean tree. */
   readonly checkRunner: CheckRunner;
   /** Aborted by `Workflow.dispose`; the advisory model review passes its signal so a running call is stopped. */
@@ -51,7 +48,7 @@ export interface WorkflowContext {
   show?: (markdown: string) => void;
 }
 
-/** Phases where a published pull request is being tracked. */
+/** Phases of tasks from older versions that tracked a published pull request. */
 export const PUBLISHED_PHASES: Phase[] = ["PUBLISHED", "AUTOPILOT", "MERGE_READY"];
 
 export function fail(code: string, text: string): CommandResult {
