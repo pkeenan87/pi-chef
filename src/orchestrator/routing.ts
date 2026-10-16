@@ -63,7 +63,7 @@ export async function announce(
 
 /** Who does what under the current config: the session model, compaction, review, and tickets, with their chat models. */
 export function routingSummary(ctx: WorkflowContext): { session: string; compaction: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
-  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).filter((item) => item.api === "chat").map((item) => `${item.provider}/${item.model}`);
+  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).map((item) => `${item.provider}/${item.model}`);
   const { reviewTier } = ctx.config.routing;
   const { model, pin, compactionTier } = ctx.config.session;
   return {

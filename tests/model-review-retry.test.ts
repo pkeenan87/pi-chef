@@ -118,14 +118,14 @@ describe("model review retries", () => {
   it("orders the review tier: routed candidate, then another provider, then by score; excluded ones are left out", () => {
     const config = tieredConfig();
     config.tiers.standard = [
-      { provider: "anthropic", model: "claude-sonnet-5-5", api: "chat" },
-      { provider: "anthropic", model: "claude-haiku-5-5", api: "chat" },
-      { provider: "foundry", model: "grok-4-7", api: "chat" },
-      { provider: "openai", model: "gpt-6-luna", api: "chat" },
+      { provider: "anthropic", model: "claude-sonnet-5-5" },
+      { provider: "anthropic", model: "claude-haiku-5-5" },
+      { provider: "foundry", model: "grok-4-7" },
+      { provider: "openai", model: "gpt-6-luna" },
     ];
     const decision = {
       tier: "standard",
-      candidate: { provider: "anthropic", model: "claude-sonnet-5-5", api: "chat" },
+      candidate: { provider: "anthropic", model: "claude-sonnet-5-5" },
       considered: [
         { provider: "anthropic", model: "claude-sonnet-5-5", score: 0.01 },
         { provider: "anthropic", model: "claude-haiku-5-5", score: 0.001 },
@@ -182,7 +182,7 @@ describe("/review model review after a failed call", () => {
 describe("/review model pass routing", () => {
   const opusOnly = () => {
     const config = tieredConfig();
-    config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5", api: "chat" }];
+    config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }];
     return config;
   };
   const chatFor = (fail: (model: string) => boolean) => {

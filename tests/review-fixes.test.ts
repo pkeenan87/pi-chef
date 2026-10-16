@@ -7,7 +7,6 @@ import { bindWorkflow, currentWorkflow, registerWorkflow } from "../src/extensio
 import { type ProviderId } from "../src/domain.js";
 import { move } from "../src/orchestrator/machine.js";
 import { Workflow } from "../src/orchestrator/service.js";
-import type { DecisionAnswer, DecisionsClient } from "../src/providers/clients.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
 import { singleTaskRequest, tempRepo, tieredConfig, tieredYaml, workflow } from "./helpers.js";
 
@@ -60,14 +59,14 @@ describe("O3/O4 extension config handling", () => {
   it("O3: a command reports an invalid config as a failed result, and session_start still registers the providers", async () => {
     isolatedHome();
     const cwd = await tempRepo();
-    writeProject(cwd, "routing: { minConfidence: 5 }\n");
+    writeProject(cwd, "routing: { maxEscalations: -1 }\n");
     const { commands, handlers, registered } = fakePi();
     const notes: string[] = [];
     expect(() => handlers.get("session_start")!({}, uiCtx(cwd, notes))).not.toThrow();
-    expect(notes.join("\n")).toMatch(/minConfidence/);
+    expect(notes.join("\n")).toMatch(/maxEscalations/);
     notes.length = 0;
     await expect(commands.get("status")!.handler("", uiCtx(cwd, notes))).resolves.toBeUndefined();
-    expect(notes.join("\n")).toMatch(/minConfidence/);
+    expect(notes.join("\n")).toMatch(/maxEscalations/);
   });
 
   it("O4: a changed config file is applied to the existing workflow before the next command", async () => {
@@ -159,52 +158,5 @@ describe("R4/R5 budget accounting", () => {
     expect(entry).toMatchObject({ taskId: "session", tier: "interactive", actualUsd: 3 });
     expect(app.store.readLedger()).toHaveLength(1);
     expect(app.budgetRemainingUsd()).toBe(72);
-  });
-});
-
-describe("R6/R8 classifier metrics and ledger", () => {
-  const good: DecisionAnswer[] = [
-    { type: "choice", name: "task_type", choice: "feature", confidence: 0.9 },
-    { type: "choice", name: "complexity", choice: "medium", confidence: 0.9 },
-    { type: "choice", name: "risk", choice: "low", confidence: 0.9 },
-    { type: "choice", name: "recommended_tier", choice: "standard", confidence: 0.9 },
-    { type: "predicate", name: "security_sensitive", probability: 0.01 },
-  ];
-  const vague = good.map((answer) => (answer.name === "task_type" ? { ...answer, confidence: 0.2 } : answer)) as DecisionAnswer[];
-  const usage = { input: 50, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 };
-  const cell = (app: Workflow) => app.store.readMetrics().classification?.["model:classifier:foundry/Microsoft-Decision-1"];
-
-  const app = async (decide: DecisionsClient["decide"]) =>
-    workflow(await tempRepo(), {
-      config: tieredConfig(),
-      auth: { async inspect(provider: ProviderId): Promise<ProviderAuthView> { return { provider, status: provider === "vercel" ? "missing" : "ready", method: "oauth", detail: "" }; } },
-      deciders: { foundry: { id: "foundry", decide } },
-    });
-
-  it("R6: a low-confidence answer is neither a success nor a failure", async () => {
-    const w = await app(async (request) => ({ model: request.model, answers: vague, usage, provider: "foundry" }));
-    const result = (await w.route("do something vague")).data as { classification: { reason_codes: string[] } };
-    expect(result.classification.reason_codes).toContain("low_confidence");
-    expect(cell(w)).toBeUndefined();
-  });
-
-  it("R6: invalid output and thrown errors count as failures; a confident answer counts as a success", async () => {
-    const invalid = await app(async (request) => ({ model: request.model, answers: [], usage, provider: "foundry" }));
-    await invalid.route("x");
-    expect(cell(invalid)).toMatchObject({ success: 0, failure: 1 });
-    const ok = await app(async (request) => ({ model: request.model, answers: good, usage, provider: "foundry" }));
-    await ok.route("x");
-    expect(cell(ok)).toMatchObject({ success: 1, failure: 0 });
-  });
-
-  it("R8: a classifier call that throws is ledgered as an unknown-cost record", async () => {
-    const w = await app(async () => {
-      throw new Error("timeout");
-    });
-    await w.route("add a feature");
-    const records = w.store.readLedger().filter((record) => record.reason === "classify");
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ provider: "foundry", model: "Microsoft-Decision-1", actualUsd: null, usageKnown: false });
-    expect(cell(w)).toMatchObject({ failure: 1 });
   });
 });

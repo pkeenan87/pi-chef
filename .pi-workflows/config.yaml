@@ -23,7 +23,6 @@ providers:
     routeStyle: v1                   # <endpoint>/openai/v1/..., deployment name in `model`, no api-version
     audience: https://ai.azure.com   # az account get-access-token --resource https://ai.azure.com
     api: openai-completions
-    # decisionsPath: /decisions      # UNVERIFIED for Microsoft-Decision-1 in Foundry; change if your deployment differs
   vercel:
     type: vercel-ai-gateway
     auth: vercel-cli
@@ -48,13 +47,11 @@ providers:
 #   /review model pass          routing.reviewTier (premium: Opus 5.5)
 #   /plan and previews          standard (premium for high complexity or security-sensitive work)
 # Foundry `model` values are YOUR deployment names. The names below are placeholders.
-# `api: decisions` models answer structured questions; they are not chat models.
+# Nothing classifies by model: the planner (Opus) rates complexity, risk and security in plan_spec, and a keyword scan
+# can raise the security flag. Foundry and Vercel serve chat models such as the Astra deployment below.
 tiers:
   deterministic:        # used only when the local server answers; otherwise the plan's literal edits apply
     - { provider: local, model: "qwen2.5-coder:7b" }
-  classifier:
-    - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
-    - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
   cheap:                # compaction summaries (session.compactionTier)
     - { provider: anthropic, model: claude-haiku-5-5 }
   batch:                # standalone jobs the extension runs by itself, outside any conversation (cut-file summaries)
@@ -76,7 +73,6 @@ tiers:
     - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
 
 routing:
-  minConfidence: 0.75
   maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium
   maxTier: premium
   reviewTier: premium   # the /review model pass; a failed part falls back to standard
@@ -127,7 +123,7 @@ budgets:
   dailyUsd: 75
   softWarningRatio: 0.8
   # Budget math only: what one ledger entry with unknown cost and nothing to price it from (for example a
-  # classifier call whose usage was lost) counts as. The ledger keeps it as unknown. A project can only raise it.
+  # call whose usage was lost) counts as. The ledger keeps it as unknown. A project can only raise it.
   unknownCallUsd: 0.05
 
 approvals:
@@ -147,9 +143,6 @@ proprietaryCode: false
 # bill extra usage, which this file cannot see.
 pricing:
   - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
-  # Decisions models (placeholders)
-  - { provider: foundry, model: Microsoft-Decision-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
-  - { provider: vercel, model: "typesafe-ai/jev", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
   # Subscription-backed (0 marginal; placeholder)
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }

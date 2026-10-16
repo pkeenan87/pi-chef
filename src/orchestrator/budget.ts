@@ -1,7 +1,6 @@
 import type { CommandResult, CostRecord, Phase, TaskState, TokenUsage } from "../domain.js";
 import { budgetStatusFor, buildCostRecord, recordsForDay, summarize, type SpendSummary } from "../cost/ledger.js";
 import { quotaUsage, type QuotaUsage } from "../cost/quota.js";
-import type { ClassifierUsage } from "../router/classify.js";
 import { active, fail, type WorkflowContext } from "./context.js";
 
 /** Pseudo task id for interactive turns that happen with no active task. */
@@ -98,11 +97,6 @@ export function remember(
   reason: string,
 ): CostRecord {
   return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason, state.routing?.estimatedUsd ?? null);
-}
-
-export function recordClassifier(ctx: WorkflowContext, taskId: string, phase: Phase, usage: ClassifierUsage | undefined): void {
-  if (!usage) return;
-  record(ctx, taskId, phase, "classifier", usage.provider, usage.model, usage.usage, "success", 0, "classify");
 }
 
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {

@@ -26,8 +26,6 @@ providers:
 
 describe("parseConfig validation", () => {
   it.each([
-    ["routing:\n  minConfidence: 1.5\n", /routing\.minConfidence/],
-    ["routing:\n  minConfidence: -0.1\n", /routing\.minConfidence/],
     ["routing:\n  maxEscalations: -1\n", /routing\.maxEscalations/],
     ["routing:\n  maxEscalations: 1.5\n", /routing\.maxEscalations/],
     ["routing:\n  maxTier: ultra\n", /routing\.maxTier/],
@@ -65,13 +63,13 @@ describe("parseConfig validation", () => {
   });
 
   it("rejects a tier whose provider is missing or has no model name", () => {
-    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
-    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { classifier: local, cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
+    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
+    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
   });
 
   it("accepts valid boundaries and normalizes dates", () => {
     const config = parseConfig(`${PROVIDERS_BLOCK}
-models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
+models: { cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0, maxEscalations: 0, maxTier: standard }
 budgets: { softWarningRatio: 1 }
 workers: { tokenBudget: 1 }
@@ -146,7 +144,7 @@ describe("loadConfig layering", () => {
     process.env.HOME = priorHome;
   });
 
-  const base = `${PROVIDERS_BLOCK}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`;
+  const base = `${PROVIDERS_BLOCK}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`;
 
   it("old configs without ticket tiers use cheap, standard and premium for low, medium and high, with a warning", () => {
     writeProject(`${base}tiers:
@@ -234,10 +232,10 @@ describe("loadConfig layering", () => {
   });
 
   it("deep-merges sections, takes min budgets, and never lets the project relax approvals", () => {
-    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
+    writeUser(`${base}routing: { maxTier: standard, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
     writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { merge: manual }\n");
     const config = loadConfig(project);
-    expect(config.routing.minConfidence).toBe(0.9);
+    expect(config.routing.maxTier).toBe("standard");
     expect(config.routing.maxEscalations).toBe(1);
     expect(config.budgets.taskUsd).toBe(5);
     expect(config.budgets.dailyUsd).toBe(10);
@@ -270,7 +268,7 @@ describe("loadConfig layering", () => {
     writeUser("providers:\n  anthropic:\n    apiKeyFallback: true\n");
     // No project file: nothing is configured, as with no config at all.
     expect(loadConfig(project).providers).toEqual({});
-    writeProject("providers:\n  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }\nmodels: { classifier: anthropic, cheap: anthropic, standard: anthropic, premium: anthropic }\n");
+    writeProject("providers:\n  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }\nmodels: { cheap: anthropic, standard: anthropic, premium: anthropic }\n");
     expect(loadConfig(project).providers.anthropic).toMatchObject({ type: "anthropic", apiKeyFallback: true });
   });
 
@@ -296,7 +294,7 @@ describe("loadConfig layering", () => {
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, baseUrl: "https://ai-gateway.vercel.sh/v1", projectDir: "." }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: m }
   foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", deployments: { cheap: c, reasoning: r } }
-models: { classifier: local, cheap: local, standard: local, premium: local }
+models: { cheap: local, standard: local, premium: local }
 `);
     const config = loadConfig(project);
     expect(config.providers.vercel?.baseUrl).toBe("https://ai-gateway.vercel.sh/v1");

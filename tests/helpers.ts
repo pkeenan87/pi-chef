@@ -41,8 +41,8 @@ providers:
     endpointEnv: AZURE_AI_ENDPOINT
     deployments: { classifier: classifier, reasoning: reasoning, cheap: classifier }
   local: { type: openai-compatible, baseUrl: http://127.0.0.1:11434/v1, model: local-coder }
-models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
-routing: { minConfidence: 0.75, maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
+models: { cheap: foundry, standard: anthropic, premium: openai }
+routing: { maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
 workers: { tokenBudget: 8000 }
 budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 }
 checks:
@@ -134,9 +134,6 @@ providers:
 tiers:
   deterministic:
     - { provider: local, model: "qwen2.5-coder:7b" }
-  classifier:
-    - { provider: foundry, model: Microsoft-Decision-1, api: decisions }
-    - { provider: vercel, model: "typesafe-ai/jev", api: decisions }
   cheap:
     - { provider: openai, model: gpt-6-luna }
     - { provider: anthropic, model: claude-haiku-5-5 }
@@ -160,8 +157,6 @@ checks:
   - { name: unit, command: npm, args: ["test"] }
 pricing:
   - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
-  - { provider: foundry, model: Microsoft-Decision-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.1, outputPerMillionUsd: 0.1 }
-  - { provider: vercel, model: "typesafe-ai/jev", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.1, outputPerMillionUsd: 0.1 }
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
@@ -234,9 +229,9 @@ export function contextOf(app: Workflow): WorkflowContext {
 /** The sample advisor tier of the real config (Astra on OpenAI, then Fable), priced: Astra at $0 (ChatGPT), Fable per token. */
 export function withAdvisors(config: WorkflowConfig): WorkflowConfig {
   config.tiers.advisor = [
-    { provider: "openai", model: "gpt-6-astra", api: "chat" },
-    { provider: "anthropic", model: "claude-fable-5-1", api: "chat" },
-    { provider: "foundry", model: "gpt-6-astra", api: "chat" },
+    { provider: "openai", model: "gpt-6-astra" },
+    { provider: "anthropic", model: "claude-fable-5-1" },
+    { provider: "foundry", model: "gpt-6-astra" },
   ];
   config.pricing.push({ provider: "openai", model: "gpt-6-astra", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 });
   return config;

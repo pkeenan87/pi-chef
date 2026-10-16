@@ -96,7 +96,6 @@ export async function availableAdvisors(ctx: WorkflowContext): Promise<{ candida
   const candidates: AdvisorCandidate[] = [];
   const notes: string[] = [];
   for (const candidate of tierCandidates(ctx.config, "advisor")) {
-    if (candidate.api !== "chat") continue;
     const view = seen[candidate.provider];
     if (view && !view.ok) notes.push(`${candidate.provider}/${candidate.model} skipped: ${view.detail ?? "unavailable"}`);
     else candidates.push({ provider: candidate.provider, model: candidate.model });

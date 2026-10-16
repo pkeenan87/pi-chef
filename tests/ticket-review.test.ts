@@ -56,7 +56,7 @@ function roles(handlers: { review?: Answer; resolve?: Answer; advisor?: Answer }
 async function setup(options: { tickets?: Ticket[]; answer?: Answer; mutate?: (config: ReturnType<typeof tieredConfig>) => void; chat?: boolean } = {}) {
   const cwd = await tempRepo();
   const config = withAdvisors(tieredConfig());
-  config.tiers.premium = [{ provider: "anthropic", model: OPUS, api: "chat" }];
+  config.tiers.premium = [{ provider: "anthropic", model: OPUS }];
   options.mutate?.(config);
   const progress: string[] = [];
   const reports: string[] = [];

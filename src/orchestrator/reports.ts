@@ -1,9 +1,10 @@
-import { PROVIDERS, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
+import { PROVIDERS, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
 import { routingSummary } from "./routing.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
+import { isSecuritySensitive } from "../router/classify.js";
 import { reviewLabel } from "./build.js";
 import { formatDuration } from "./format.js";
 
@@ -44,6 +45,15 @@ function routingLines(ctx: WorkflowContext): string[] {
     `Routing: session ${summary.session} · compaction ${summary.compaction} · ${summary.batch} · review ${summary.review}`,
     `Ticket models: low ${list(summary.tickets.low)} · medium ${list(summary.tickets.medium)} · high ${list(summary.tickets.high)} · then ${list(summary.tickets.then)} (up to ${ctx.config.routing.maxEscalations} escalation(s))`,
   ];
+}
+
+/** How the task is rated and by whom: the planner's rating once plan_spec ran, else the keyword scan of the request. */
+function classificationLine(classification: AcceptedClassification): string {
+  const security = isSecuritySensitive(classification) ? ", security-sensitive" : "";
+  const reason = classification.reason_codes.find((code) => code.startsWith("reason: "));
+  return classification.source === "planner"
+    ? `Rating (planner): ${classification.complexity} complexity, ${classification.risk} risk${security}${reason ? ` · ${reason.slice(8)}` : ""}`
+    : `Rating (keyword scan; the planner rates it during /plan): ${classification.complexity} complexity, ${classification.risk} risk${security}`;
 }
 
 function routeLine(routing: RoutingDecision): string {
@@ -122,6 +132,7 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     `Budget: ${budget}`,
     ...routingLines(ctx),
     ...(ctx.config.warnings ?? []).map((warning) => `Config warning: ${warning}`),
+    state?.classification ? classificationLine(state.classification) : "",
     state?.routing ? `Model: ${routeLine(state.routing)}` : "",
     ...modelBreakdown(ctx).map((line) => `Model stats: ${line}`),
     ...auth.map((view) => `${view.provider}: ${view.status} (${view.method}) ${view.detail}`),

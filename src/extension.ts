@@ -91,11 +91,11 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     cwd = root;
     runtime = createRuntime(config, root);
     useBilling(runtime);
-    active = new Workflow({ cwd: root, config, auth: runtime.auth, deciders: runtime.deciders });
+    active = new Workflow({ cwd: root, config, auth: runtime.auth });
   } else if (changed) {
     runtime = createRuntime(config, root);
     useBilling(runtime);
-    active.reconfigure(config, { auth: runtime.auth, deciders: runtime.deciders });
+    active.reconfigure(config, { auth: runtime.auth });
     try {
       syncProviders(config);
     } catch {

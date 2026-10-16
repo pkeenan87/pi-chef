@@ -47,9 +47,7 @@ export class Workflow {
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
       authProbe: options.auth,
-      classifier: options.classifier,
       rng: options.rng,
-      deciders: options.deciders ?? {},
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
       warned: new Set(),
@@ -71,12 +69,9 @@ export class Workflow {
   }
 
   /** Applies a reloaded config (and the providers built from it) without rebuilding the workflow. */
-  reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe; deciders: WorkflowOptions["deciders"] }): void {
+  reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe }): void {
     this.ctx.config = config;
-    if (providers) {
-      this.ctx.authProbe = providers.auth;
-      this.ctx.deciders = providers.deciders ?? {};
-    }
+    if (providers) this.ctx.authProbe = providers.auth;
   }
 
   /** Rebinds per-command UI hooks without rebuilding the workflow. */

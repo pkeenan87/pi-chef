@@ -105,7 +105,7 @@ async function setup(options: { tickets?: Ticket[]; handlers?: Handlers; checkCo
   const cwd = await tempRepo();
   const config = withAdvisors(tieredConfig());
   options.mutate?.(config);
-  config.tiers.premium = [{ provider: "anthropic", model: OPUS, api: "chat" }];
+  config.tiers.premium = [{ provider: "anthropic", model: OPUS }];
   const fake = fakeChat(roles(options.handlers ?? {}));
   const reports: string[] = [];
   const turns: string[] = [];

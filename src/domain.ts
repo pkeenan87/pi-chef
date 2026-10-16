@@ -26,7 +26,7 @@ export function isAccountProvider(value: string): value is AccountProvider {
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /** The general ladder: cheapest to strongest. */
-export const BASE_TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;
+export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as const;
 /** /build ticket tiers, by the difficulty the planner assigns. A failed ticket climbs low, medium, high, then premium. */
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
@@ -65,11 +65,10 @@ export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTie
 export const TIER_KEYS = [...TIERS, "advisor"] as const;
 export type TierKey = (typeof TIER_KEYS)[number];
 
-/** One model that can serve a tier. `decisions` models answer structured questions instead of chatting. */
+/** One chat model that can serve a tier. */
 export interface TierCandidate {
   provider: ProviderId;
   model: string;
-  api: "chat" | "decisions";
   label?: string;
 }
 
@@ -91,19 +90,21 @@ export function modelMetricKey(tier: string, provider: string, model: string): s
 
 export type Complexity = "low" | "medium" | "high";
 
-/** Schema returned by the classifier. Never executed as instructions. */
+/**
+ * How a task is rated. `keywords`: the deterministic scan of the request text (before a spec exists). `planner`: the
+ * complexity, risk and security flag the planning model gave in plan_spec, with the keyword scan able to raise the flag.
+ */
 export interface Classification {
   task_type: string;
   complexity: Complexity;
   risk: Complexity;
   required_capabilities: string[];
   recommended_tier: Tier;
-  confidence: number;
   reason_codes: string[];
 }
 
 export interface AcceptedClassification extends Classification {
-  source: "model" | "fallback";
+  source: "keywords" | "planner";
 }
 
 export interface PlanEdit {

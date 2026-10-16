@@ -246,7 +246,7 @@ describe("/build failures", () => {
 
   it("escalates grok, sonnet, sol, opus on repeated failures", async () => {
     // As in the sample config, premium lists Opus alone.
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5", api: "chat" }]) });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]) });
     t.passing.ok = false;
     const used: string[] = [];
     for (let attempt = 0; attempt < 4; attempt++) {

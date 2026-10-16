@@ -93,7 +93,7 @@ providers:
   anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }
   xai: { type: xai, auth: account-login }
   foundry: { type: azure-foundry, auth: azure-cli, endpointEnv: AZURE_AI_ENDPOINT }
-models: { classifier: openai, cheap: openai, standard: anthropic, premium: openai }
+models: { cheap: openai, standard: anthropic, premium: openai }
 tiers:
   standard:
     - { provider: anthropic, model: claude-sonnet-5-5 }
@@ -111,10 +111,9 @@ pricing:
     risk: "low",
     recommended_tier: "standard",
     required_capabilities: [],
-    confidence: 0.9,
     reason_codes: [],
-    source: "model",
-  } as never;
+    source: "planner",
+  };
   const availability = { anthropic: { ok: false, detail: "blocked: API key" }, foundry: { ok: false, detail: "missing: az login" }, openai: { ok: true } };
 
   it("skips a tier with no signed-in provider and moves up", () => {

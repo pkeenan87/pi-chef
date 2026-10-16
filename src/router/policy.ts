@@ -117,9 +117,6 @@ export function decideRoute(
         .sort((a, b) => a.expected - b.expected)[0]!.candidate;
     } else if (sensitive) {
       tier = "standard";
-    } else if (classification.recommended_tier === "deterministic" || classification.task_type === "mechanical") {
-      // Only explicitly mechanical work skips a premium model.
-      tier = "deterministic";
     } else {
       tier = "cheap";
     }
@@ -195,7 +192,7 @@ function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig)
   const from = signature(config, failed);
   let cursor: Tier | undefined = nextTier(failed, cap);
   while (cursor) {
-    if (cursor !== "classifier" && signature(config, cursor) !== from) return cursor;
+    if (signature(config, cursor) !== from) return cursor;
     cursor = nextTier(cursor, cap);
   }
   return failed;

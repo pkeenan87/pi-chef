@@ -1,10 +1,10 @@
-import { WorkflowError, type AcceptedClassification, type CommandResult, type TaskState } from "../domain.js";
+import { isDifficulty, WorkflowError, type AcceptedClassification, type CommandResult, type Complexity, type TaskState } from "../domain.js";
 import { redact, redactUnknown } from "../redact.js";
-import type { ClassifierUsage } from "../router/classify.js";
-import { budgetState, recordClassifier } from "./budget.js";
+import { classifyKeywords, isSecuritySensitive, plannerClassification, type PlannerRating } from "../router/classify.js";
+import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { blank, classify, closeFinished, plan } from "./planning.js";
+import { blank, closeFinished, plan } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
@@ -157,14 +157,8 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     const existing = await closeFinished(ctx, current);
     const terminal = !existing || ["COMPLETE", "FAILED", "IDLE"].includes(existing.phase);
     const reused: AcceptedClassification | undefined = !terminal && existing?.request === safe ? existing.classification : undefined;
-    let classification: AcceptedClassification;
-    let usage: ClassifierUsage | undefined;
-    if (reused) classification = reused;
-    else {
-      const result = await classify(ctx, safe);
-      classification = result.classification;
-      usage = result.usage;
-    }
+    // Until plan_spec saves the planner's rating, the task has the keyword classification.
+    const classification: AcceptedClassification = reused ?? classifyKeywords(safe);
     const routing = await decide(ctx, classification, "plan", { taskId: existing?.taskId });
     let state: TaskState;
     if (terminal) {
@@ -175,7 +169,6 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
         ({ ...toPlanning(task, at), classification, routing, request: safe, planning: { stage: "interview", noQuestions } }),
       );
     }
-    recordClassifier(ctx, state.taskId, state.phase, usage);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     await announce(ctx, state.taskId, "interview", routing);
     showStatus(ctx);
@@ -338,7 +331,7 @@ function texts(value: unknown, field: string, errors: string[]): string[] {
 }
 
 /** Saves `spec.md` and moves planning on to the ticket stage. */
-export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promise<{ file: string }> {
+export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promise<{ file: string; classification: AcceptedClassification; keywordRaised: boolean }> {
   // Also allowed at the ticket stage, so a change the person asks for during ticket review can reach the spec.
   const found = activePlanning(ctx);
   const { task } = found?.task.planning?.stage === "tickets" ? found : planningOrThrow(ctx, "interview");
@@ -380,15 +373,52 @@ export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promis
     risks: texts(raw.risks, "risks", errors),
     verification,
   };
+  const rating = plannerRating(raw, task.classification, errors);
   if (errors.length) throw new WorkflowError("SPEC_INVALID", errors.join("\n"));
   const file = ctx.store.writeText(task.taskId, SPEC_FILE, redact(renderSpec(spec)));
+  // The planner's rating replaces the keyword classification. A rating left out keeps the one the task has.
+  const classification = rating ? plannerClassification(rating, redact(`${task.request}\n${specScanText(spec)}`)) : task.classification ?? classifyKeywords(task.request);
+  const routing = await decide(ctx, classification, "plan", { taskId: task.taskId });
   await ctx.store.update(task.taskId, "spec saved", (current) => ({
     ...current,
+    classification,
+    routing,
     planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}), ...(current.planning?.stage === "tickets" && current.planning.consult ? { consult: current.planning.consult } : {}) },
     updatedAt: iso(ctx),
   }));
   showStatus(ctx);
-  return { file };
+  return { file, classification, keywordRaised: !!rating && !rating.securitySensitive && classification.reason_codes.includes("security_keyword_override") };
+}
+
+/** The parts of a spec the keyword scan reads: what it does and touches, not the long background or the decisions log. */
+export function specScanText(spec: PlanSpec): string {
+  return [spec.summary, spec.approach, ...spec.changes.map((item) => `${item.path} ${item.change}`), ...spec.risks].join("\n");
+}
+
+/**
+ * The planner's rating from plan_spec's fields. Undefined when it gave none of them. A missing field falls back to the
+ * task's current classification (and to not security-sensitive); a malformed one is an error.
+ */
+function plannerRating(raw: Record<string, unknown>, current: AcceptedClassification | undefined, errors: string[]): PlannerRating | undefined {
+  const given = ["complexity", "risk", "securitySensitive", "classificationReason"].some((key) => raw[key] !== undefined);
+  if (!given) return undefined;
+  const level = (key: "complexity" | "risk"): Complexity => {
+    const value = raw[key];
+    if (value === undefined) return current?.[key] ?? "medium";
+    if (typeof value === "string" && isDifficulty(value)) return value;
+    errors.push(`${key} must be one of low, medium, high.`);
+    return "medium";
+  };
+  const complexity = level("complexity");
+  const risk = level("risk");
+  if (raw.securitySensitive !== undefined && typeof raw.securitySensitive !== "boolean") errors.push("securitySensitive must be true or false.");
+  if (raw.classificationReason !== undefined && typeof raw.classificationReason !== "string") errors.push("classificationReason must be a string.");
+  return {
+    complexity,
+    risk,
+    securitySensitive: raw.securitySensitive === undefined ? !!current && isSecuritySensitive(current) : raw.securitySensitive === true,
+    reason: typeof raw.classificationReason === "string" ? raw.classificationReason : undefined,
+  };
 }
 
 /** Rules and state to inject before a user prompt while /plan is running, or undefined when it is not. */

@@ -21,8 +21,6 @@ export interface ProviderConfig {
   endpoint?: string;
   /** Foundry: "v1" uses `<endpoint>/openai/v1/...` (no api-version); "deployments" is the legacy route. Defaults to deployments when apiVersion is set, else v1. */
   routeStyle?: "v1" | "deployments";
-  /** Path of the Decisions API under the provider base URL. Defaults to /decisions. */
-  decisionsPath?: string;
   /** Vercel: directory that has been `vercel link`ed (relative paths resolve from the project root). */
   projectDir?: string;
   /** Vercel: env file `vercel env pull` writes. Defaults to .env.local. */
@@ -123,11 +121,10 @@ export interface WorkflowConfig {
   workspaceDir: string;
   providers: Partial<Record<ProviderId, ProviderConfig>>;
   /** Legacy one-provider-per-tier map. Used for any tier that `tiers` does not list. */
-  models: Record<"classifier" | "cheap" | "standard" | "premium", ProviderId>;
+  models: Record<"cheap" | "standard" | "premium", ProviderId>;
   /** Candidate models per tier, in preference order for ties. Overrides `models` for the tiers it lists. */
   tiers: Partial<Record<TierKey, TierCandidate[]>>;
   routing: {
-    minConfidence: number;
     maxEscalations: number;
     maxTier: Tier;
     /** Tier the /review model pass routes to. */
@@ -195,10 +192,9 @@ const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
   workspaceDir: ".pi-workflows",
   providers: {},
-  models: { classifier: "local", cheap: "foundry", standard: "anthropic", premium: "openai" },
+  models: { cheap: "foundry", standard: "anthropic", premium: "openai" },
   tiers: {},
   routing: {
-    minConfidence: 0.75,
     maxEscalations: 3,
     maxTier: "premium",
     reviewTier: "premium",
@@ -380,12 +376,53 @@ function warnOnce(warnings: string[], message: string): void {
 
 /**
  * Removes settings from earlier versions, each with one warning, so an old file still loads. The cost-opt/auto
- * virtual model and its router settings are gone.
+ * virtual model, its router settings, and the Decisions classifier are gone.
  */
 function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = { ...raw };
+  if (isRecord(out.providers)) {
+    const providers: Record<string, unknown> = {};
+    for (const [name, provider] of Object.entries(out.providers)) {
+      if (isRecord(provider) && "decisionsPath" in provider) {
+        warnOnce(warnings, `providers.${name}.decisionsPath is no longer used; the Decisions classifier is gone.`);
+        const { decisionsPath: _gone, ...rest } = provider;
+        providers[name] = rest;
+      } else providers[name] = provider;
+    }
+    out.providers = providers;
+  }
+  if (isRecord(out.models) && "classifier" in out.models) {
+    warnOnce(warnings, "models.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).");
+    const { classifier: _gone, ...rest } = out.models;
+    out.models = rest;
+  }
+  if (isRecord(out.tiers)) {
+    const tiers: Record<string, unknown> = {};
+    for (const [key, list] of Object.entries(out.tiers)) {
+      if (key === "classifier") {
+        warnOnce(warnings, "tiers.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).");
+        continue;
+      }
+      if (!Array.isArray(list)) {
+        tiers[key] = list;
+        continue;
+      }
+      // A Decisions model cannot chat, so it is dropped; a tier left with nothing is dropped too.
+      const kept = list.filter((item) => {
+        if (!isRecord(item) || item.api !== "decisions") return true;
+        warnOnce(warnings, `tiers.${key}: dropped ${String(item.provider)}/${String(item.model)} (api: decisions is no longer supported).`);
+        return false;
+      });
+      if (kept.length > 0 || list.length === 0) tiers[key] = kept;
+    }
+    out.tiers = tiers;
+  }
   if (isRecord(out.routing)) {
     const routing = { ...out.routing };
+    if ("minConfidence" in routing) {
+      warnOnce(warnings, "routing.minConfidence is no longer used; nothing is classified by a model.");
+      delete routing.minConfidence;
+    }
     if ("sessionTier" in routing) {
       warnOnce(warnings, "routing.sessionTier is no longer used; the main session is a normal Pi model (set session.model).");
       delete routing.sessionTier;
@@ -431,7 +468,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     if (name === "vercel" && provider.auth && provider.auth !== "vercel-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Vercel auth must be vercel-cli.");
     }
-    for (const key of ["endpoint", "decisionsPath", "projectDir", "envFile", "baseUrl", "model"] as const) {
+    for (const key of ["endpoint", "projectDir", "envFile", "baseUrl", "model"] as const) {
       if (provider[key] !== undefined && (typeof provider[key] !== "string" || provider[key] === "")) {
         invalid(where, `providers.${name}.${key}`, "must be a non-empty string");
       }
@@ -447,9 +484,6 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     }
     if (provider.routeStyle !== undefined && provider.routeStyle !== "v1" && provider.routeStyle !== "deployments") {
       invalid(where, `providers.${name}.routeStyle`, 'must be "v1" or "deployments"');
-    }
-    if (typeof provider.decisionsPath === "string" && !provider.decisionsPath.startsWith("/")) {
-      invalid(where, `providers.${name}.decisionsPath`, 'must start with "/"');
     }
     if (typeof provider.envFile === "string" && (provider.envFile.startsWith("-") || provider.envFile.includes(".."))) {
       invalid(where, `providers.${name}.envFile`, "must be a plain file name or relative path without ..");
@@ -485,8 +519,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
           invalid(where, `${field}.provider`, `must be one of ${PROVIDERS.join(", ")}`);
         }
         if (typeof item.model !== "string" || item.model.trim() === "") invalid(where, `${field}.model`, "must be a non-empty string");
-        if (item.api !== undefined && item.api !== "chat" && item.api !== "decisions") invalid(where, `${field}.api`, 'must be "chat" or "decisions"');
-        if (item.api === "decisions" && key !== "classifier") invalid(where, `${field}.api`, '"decisions" models can only serve the classifier tier');
+        if (item.api !== undefined && item.api !== "chat") invalid(where, `${field}.api`, 'must be "chat"');
         if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
       });
     }
@@ -494,7 +527,6 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
 
   const routing = section(raw, "routing", where);
   if (routing) {
-    checkNumber(routing, "minConfidence", where, { min: 0, max: 1 }, "routing");
     checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
     checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
     checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
@@ -571,7 +603,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
   return out;
 }
 
-const MODEL_KEYS = ["classifier", "cheap", "standard", "premium"] as const;
+const MODEL_KEYS = ["cheap", "standard", "premium"] as const;
 
 /**
  * Cross-checks a resolved config: tier models must reference configured providers, and each
@@ -649,7 +681,6 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
       const candidate: TierCandidate = {
         provider: entry.provider as ProviderId,
         model: String(entry.model),
-        api: entry.api === "decisions" ? "decisions" : "chat",
       };
       if (typeof entry.label === "string") candidate.label = entry.label;
       return candidate;
@@ -687,13 +718,12 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  * untrusted (it ships with a cloned repo), so these come from the user config only. The one exception
  * is a provider the user did not define, where a project may repeat the built-in default.
  */
-const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "decisionsPath"] as const;
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (field === "baseUrl") return provider === "vercel" ? value === DEFAULT_VERCEL_GATEWAY_URL : provider === "local" && isLoopbackHttpUrl(value);
   if (field === "audience") return provider === "foundry" && value === DEFAULT_FOUNDRY_AUDIENCE;
-  if (field === "decisionsPath") return value === "/decisions";
   if (field === "projectDir") return provider === "vercel" && value === ".";
   if (field === "envFile") return provider === "vercel" && value === ".env.local";
   return false;
@@ -983,14 +1013,14 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
     return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
   }
   const provider = config.models[tier];
-  return [{ provider, model: modelNameFor(config, provider, tier), api: "chat" }];
+  return [{ provider, model: modelNameFor(config, provider, tier) }];
 }
 
 /** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */
 export function modelNameFor(config: WorkflowConfig, provider: ProviderId, tier: Tier): string {
   if (provider === "foundry") {
     const deployments = config.providers.foundry?.deployments;
-    if (tier === "classifier" || tier === "cheap" || tier === "deterministic") {
+    if (tier === "cheap" || tier === "deterministic") {
       return deployments?.cheap ?? deployments?.classifier ?? "";
     }
     return deployments?.reasoning ?? "";

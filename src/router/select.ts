@@ -20,8 +20,6 @@ export interface SelectOptions {
   /** Uniform [0, 1). Injectable so tests are deterministic. */
   rng?: () => number;
   at?: Date;
-  /** Only consider candidates that speak this API. Defaults to "chat". */
-  api?: "chat" | "decisions";
   /**
    * When true an unavailable provider is a hard exclusion. When false and every otherwise-eligible
    * candidate is unavailable, the choice ignores availability so the caller's auth gate can say
@@ -85,10 +83,7 @@ export function selectCandidate(options: SelectOptions): Selection {
   for (const candidate of candidates) {
     const price = tierCost(config.pricing, candidate.provider, candidate.model, at, config.workers.tokenBudget);
     cost.set(candidate, price);
-    // Chat purposes (the default) never get a Decisions-only model: it cannot answer a chat turn.
-    const wanted = options.api ?? "chat";
-    if (candidate.api !== wanted) hard.set(candidate, `api_${candidate.api}_not_${wanted}`);
-    else if (allow.length > 0 && !allow.includes(candidate.provider)) hard.set(candidate, "org_allowlist");
+    if (allow.length > 0 && !allow.includes(candidate.provider)) hard.set(candidate, "org_allowlist");
     else if (config.proprietaryCode && allow.length === 0 && candidate.provider !== "local") hard.set(candidate, "proprietary_code_policy");
     else if (circuitOpenFor(table, taskType, modelMetricKey(tier, candidate.provider, candidate.model), config.routing.circuitBreakerFailures, at)) {
       hard.set(candidate, "circuit_open");

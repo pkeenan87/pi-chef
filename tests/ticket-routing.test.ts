@@ -5,12 +5,12 @@ import { modelMetricKey } from "../src/domain.js";
 import { tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const classification = (extra: Partial<AcceptedClassification> = {}): AcceptedClassification => ({
-  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], recommended_tier: "standard", confidence: 0.9, reason_codes: [], source: "model", ...extra,
+  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], recommended_tier: "standard", reason_codes: [], source: "planner", ...extra,
 });
 const rng = () => 0.5;
 const opusOnly = () => {
   const config = tieredConfig();
-  config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5", api: "chat" }];
+  config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }];
   return config;
 };
 

@@ -5,6 +5,7 @@ import { parseTicketsMarkdown, renderTicketsMarkdown } from "../orchestrator/tic
 import { DIFFICULTIES, TIERS, type Ticket } from "../domain.js";
 import type { PlanReviewAction } from "../orchestrator/types.js";
 import { consultResultText } from "../orchestrator/plan-consult.js";
+import { isSecuritySensitive } from "../router/classify.js";
 import { reviewPlan } from "./plan-review.js";
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
@@ -31,6 +32,10 @@ export const PlanSpecParams = Type.Object({
   outOfScope: Type.Array(Type.String()),
   risks: Type.Array(Type.String()),
   verification: Type.Array(Type.String(), { description: "Tests to add and commands to run to prove the change works end to end" }),
+  complexity: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "How hard the whole task is" }),
+  risk: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "How much it could break production behavior" }),
+  securitySensitive: Type.Boolean({ description: "True when it touches authentication, authorization, secrets, credentials, permissions or production deployment. A keyword scan of the request and spec can raise this, never lower it." }),
+  classificationReason: Type.String({ description: "One short sentence on why you rated it this way" }),
 });
 
 export function createPlanSpecTool(getWorkflow: () => Workflow | undefined) {
@@ -38,14 +43,16 @@ export function createPlanSpecTool(getWorkflow: () => Workflow | undefined) {
     name: "plan_spec",
     label: "Plan Spec",
     description:
-      "Save the technical plan for the task being planned: summary, current context, approach (design, types, signatures), the files to change, what to reuse, decisions, assumptions, out of scope, risks, and verification. Call after the interview (again during ticket review to revise it). Only usable while /plan is running.",
+      "Save the technical plan for the task being planned: summary, current context, approach (design, types, signatures), the files to change, what to reuse, decisions, assumptions, out of scope, risks, verification, and your rating of the task (complexity, risk, securitySensitive, classificationReason). Call after the interview (again during ticket review to revise it). Only usable while /plan is running.",
     promptSnippet: "plan_spec: save the planning spec",
     parameters: PlanSpecParams,
     async execute(_id, params) {
       const workflow = getWorkflow();
       if (!workflow) throw new Error("The cost workflow is not available.");
       const saved = await workflow.savePlanSpec(params);
-      return text(`Spec saved to ${saved.file}. Now draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the answers, then call plan_tickets.`, { file: saved.file });
+      const rated = saved.classification;
+      const rating = `Rated ${rated.complexity} complexity, ${rated.risk} risk${isSecuritySensitive(rated) ? ", security-sensitive" : ""}${saved.keywordRaised ? " (the keyword scan marked it security-sensitive; you cannot lower that)" : ""}.`;
+      return text(`Spec saved to ${saved.file}. ${rating} Now draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the answers, then call plan_tickets.`, { file: saved.file, classification: rated });
     },
   });
 }

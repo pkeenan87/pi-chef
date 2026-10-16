@@ -8,7 +8,8 @@ const TECHNICAL_PLAN = `The spec is a technical implementation plan, like an eng
 - approach: the design. Components, data flow, new types and function signatures, error handling, config.
 - changes: every file to create or modify, each with the concrete change (functions added or edited, fields, exports).
 - reuse: existing functions and utilities to build on, with their paths.
-- verification: the tests to add and the commands to run to prove it works end to end.`;
+- verification: the tests to add and the commands to run to prove it works end to end.
+- complexity, risk (low, medium or high), securitySensitive (true when it touches authentication, authorization, secrets, credentials, permissions or production deployment) and classificationReason (one short sentence): you rate the task. They pick the models and the review depth. A keyword scan can raise securitySensitive but never lower it.`;
 
 export const INTERVIEW_RULES = `[PLAN INTERVIEW]
 You are planning, not building. Edit and write tools are off; use read, grep, find, ls, safe bash, web_search and web_fetch.

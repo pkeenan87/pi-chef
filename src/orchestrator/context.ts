@@ -2,10 +2,8 @@ import { WorkflowError, type CommandResult, type Phase, type ProviderId, type Ta
 import type { WorkflowConfig } from "../config.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
-import type { DecisionsClient } from "../providers/clients.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import type { CheckRunner } from "../review/review.js";
-import type { Classifier } from "../router/classify.js";
 import { redact } from "../redact.js";
 import type { TaskStore } from "../storage/store.js";
 import { move } from "./machine.js";
@@ -21,9 +19,7 @@ export interface WorkflowContext {
   readonly now: () => Date;
   readonly id: () => string;
   authProbe: AuthProbe;
-  readonly classifier?: Classifier;
   readonly rng?: () => number;
-  deciders: Partial<Record<ProviderId, DecisionsClient>>;
   /** Check runner that skips a check already passed on an identical clean tree. */
   readonly checkRunner: CheckRunner;
   /** Aborted by `Workflow.dispose`; the advisory model review passes its signal so a running call is stopped. */

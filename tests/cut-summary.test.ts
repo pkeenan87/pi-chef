@@ -9,8 +9,8 @@ const LUNA = "gpt-6-luna";
 
 async function setup(options: { answer?: (call: FakeCall) => string; mutate?: (config: ReturnType<typeof tieredConfig>) => void } = {}) {
   const config = withAdvisors(tieredConfig());
-  config.tiers.cheap = [{ provider: "anthropic", model: "claude-haiku-5-5", api: "chat" }];
-  config.tiers.batch = [{ provider: "openai", model: LUNA, api: "chat" }];
+  config.tiers.cheap = [{ provider: "anthropic", model: "claude-haiku-5-5" }];
+  config.tiers.batch = [{ provider: "openai", model: LUNA }];
   options.mutate?.(config);
   const fake = fakeChat(options.answer ?? (() => JSON.stringify({ "b.txt": "adds the b module", "c.txt": "adds the c module", "elsewhere.txt": "not a cut file" })));
   const { app, taskId } = await ticketWorkflow([sampleTicket("01")], { config, chat: fake.chat }, { approve: false, cwd: await tempRepo() });

@@ -5,15 +5,7 @@ import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, tierCandidates } 
 import { redact } from "../redact.js";
 import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from "../domain.js";
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
-import {
-  createDecisionsClient,
-  decisionsUrl,
-  foundryV1Base,
-  parseAzureToken,
-  createTokenCache,
-  type DecisionsClient,
-  type FoundryConfig,
-} from "./clients.js";
+import { foundryV1Base, type FoundryConfig } from "./clients.js";
 import { createVercelTokenSource, type VercelTokenSource } from "./vercel.js";
 
 const exec = promisify(execFile);
@@ -63,8 +55,6 @@ export function foundryConfigFrom(config: WorkflowConfig, env: NodeJS.ProcessEnv
 
 export interface ProviderRuntime {
   auth: AuthProbe;
-  /** Decisions-capable clients by provider (foundry, vercel). */
-  deciders: Partial<Record<ProviderId, DecisionsClient>>;
   vercel?: VercelTokenSource;
 }
 
@@ -102,31 +92,7 @@ export function createRuntime(config: WorkflowConfig, root: string, overrides: R
     apiKeyFallback: (provider) => config.providers[provider]?.apiKeyFallback === true,
     now: overrides.now,
   });
-  const deciders: ProviderRuntime["deciders"] = {};
-  if (config.providers.foundry) {
-    const tokens = createTokenCache(async (audience) => {
-      const result = await azure(["account", "get-access-token", "--resource", audience, "-o", "json"]);
-      if (result.code !== 0) throw new WorkflowError("AUTH_MISSING", `az account get-access-token failed: ${redact(result.stderr).slice(0, 200)}. Run az login.`);
-      return parseAzureToken(result.stdout);
-    }, overrides.now);
-    deciders.foundry = createDecisionsClient({
-      id: "foundry",
-      auth,
-      fetchImpl: overrides.fetchImpl,
-      url: async () => decisionsUrl(foundryV1Base(foundryConfigFrom(config, overrides.env).endpoint), config.providers.foundry?.decisionsPath),
-      token: async () => (await tokens(config.providers.foundry?.audience ?? FOUNDRY_DEFAULT_AUDIENCE)).token,
-    });
-  }
-  if (vercel) {
-    deciders.vercel = createDecisionsClient({
-      id: "vercel",
-      auth,
-      fetchImpl: overrides.fetchImpl,
-      url: async () => decisionsUrl(vercelConfig?.baseUrl ?? VERCEL_GATEWAY_URL, vercelConfig?.decisionsPath),
-      token: () => vercel.getToken(),
-    });
-  }
-  return { auth, deciders, vercel };
+  return { auth, vercel };
 }
 
 function shellQuote(value: string): string {
@@ -160,7 +126,7 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
   const chatModels = new Map<ProviderId, TierCandidate[]>();
   for (const tier of TIER_KEYS) {
     for (const candidate of tierCandidates(config, tier)) {
-      if (candidate.api !== "chat" || !candidate.model) continue;
+      if (!candidate.model) continue;
       const list = chatModels.get(candidate.provider) ?? [];
       if (!list.some((item) => item.model === candidate.model)) list.push(candidate);
       chatModels.set(candidate.provider, list);

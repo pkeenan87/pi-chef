@@ -13,9 +13,8 @@ import { splitDiff } from "../src/review/model-review.js";
 import { blank } from "../src/orchestrator/planning.js";
 import { TICKET_RULES } from "../src/orchestrator/prompts.js";
 import { validateTickets } from "../src/orchestrator/tickets.js";
-import type { DecisionsClient } from "../src/providers/clients.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { checkRunner, readyAuth, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { checkRunner, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 function fakeChat(reply: () => string) {
@@ -152,23 +151,6 @@ describe("phantom spend", () => {
   it("names the models in the ledger that have no pricing row", () => {
     const priced: CostRecord = { ...unknown, id: "2", model: "cheap" };
     expect(unpricedModels([priced, unknown, unknown], pricing)).toEqual(["anthropic/other"]);
-  });
-
-  it("never sends a classifier call to a provider that is not signed in", async () => {
-    const log: string[] = [];
-    const client = (id: "foundry" | "vercel"): DecisionsClient => ({
-      id,
-      async decide(request) {
-        log.push(`${id}:${request.model}`);
-        throw new Error("az account show failed");
-      },
-    });
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: readyAuth("missing"), deciders: { foundry: client("foundry"), vercel: client("vercel") } });
-    const result = await app.route("add a feature");
-    expect(result.ok).toBe(true);
-    expect(log).toEqual([]);
-    expect(app.store.readLedger().filter((item) => item.tier === "classifier")).toEqual([]);
-    expect(app.store.readMetrics().classification).toBeUndefined();
   });
 });
 

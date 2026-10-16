@@ -5,7 +5,7 @@ import { availableAdvisors, reviewAdvisorsFor } from "../review/advisors.js";
 import { modelReviewLines, runModelReview, unreviewedDiff } from "../review/model-review.js";
 import { acceptedLines, advisorsHeader, rejectedLines, unresolvedConcernLines } from "../review/review-resolution.js";
 import { reviewDiff } from "../review/review.js";
-import { fallbackClassification } from "../router/classify.js";
+import { classifyKeywords } from "../router/classify.js";
 import { reviewMetricType } from "../router/stats.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
@@ -92,7 +92,7 @@ export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision
   const usable = new Map((decision.considered ?? []).filter((item) => !item.excludedReason).map((item) => [key(item), item.score]));
   const rest = tierCandidates(ctx.config, decision.tier)
     .map((candidate, order) => ({ candidate, order, score: usable.get(key(candidate)) }))
-    .filter((row) => row.candidate.api === "chat" && key(row.candidate) !== key(primary) && usable.has(key(row.candidate)));
+    .filter((row) => key(row.candidate) !== key(primary) && usable.has(key(row.candidate)));
   rest.sort((a, b) => {
     const otherA = a.candidate.provider === primary.provider ? 1 : 0;
     const otherB = b.candidate.provider === primary.provider ? 1 : 0;
@@ -104,7 +104,7 @@ export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision
   const ordered = [primary, ...rest.map((row) => row.candidate)];
   // A failed part stays within the review tier first; when none is left, standard-tier models take over.
   if (decision.tier !== "standard") {
-    const standard = tierCandidates(ctx.config, "standard").filter((candidate) => candidate.api === "chat" && !ordered.some((item) => key(item) === key(candidate)));
+    const standard = tierCandidates(ctx.config, "standard").filter((candidate) => !ordered.some((item) => key(item) === key(candidate)));
     // Another provider first: a failed part is usually a provider problem.
     ordered.push(...standard.filter((item) => item.provider !== primary.provider), ...standard.filter((item) => item.provider === primary.provider));
   }
@@ -270,7 +270,7 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     if (exhausted) return exhausted;
 
     const plan = state?.plan;
-    const classification: AcceptedClassification = state?.classification ?? fallbackClassification("ad-hoc changes");
+    const classification: AcceptedClassification = state?.classification ?? classifyKeywords("ad-hoc changes");
     const decision = await decide(ctx, classification, "review", { taskId: state?.taskId });
     await announce(ctx, state?.taskId, "review", decision);
     const started = ctx.now().getTime();
