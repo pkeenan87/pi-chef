@@ -43,7 +43,7 @@ export interface ModelRef {
 }
 
 export type NextChunk =
-  | { kind: "chunk"; ticket: Ticket; prompt: string; model: ModelRef; tier: Tier; candidate?: { provider: string; model: string } }
+  | { kind: "chunk"; ticket: Ticket; prompt: string; model: ModelRef; tier: Tier; candidate?: { provider: string; model: string }; previous?: TicketRun }
   | { kind: "done" }
   | { kind: "stopped"; code: string; reason: string };
 
@@ -380,7 +380,10 @@ function startTier(state: TaskState, ticket: Ticket): TicketTier {
 
 /** Routes the ticket (its difficulty tier, one step up the ticket ladder after a failure), gates the budget, builds the prompt, and marks the ticket running. */
 async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): Promise<NextChunk> {
-  const run = state.ticketRuns?.[ticket.id];
+  const stored = state.ticketRuns?.[ticket.id];
+  // An in-progress attempt that never sent a turn (the session did not open) is no attempt: route the ticket fresh.
+  const unstarted = stored !== undefined && neverStarted(stored);
+  const run = unstarted ? undefined : stored;
   const budget = budgetState(ctx, state.taskId);
   if (budget.status === "hard") return { kind: "stopped", code: "BUDGET", reason: "Task or daily budget is exhausted; no further ticket was started. /build resumes after the budget is raised." };
   if (budget.status === "soft") warnSoft(ctx, state.taskId);
@@ -425,7 +428,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     ctx,
     state.taskId,
     ticket,
-    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: previous.attempts + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: previous.startedAt ?? now }),
+    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: (unstarted ? 0 : previous.attempts) + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: (unstarted ? undefined : previous.startedAt) ?? now }),
     (build) => ({ ...build, currentTicket: ticket.id, chunkStartedAt: now }),
   );
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));
@@ -436,7 +439,35 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     model: { provider: decision.provider, id: decision.model },
     tier: decision.tier,
     candidate: decision.candidate ? { provider: decision.provider, model: decision.model } : undefined,
+    previous: run,
   };
+}
+
+/** An in-progress run with an attempt counted but no turn, usage, time or earlier attempt: its session never started. */
+function neverStarted(run: TicketRun): boolean {
+  return run.status === "in-progress" && run.attempts > 0 && run.turns === 0 && run.tokens === 0 && run.costUsd === 0 && run.elapsedMs === undefined && !run.summary && (run.attemptLog ?? []).length === 0 && !run.commit;
+}
+
+/**
+ * Takes back what `nextChunk` recorded when the ticket's session never took its first turn (preflight failure, session
+ * cancelled or failed, model mismatch): the run goes back to what it was before (no attempt, no pinned tier), the build
+ * no longer has a current ticket, and no metric moves. `previous` is the run `nextChunk` returned, undefined for a new ticket.
+ */
+export async function unstartChunk(ctx: WorkflowContext, ticketId: string, previous?: TicketRun): Promise<void> {
+  try {
+    const state = requireActive(ctx);
+    const ticket = state.plan?.tickets?.find((item) => item.id === ticketId);
+    if (!ticket) return;
+    await ctx.store.update(state.taskId, `ticket ${ticketId} not started`, (task) => {
+      const runs = { ...task.ticketRuns };
+      if (previous) runs[ticketId] = previous;
+      else delete runs[ticketId];
+      return { ...task, ticketRuns: runs, ...(task.build ? { build: { ...task.build, currentTicket: undefined, chunkStartedAt: undefined } } : {}), updatedAt: iso(ctx) };
+    });
+    editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, previous?.status === "failed" ? "failed" : "ready-for-agent"));
+  } catch {
+    /* the next /build re-reads the state; an in-progress run with no turn counts as not started there */
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -615,8 +646,11 @@ export interface ChunkSession {
 }
 
 export interface BuildDriver {
-  /** Opens a fresh session on `model` and runs `run` inside it. Throws when the session cannot be opened. */
-  fresh(model: ModelRef, run: (session: ChunkSession) => Promise<void>): Promise<void>;
+  /**
+   * Opens a fresh session on `model` for ticket `ticketId` and runs `run` inside it. It does not throw: when the session
+   * cannot be opened, is on the wrong model, or `run` fails, it returns `{ stopped }` with why.
+   */
+  fresh(model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string): Promise<void | { stopped: string }>;
   /** Puts back the model the user had before /build. Always called. */
   finish(): Promise<void>;
 }
@@ -626,6 +660,8 @@ export interface BuildWorkflow {
   startBuild(): Promise<CommandResult>;
   nextChunk(): Promise<NextChunk>;
   finishChunk(ticketId: string, result: { lastText: string; aborted: boolean }, options?: { final?: boolean }): Promise<ChunkFinish>;
+  /** Rolls a ticket back to not started when its session never took a turn. */
+  unstartChunk(ticketId: string, previous?: TicketRun): Promise<void>;
   buildReport(stopped?: string): string;
   progress(text: string): void;
   report(markdown: string): void;
@@ -651,20 +687,36 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
       }
       const began = getWorkflow().now().getTime();
       let outcome: ChunkFinish | undefined;
+      let sent = false;
       running = chunk.ticket.id;
-      await driver.fresh(chunk.model, async (session) => {
-        let reply = await session.send(chunk.prompt);
-        // The check retry and the review retry are separate: each is offered once, so at most two retry turns follow.
-        let checksRetried = false;
-        let finish = await getWorkflow().finishChunk(chunk.ticket.id, reply);
-        while (finish.kind === "retry") {
-          if (finish.reason === "checks") checksRetried = true;
-          reply = await session.send(finish.text);
-          finish = await getWorkflow().finishChunk(chunk.ticket.id, reply, { final: checksRetried });
-        }
-        outcome = finish;
-      });
+      // A driver that throws is treated like one that returns `stopped`.
+      const opened: { stopped?: string } | void = await Promise.resolve(
+        driver.fresh(
+          chunk.model,
+          async (session) => {
+            sent = true;
+            let reply = await session.send(chunk.prompt);
+            // The check retry and the review retry are separate: each is offered once, so at most two retry turns follow.
+            let checksRetried = false;
+            let finish = await getWorkflow().finishChunk(chunk.ticket.id, reply);
+            while (finish.kind === "retry") {
+              if (finish.reason === "checks") checksRetried = true;
+              reply = await session.send(finish.text);
+              finish = await getWorkflow().finishChunk(chunk.ticket.id, reply, { final: checksRetried });
+            }
+            outcome = finish;
+          },
+          chunk.ticket.id,
+        ),
+      ).catch((error: unknown) => ({ stopped: redact((error as Error)?.message || "The ticket's session failed.") }));
       running = undefined;
+      if (opened && opened.stopped && !outcome) {
+        stopped = opened.stopped;
+        // Before the first turn was sent the ticket was never started; after it, it stays in progress for /build to resume.
+        if (!sent) await getWorkflow().unstartChunk(chunk.ticket.id, chunk.previous).catch(() => undefined);
+        else await getWorkflow().finishChunk(chunk.ticket.id, { lastText: "", aborted: true }).catch(() => undefined);
+        break;
+      }
       const workflow = getWorkflow();
       const result = outcome as ChunkFinish | undefined;
       if (!result) {
@@ -689,8 +741,12 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
   } finally {
     await driver.finish().catch(() => undefined);
   }
-  const workflow = getWorkflow();
-  workflow.report(workflow.buildReport(stopped));
+  try {
+    const workflow = getWorkflow();
+    workflow.report(workflow.buildReport(stopped));
+  } catch {
+    /* the result below still says how the build ended */
+  }
   if (stopped) return fail(code, stopped);
   return done(`Built ${built} ticket(s). Run /review to check the branch, then push and open the PR yourself (git push, then origin pr create or gh pr create).`);
 }

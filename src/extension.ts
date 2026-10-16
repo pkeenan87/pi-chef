@@ -11,6 +11,7 @@ import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js"
 import { Workflow } from "./orchestrator/service.js";
 import { reviewPlan } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
+import { redact } from "./redact.js";
 import type { CommandResult, TokenUsage } from "./domain.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
@@ -177,11 +178,17 @@ function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: Extensio
   if (!wanted) return undefined;
   const current = (ctx as { model?: ModelRef }).model;
   if (current?.provider === wanted.provider && current.id === wanted.id) return undefined;
+  const startedOn = current ? `${current.provider}/${current.id}` : "the default model";
   const warn = () => {
-    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${current ? `${current.provider}/${current.id}` : "the default model"}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
+    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${startedOn}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
   };
-  const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
-  if (!model || typeof pi.setModel !== "function") return void warn();
+  // An empty or unknown id has nothing to switch back to: say what was wanted instead of a broken /model command.
+  const unknown = () => {
+    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${startedOn}; the model wanted was ${wanted.provider}/${wanted.id || "(no model id)"}, which Pi does not know. Check the tier config.`, "warning");
+  };
+  const model = wanted.id ? ctx.modelRegistry?.find(wanted.provider, wanted.id) : undefined;
+  if (!model) return void unknown();
+  if (typeof pi.setModel !== "function") return void warn();
   return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
 }
 
@@ -331,47 +338,74 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
   const getWorkflow = () => workflowFor(live.cwd, live);
   const driver: BuildDriver = {
-    async fresh(model, run) {
+    async fresh(model, run, ticketId) {
+      // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
+      const known = model.id ? live.modelRegistry?.find(model.provider, model.id) : undefined;
+      const registry = live.modelRegistry as { hasConfiguredAuth?: (model: never) => boolean } | undefined;
+      let signedIn = !!known;
+      if (known && typeof registry?.hasConfiguredAuth === "function") {
+        try {
+          signedIn = registry.hasConfiguredAuth(known as never);
+        } catch {
+          signedIn = false;
+        }
+      }
+      if (!known || !signedIn) {
+        return { stopped: `Ticket ${ticketId} is routed to ${model.provider}/${model.id}, which Pi does not know or is not signed in. Fix the tier config or sign in, then /build again.` };
+      }
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
       let opened = false;
+      // Pi's newSession rethrows an error from withSession and the app dies with "Failed to create session", so nothing
+      // is thrown in there: the error is kept and turned into a stop once newSession has returned.
+      let failure: string | undefined;
+      const stash = (error: unknown) => {
+        failure ??= redact(error instanceof Error && error.message ? error.message : String(error));
+      };
       try {
         const result = await live.newSession({
           withSession: async (next) => {
-            opened = true;
-            replacementCtx = next;
-            live = next;
             try {
-              workflowFor(next.cwd, next);
-            } catch {
-              /* a config problem is reported by the next command */
+              opened = true;
+              replacementCtx = next;
+              live = next;
+              try {
+                workflowFor(next.cwd, next);
+              } catch {
+                /* a config problem is reported by the next command */
+              }
+              // session_start starts the model switch without awaiting it; wait here so the ticket never runs on the wrong model.
+              await restoreSlot[RESTORE_DONE];
+              delete restoreSlot[RESTORE_DONE];
+              const on = (next as { model?: ModelRef }).model;
+              if (on && (on.provider !== model.provider || on.id !== model.id)) {
+                throw new Error(`The new session is on ${on.provider}/${on.id}, not the routed ${model.provider}/${model.id}, so the ticket was not started. /build resumes it.`);
+              }
+              if (typeof next.sendUserMessage !== "function") throw new Error("This Pi session cannot send messages, so /build cannot run.");
+              const session: ChunkSession = {
+                async send(text) {
+                  restoreSlot[TURN] = { lastText: "", aborted: false };
+                  await next.sendUserMessage!(text);
+                  await next.waitForIdle?.();
+                  const turn = restoreSlot[TURN] ?? { lastText: "", aborted: false };
+                  delete restoreSlot[TURN];
+                  return { lastText: turn.lastText, aborted: turn.aborted };
+                },
+              };
+              await run(session);
+            } catch (error) {
+              stash(error);
             }
-            // session_start starts the model switch without awaiting it; wait here so the ticket never runs on the wrong model.
-            await restoreSlot[RESTORE_DONE];
-            delete restoreSlot[RESTORE_DONE];
-            const on = (next as { model?: ModelRef }).model;
-            if (on && (on.provider !== model.provider || on.id !== model.id)) {
-              throw new Error(`The new session is on ${on.provider}/${on.id}, not the routed ${model.provider}/${model.id}, so the ticket was not started. /build resumes it.`);
-            }
-            if (typeof next.sendUserMessage !== "function") throw new Error("This Pi session cannot send messages, so /build cannot run.");
-            const session: ChunkSession = {
-              async send(text) {
-                restoreSlot[TURN] = { lastText: "", aborted: false };
-                await next.sendUserMessage!(text);
-                await next.waitForIdle?.();
-                const turn = restoreSlot[TURN] ?? { lastText: "", aborted: false };
-                delete restoreSlot[TURN];
-                return { lastText: turn.lastText, aborted: turn.aborted };
-              },
-            };
-            await run(session);
           },
         });
-        if (result.cancelled || !opened) throw new Error("Pi did not open a new session for the next ticket (cancelled), so /build stopped. Run /build to resume.");
+        if (!failure && (result.cancelled || !opened)) stash("Pi did not open a new session for the next ticket (cancelled), so /build stopped. Run /build to resume.");
+      } catch (error) {
+        stash(error);
       } finally {
         delete restoreSlot[RESTORE_MODEL];
         delete restoreSlot[RESTORE_DONE];
         delete restoreSlot[TURN];
       }
+      return failure ? { stopped: failure } : undefined;
     },
     async finish() {
       // With pinning on the session belongs on session.model; otherwise it goes back to the model the user was on.
@@ -422,8 +456,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
         const live: ExtensionContext = replacementCtx ?? ctx;
         const replaced = !!replacementCtx;
         replacementCtx = undefined;
-        if (!replaced) syncPlanTools(pi);
         try {
+          if (!replaced) syncPlanTools(pi);
           if (live.hasUI) {
             live.ui.setStatus("cost-workflow", result.ok ? result.text.split("\n")[0] : undefined);
             live.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");

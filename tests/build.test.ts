@@ -389,7 +389,65 @@ describe("/build stops", () => {
     expect(result.text).toContain("did not open a new session");
     expect(state.finished).toBe(1);
     expect(t.load().build!.currentTicket).toBeUndefined();
-    expect(t.load().ticketRuns!["01"]!.status).toBe("in-progress");
+    // The session never took a turn, so the ticket is back to not started.
+    expect(t.load().ticketRuns!["01"]).toBeUndefined();
+  });
+
+  it("rolls a ticket back to not started when the driver stops before the first turn, and counts no metric", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "high" })] });
+    const driver: BuildDriver = {
+      async fresh() {
+        return { stopped: "The new session is on anthropic/claude-opus-5-5, not the routed openai/gpt-6.1-sol." };
+      },
+      async finish() {},
+    };
+    const result = await t.run(driver);
+    expect(result).toMatchObject({ ok: false, code: "BUILD_STOPPED" });
+    expect(result.text).toContain("not the routed");
+    const state = t.load();
+    expect(state.ticketRuns?.["01"]).toBeUndefined();
+    expect(state.build!.currentTicket).toBeUndefined();
+    expect(t.app.store.readMetrics()).toEqual({});
+    // The next /build starts it fresh on its own tier, as attempt 1.
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "ticketHigh", attempts: 1 });
+  });
+
+  it("restores a failed ticket's earlier run when the retry session never opens", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, (send) => first.write(`f${send.ticket}.txt`));
+    await t.run(first.driver);
+    const failed = t.load().ticketRuns!["01"]!;
+    expect(failed.status).toBe("failed");
+    const driver: BuildDriver = { async fresh() { return { stopped: "nope" }; }, async finish() {} };
+    await t.run(driver);
+    expect(t.load().ticketRuns!["01"]).toEqual(failed);
+    expect(t.load().build!.currentTicket).toBeUndefined();
+  });
+
+  it("keeps a ticket in progress when the driver stops after the first turn was sent", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    const driver: BuildDriver = {
+      async fresh(_model, run) {
+        await run({ send: async () => ({ lastText: "", aborted: true }) });
+        return { stopped: "the session closed" };
+      },
+      async finish() {},
+    };
+    await t.run(driver);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", attempts: 1 });
+  });
+
+  it("treats an in-progress attempt with no turn, usage or time as not started, so the next /build routes it fresh", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })] });
+    const stuck = { status: "in-progress" as const, tier: "ticketHigh" as const, provider: "openai", model: "", attempts: 1, turns: 0, tokens: 0, costUsd: 0, maxContextTokens: 0, crossedTarget: false };
+    await t.app.store.update(t.taskId, "stuck", (task) => ({ ...task, ticketRuns: { "01": stuck } }));
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends[0]!.model).toEqual({ provider: "anthropic", id: "claude-sonnet-5-5" });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "ticketMedium", attempts: 1 });
   });
 
   it("re-resolves the workflow on every step", async () => {
