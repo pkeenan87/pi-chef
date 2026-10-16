@@ -15,7 +15,7 @@ import { TICKET_RULES } from "../src/orchestrator/prompts.js";
 import { validateTickets } from "../src/orchestrator/tickets.js";
 import type { DecisionsClient } from "../src/providers/clients.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { checkRunner, emptyPr, MemoryGitHub, readyAuth, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { checkRunner, readyAuth, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 function fakeChat(reply: () => string) {
@@ -27,7 +27,7 @@ function fakeChat(reply: () => string) {
   return { chat, calls };
 }
 
-/** An uncommitted new file in the checkout: what /ship finds with no task and no commits. */
+/** An uncommitted new file in the checkout: what /review finds with no task and no commits. */
 async function adHocChange(cwd: string, body = "export const ingest = 1;\n", more: Record<string, string> = {}): Promise<void> {
   mkdirSync(path.join(cwd, "src"), { recursive: true });
   writeFileSync(path.join(cwd, "src", "ingest.ts"), body);
@@ -38,7 +38,7 @@ function reportDir(app: Workflow): string {
   return path.join(app.store.root, "reports");
 }
 
-/** The markdown of the newest session /ship report. */
+/** The markdown of the newest session /review report. */
 function reportText(app: Workflow): string {
   const file = readdirSync(reportDir(app)).filter((name) => name.endsWith(".md")).sort().at(-1)!;
   return readFileSync(path.join(reportDir(app), file), "utf8");
@@ -193,12 +193,12 @@ describe("model review", () => {
     expect(modelReviewPrompt(plan, "short", 1000).truncated).toBe(false);
   });
 
-  it("lists the review model's findings in /ship, ledgers the call, and keeps the pass deterministic", async () => {
+  it("lists the review model's findings in /review, ledgers the call, and keeps the pass deterministic", async () => {
     const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: "high", category: "correctness", file: "src/ingest.ts", message: "ingest() throws on empty input but the plan asks for a skip.", evidence: 'throw new Error("empty")' }]));
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), chat, github: new MemoryGitHub(emptyPr()) });
+    const app = workflow(cwd, { config: tieredConfig(), chat });
     await adHocChange(cwd);
-    const review = await app.ship();
+    const review = await app.review();
     expect(review.ok, review.text).toBe(true);
     const text = reportText(app);
     expect(text).toMatch(/Model review \(\S+\/\S+; 0\.0s, \$0\.\d{4}\): 1 finding\(s\)\./);
@@ -219,9 +219,9 @@ describe("model review", () => {
   it("skips the model pass when review.model is off, and reports a failed call as an unknown charge", async () => {
     const off = fakeChat(() => "[]");
     const quietCwd = await tempRepo();
-    const quiet = workflow(quietCwd, { config: tieredConfig("review: { model: false }"), chat: off.chat, github: new MemoryGitHub(emptyPr()) });
+    const quiet = workflow(quietCwd, { config: tieredConfig("review: { model: false }"), chat: off.chat });
     await adHocChange(quietCwd);
-    const silent = await quiet.ship();
+    const silent = await quiet.review();
     expect(silent.ok).toBe(true);
     expect(reportText(quiet)).toContain("### Model review\n- did not run");
     expect(off.calls).toHaveLength(0);
@@ -230,9 +230,9 @@ describe("model review", () => {
       throw new Error("rate limited");
     };
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), chat: broken, github: new MemoryGitHub(emptyPr()) });
+    const app = workflow(cwd, { config: tieredConfig(), chat: broken });
     await adHocChange(cwd);
-    const review = await app.ship();
+    const review = await app.review();
     expect(review.ok).toBe(true);
     // Both review candidates were tried; each failed call is an unknown charge, never zero.
     expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: rate limited; \S+\/\S+: rate limited/);
@@ -246,11 +246,10 @@ describe("model review", () => {
     const cwd = await tempRepo();
     const app = workflow(cwd, {
       config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }"),
-      github: new MemoryGitHub(emptyPr()),
       runner: checkRunner(async (command, args, where) => (ran.push(`${[command, ...args].join(" ")} @ ${where === app.git.repoRoot ? "root" : where}`), { code: 0, stdout: "ok", stderr: "" })),
     });
     await adHocChange(cwd);
-    const review = await app.ship();
+    const review = await app.review();
     expect(review.ok, review.text).toBe(true);
     expect(ran).toEqual(["npm ci @ root", "npm test @ root"]);
     expect(savedReport(app).checks.map((check) => check.name)).toEqual(["setup: install", "unit"]);
@@ -258,11 +257,10 @@ describe("model review", () => {
     const brokenCwd = await tempRepo();
     const brokenInstall = workflow(brokenCwd, {
       config: tieredConfig("setup:\n  - { name: install, command: npm, args: [ci] }"),
-      github: new MemoryGitHub(emptyPr()),
       runner: checkRunner(async (_command, args) => (args[0] === "ci" ? { code: 1, stdout: "", stderr: "ERESOLVE" } : { code: 0, stdout: "ok", stderr: "" })),
     });
     await adHocChange(brokenCwd);
-    const noInstall = await brokenInstall.ship();
+    const noInstall = await brokenInstall.review();
     expect(noInstall.ok).toBe(false);
     expect(noInstall.text).toContain("setup: install failed.");
     expect(savedReport(brokenInstall).checks.map((check) => [check.name, check.ran])).toEqual([["setup: install", true], ["unit", false]]);
@@ -270,11 +268,10 @@ describe("model review", () => {
     const bareCwd = await tempRepo();
     const bare = workflow(bareCwd, {
       config: tieredConfig(),
-      github: new MemoryGitHub(emptyPr()),
       runner: checkRunner(async () => ({ code: 127, stdout: "", stderr: "sh: tsc: command not found" })),
     });
     await adHocChange(bareCwd);
-    const failed = await bare.ship();
+    const failed = await bare.review();
     expect(failed.ok).toBe(false);
     expect(reportText(bare)).toContain("a tool or package is missing");
     expect(reportText(bare)).toContain("`setup:`");
@@ -306,9 +303,9 @@ describe("verbose output", () => {
     const progress: string[] = [];
     const config = tieredConfig("review: { maxDiffChars: 2000, maxChunks: 2 }");
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config, chat, github: new MemoryGitHub(emptyPr()), progress: (line) => void progress.push(line) });
+    const app = workflow(cwd, { config, chat, progress: (line) => void progress.push(line) });
     await adHocChange(cwd, `${"// padding line that makes this file's diff long\n".repeat(80)}export const ingest = 1;\n`, { "src/alert.ts": "export const alert = 1;\n".repeat(120) });
-    const review = await app.ship();
+    const review = await app.review();
     expect(review.ok, review.text).toBe(true);
     const text = reportText(app);
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -335,9 +332,9 @@ describe("verbose output", () => {
         request.signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
       });
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig("review: { timeoutMs: 1000 }"), chat, github: new MemoryGitHub(emptyPr()) });
+    const app = workflow(cwd, { config: tieredConfig("review: { timeoutMs: 1000 }"), chat });
     await adHocChange(cwd);
-    const review = await app.ship();
+    const review = await app.review();
     expect(review.ok).toBe(true);
     expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: timed out after 1\.0s; \S+\/\S+: timed out after 1\.0s/);
   }, 15_000);

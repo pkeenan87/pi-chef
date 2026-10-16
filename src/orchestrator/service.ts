@@ -14,7 +14,7 @@ import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
-import { ship } from "./ship.js";
+import { review } from "./review.js";
 import { auth, cost, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
@@ -41,19 +41,12 @@ export class Workflow {
       config,
       store: this.store,
       git: this.git,
-      github: options.github,
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
       authProbe: options.auth,
       classifier: options.classifier,
       rng: options.rng,
       deciders: options.deciders ?? {},
-      pushBranch:
-        options.push ??
-        (async (branch) => {
-          const result = await this.git.push(branch);
-          if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git push failed");
-        }),
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
       warned: new Set(),
@@ -252,9 +245,9 @@ export class Workflow {
     this.ctx.report?.(markdown);
   }
 
-  /** `/ship`: reviews the current branch and, on a pass and after confirmation, commits leftovers, pushes, and opens or updates the PR. */
-  ship(): Promise<CommandResult> {
-    return ship(this.ctx);
+  /** `/review`: checks, static scan, and the advisory model pass over the changes against the base branch; offers to fix the findings in this session. Never commits or pushes. */
+  review(): Promise<CommandResult> {
+    return review(this.ctx);
   }
 
   route(task: string): Promise<CommandResult> {

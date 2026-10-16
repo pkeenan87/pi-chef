@@ -109,7 +109,7 @@ describe("/build commits", () => {
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     const result = await t.run(d.driver);
     expect(result.ok, result.text).toBe(true);
-    expect(result.text).toContain("/ship");
+    expect(result.text).toContain("/review");
     const branch = await git(t.cwd, "branch", "--show-current");
     expect(branch).toBe(`cost/${t.taskId}`);
     expect(await git(t.cwd, "log", "--format=%s", "-3")).toBe("02: Ticket 02\n01: Ticket 01\nbase");
@@ -144,7 +144,7 @@ describe("/build commits", () => {
     expect(t.reports).toHaveLength(1);
     expect(t.reports[0]).toContain("| 01 | Ticket 01 | foundry/grok-4-7 |");
     expect(t.reports[0]).toContain(`done ${sha}`);
-    expect(t.reports[0]).toContain("Next: /ship");
+    expect(t.reports[0]).toContain("Next: /review");
   });
 
   it("clears the running ticket while no chunk runs, so branch rules lift", async () => {

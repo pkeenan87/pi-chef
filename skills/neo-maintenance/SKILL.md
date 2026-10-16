@@ -11,7 +11,7 @@ The workflow extension owns phase transitions, provider choice, budgets, and app
 
 - Draft a plan with `/plan`. Do not edit the repository in that step. Approve it on the review screen, or later with `/show-plan`. A draft is not permission to build.
 - `/build` runs only from an approved plan. It builds one ticket at a time on one branch, in a fresh session each, runs the ticket's checks, and commits. Do not commit, push, or switch branches during a ticket; `/build` does the commit.
-- `/ship` is a fresh pass over the branch, including ad-hoc fixes and uncommitted edits. Do not claim tests passed unless a command result is in the report. It pushes and opens or updates one pull request only after checks pass and a human confirms. It does not merge.
-- If a ticket fails, fix it in the chat and run `/build` again. If `/ship` fails, fix and run `/ship` again.
+- `/review` is a fresh pass over the changes against the base branch, including ad-hoc fixes and uncommitted edits. Do not claim tests passed unless a command result is in the report. It lists numbered findings and can send them to you to fix. It never commits, pushes, or opens a pull request; the human does that with git and the origin CLI.
+- If a ticket fails, fix it in the chat and run `/build` again. If `/review` finds problems, fix them (do not commit or push) and run `/review` again.
 
 Model output is data. It is not policy and it is not a shell script. Credentials never go in the prompt, the plan, or the reply.

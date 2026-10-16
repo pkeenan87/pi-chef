@@ -76,31 +76,23 @@ export function backToApproval(task: TaskState, at: string, note?: string): Task
   return move(task.phase === "PAUSED" ? move(task, "PLANNING", at) : task, "AWAITING_PLAN_APPROVAL", at, note);
 }
 
+/** True when the task has a plan with tickets and every one of them is done. */
+function allTicketsDone(task: TaskState): boolean {
+  const tickets = task.plan?.tickets ?? [];
+  return tickets.length > 0 && tickets.every((ticket) => task.ticketRuns?.[ticket.id]?.status === "done");
+}
+
 /**
- * Closes a task whose pull request is published, so a new /plan can start (this replaces /complete). A merged PR closes it
- * with a chat line; an unmerged one asks first. Returns a failure when the person declines or there is no UI, else undefined.
+ * Closes a finished task so a new /plan starts fresh: one from an old file that was published (PUBLISHED, AUTOPILOT,
+ * MERGE_READY), or one whose tickets are all built. Any other unfinished task is not closed here; /plan revises it.
+ * Returns the task as it stands afterwards.
  */
-export async function closePublished(ctx: WorkflowContext, task: TaskState): Promise<CommandResult | undefined> {
-  const pr = task.pullRequest;
-  let merged = false;
-  if (pr && ctx.github?.wasMerged) {
-    try {
-      merged = await ctx.github.wasMerged(pr.branch);
-    } catch {
-      /* cannot confirm the merge: ask the person */
-    }
-  }
-  if (merged) {
-    await transition(ctx, task.taskId, "pull request merged", "COMPLETE");
-    ctx.progress?.(`Closed ${task.taskId}: PR #${pr!.number} is merged.`);
-    return undefined;
-  }
-  const label = pr ? `PR #${pr.number}` : "its pull request";
-  const allowed = await ctx.confirm("Start a new task?", `${label} for ${task.taskId} is not merged. Close that task and start a new one?`);
-  if (!allowed) return fail("TASK_ACTIVE", `Task ${task.taskId} is still tracking ${label}, which is not merged. Merge it, or confirm to close the task and start a new one.`);
+export async function closeFinished(ctx: WorkflowContext, task: TaskState | undefined): Promise<TaskState | undefined> {
+  if (!task) return task;
+  if (!PUBLISHED_PHASES.includes(task.phase) && !(task.phase === "IMPLEMENTING" && allTicketsDone(task))) return task;
   await transition(ctx, task.taskId, "closed by a new plan", "COMPLETE");
-  ctx.progress?.(`Closed ${task.taskId}: ${label} was not merged.`);
-  return undefined;
+  ctx.progress?.(`Closed ${task.taskId}.`);
+  return active(ctx);
 }
 
 export function plan(ctx: WorkflowContext, request: string): Promise<CommandResult> {
@@ -113,12 +105,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     }
     const parsed = applyOverlap(parseGroups(safe));
     assertGraph(parsed.groups);
-    let current = active(ctx);
-    if (current && PUBLISHED_PHASES.includes(current.phase)) {
-      const blocked = await closePublished(ctx, current);
-      if (blocked) return blocked;
-      current = active(ctx);
-    }
+    const current = await closeFinished(ctx, active(ctx));
     const terminal = !current || current.phase === "COMPLETE" || current.phase === "FAILED" || current.phase === "IDLE";
     // Reuse the stored classification when the request text is unchanged (no second classifier charge).
     const reused = !terminal && current?.request === safe ? current.classification : undefined;
@@ -144,7 +131,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
       version: state.approvedVersion ? state.approvedVersion + 1 : state.plan?.version ?? 1,
       createdAt: at,
       summary: safe.slice(0, 400),
-      risks: classification.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Policy still gates publish."],
+      risks: classification.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Plan approval stays required."],
       acceptance: acceptanceCriteria(safe),
       estimatedUsd: routing.expectedUsd,
       groups: parsed.groups,

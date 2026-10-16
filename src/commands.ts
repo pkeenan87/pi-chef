@@ -31,11 +31,11 @@ export const COMMANDS: CommandSpec[] = [
     description: "Build the approved plan one ticket at a time in fresh sessions on one branch: routed model per ticket, checks, a commit each. Run again to resume.",
     complete: () => [],
   },
-  { name: "ship", run: (w) => w.ship(), description: "Review the branch (checks, static scan, advisory model pass) and, on a pass, commit leftovers, push, and open or update the PR. Works for /build output and ad-hoc fixes.", complete: () => [] },
+  { name: "review", run: (w) => w.review(), description: "Review the changes against the base branch (checks, static scan, advisory model pass), then fix the findings in this session. Never commits or pushes.", complete: () => [] },
   { name: "route", run: (w, args) => w.route(args), description: "Preview provider, tier, and cost for a task without changing state.", complete: () => [] },
   { name: "advisor", run: (w, args) => w.advisor(args), description: "Ask the advisor tier (Claude Fable or GPT Astra) one question about the active task. Costs money, runs only when you ask, never changes the phase.", complete: () => [] },
   { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by phase, provider, model, and task against budgets.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
-  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, build branch and ticket progress, PR, auth, and budget.", complete: () => [] },
+  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, build branch and ticket progress, auth, and budget.", complete: () => [] },
   {
     name: "auth", run: (w, args) => w.auth(args),
     description: "Show account-login status, or explain /login for a provider. API keys are not accepted.",

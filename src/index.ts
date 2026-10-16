@@ -19,6 +19,4 @@ export * from "./providers/runtime.js";
 export * from "./cost/ledger.js";
 export * from "./git/workspace.js";
 export * from "./review/review.js";
-export * from "./github/types.js";
-export * from "./github/gh.js";
 export { registerWorkflow } from "./extension.js";

@@ -79,3 +79,37 @@ describe("redact negatives", () => {
     expect(containsSecret(text)).toBe(false);
   });
 });
+
+describe("redact keeps code that only looks like a secret", () => {
+  it.each([
+    '"node_modules/@octokit/auth-token": {',
+    '"node_modules/@octokit/auth-token": [',
+    "const token = process.env.GITHUB_THING;",
+    "password: getPassword()",
+    "const password = vault.getPassword(name);",
+    "token: env.TOKEN_VALUE",
+    "secret = os.environ['X']",
+    "const key = import.meta.env.VITE_API_KEY",
+    "token: $TOKEN",
+    "password: (await read())",
+    "token = null",
+    "apiKey: undefined,",
+    "secret: false;",
+    "token = 42",
+  ])("leaves %j alone", (text) => {
+    expect(redact(text)).toBe(text);
+  });
+
+  it("still redacts literals", () => {
+    for (const text of ['password = "hunter2hunter"', "API_KEY=abc123def456", '"token": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"', "token: abcdefgh12345678", "secret = 'x'"]) {
+      expect(redact(text), text).toContain("[REDACTED]");
+    }
+    expect(redact('password = "hunter2hunter"')).not.toContain("hunter2hunter");
+    expect(redact("API_KEY=abc123def456")).not.toContain("abc123def456");
+  });
+
+  it("keeps a lockfile intact around the one real secret", () => {
+    const lock = '"node_modules/@octokit/auth-token": {\n  "version": "4.0.0"\n},\n"token": "abcdef123456"';
+    expect(redact(lock)).toBe('"node_modules/@octokit/auth-token": {\n  "version": "4.0.0"\n},\n[REDACTED]"');
+  });
+});

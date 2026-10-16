@@ -172,7 +172,7 @@ export async function reviewDiff(options: {
   // Say why, not just how many: a review that cannot pass for lack of checks must not look like a clean one.
   const why: string[] = [];
   if (blocking.length > 0) why.push(`${blocking.length} blocking finding(s): ${blocking.map((finding) => finding.message).join(" ")}`);
-  if (options.checks.length === 0) why.push("no checks ran, so there is no evidence of a test pass. Set `checks:` in .pi-workflows/config.yaml (for example npm test) or give the plan's tickets allowlisted checks, then run /ship again");
+  if (options.checks.length === 0) why.push("no checks ran, so there is no evidence of a test pass. Set `checks:` in .pi-workflows/config.yaml (for example npm test) or give the plan's tickets allowlisted checks, then run /review again");
   return {
     passed,
     claimedPass: passed,

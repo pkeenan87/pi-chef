@@ -104,7 +104,6 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     corrupt > 0 ? `Warning: ${corrupt} corrupt line(s) in the task event log. state.json is the source of truth; inspect events.jsonl.` : "",
     ...buildLines(state),
     ...ticketLines(state),
-    `PR: ${state?.pullRequest ? `#${state.pullRequest.number} ${state.pullRequest.headSha}` : "none"}`,
     `Budget: ${budget}`,
     ...(ctx.config.warnings ?? []).map((warning) => `Config warning: ${warning}`),
     state?.routing ? `Model: ${routeLine(state.routing)}` : "",

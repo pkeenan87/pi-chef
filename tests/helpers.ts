@@ -9,7 +9,6 @@ import type { ProviderId, Ticket } from "../src/domain.js";
 import { runBuild, type BuildDriver } from "../src/orchestrator/build.js";
 import { Workflow, type WorkflowOptions } from "../src/orchestrator/service.js";
 import type { CheckRunner } from "../src/review/review.js";
-import type { GitHubClient, PullRequestSnapshot } from "../src/github/types.js";
 
 export function checkRunner(run: CheckRunner["run"]): CheckRunner {
   return { run };
@@ -71,7 +70,6 @@ export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Wo
     now: () => new Date("2026-10-14T12:00:00.000Z"),
     confirm: async () => true,
     runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
-    push: async () => undefined,
     ...extras,
   });
 }
@@ -87,41 +85,12 @@ AC: ingest rejects empty events
 \`\`\`
 `;
 
-export class MemoryGitHub implements GitHubClient {
-  replies: { threadId: string; body: string }[] = [];
-  merged = false;
-  constructor(public pr: PullRequestSnapshot) {}
-  async findByBranch(): Promise<PullRequestSnapshot | undefined> {
-    return this.pr;
-  }
-  async upsert(input: { branch: string; base: string; title: string; body: string }): Promise<PullRequestSnapshot> {
-    this.pr = { ...this.pr, branch: input.branch, base: input.base, url: "https://example.test/pull/7", number: 7 };
-    return this.pr;
-  }
-  async reply(threadId: string, body: string): Promise<void> {
-    this.replies.push({ threadId, body });
-  }
-  async fileAt(): Promise<string> {
-    return "export {}\n";
-  }
-  async checkLog(): Promise<string> {
-    return "AssertionError: expected 1";
-  }
-  async isAncestor(): Promise<boolean> {
-    return true;
-  }
-}
-
 export const singleTaskRequest = `
 Maintain Neo.
 \`\`\`tasks
 [{"id":"ingest","summary":"Guard ingest","files":["src/ingest.ts"],"edits":[{"path":"src/ingest.ts","content":"export const ingest = 1;\\n"}]}]
 \`\`\`
 `;
-
-export function emptyPr(): PullRequestSnapshot {
-  return { number: 0, url: "", branch: "", base: "main", headSha: "pending", baseSha: "base", mergeable: true, approved: false, protectionSatisfied: false, threads: [], checks: [] };
-}
 
 /** A build driver whose "session" writes `src/ingest.ts` into the checkout, like a model finishing a ticket. */
 export function writingDriver(cwd: string, files: Record<string, string> = { "src/ingest.ts": "export const ingest = 1;\n" }): BuildDriver {
@@ -141,15 +110,13 @@ export function writingDriver(cwd: string, files: Record<string, string> = { "sr
   };
 }
 
-/** Drives a one-ticket task through plan, approve, build, and ship. */
-export async function publishedWorkflow(extras: Partial<WorkflowOptions> = {}, github: MemoryGitHub = new MemoryGitHub(emptyPr())) {
+/** Drives a one-ticket task through plan, approve, and build: IMPLEMENTING with every ticket done. */
+export async function builtWorkflow(extras: Partial<WorkflowOptions> = {}) {
   const cwd = await tempRepo();
-  const { app } = await ticketWorkflow([sampleTicket("01")], { config: testConfig(), github, ...extras }, { cwd });
+  const { app } = await ticketWorkflow([sampleTicket("01")], { config: testConfig(), ...extras }, { cwd });
   const built = await runBuild(() => app, writingDriver(cwd));
   if (!built.ok) throw new Error(`build failed in fixture: ${built.text}`);
-  const shipped = await app.ship();
-  if (!shipped.ok) throw new Error(`ship failed in fixture: ${shipped.text}`);
-  return { cwd, app, github };
+  return { cwd, app };
 }
 
 /** A config that uses the multi-candidate `tiers` map (see .pi-workflows/config.yaml). Prices are test values. */

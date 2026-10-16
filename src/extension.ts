@@ -4,7 +4,6 @@ import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
 import { configPaths, loadConfig, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
-import { GhCli } from "./github/gh.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
@@ -95,7 +94,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     cwd = root;
     runtime = createRuntime(config, root);
     useBilling(runtime);
-    active = new Workflow({ cwd: root, config, auth: runtime.auth, deciders: runtime.deciders, github: new GhCli(root) });
+    active = new Workflow({ cwd: root, config, auth: runtime.auth, deciders: runtime.deciders });
   } else if (changed) {
     runtime = createRuntime(config, root);
     useBilling(runtime);

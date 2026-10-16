@@ -190,7 +190,7 @@ export interface Finding {
   evidence: string;
 }
 
-/** One finding from the model pass of /ship. Advisory: it is shown for a person to judge and never gates the push. */
+/** One finding from the model pass of /review. Advisory: it is shown for a person to judge and never gates anything. */
 export interface ModelFinding {
   severity: "high" | "medium" | "low";
   category: string;
@@ -305,7 +305,7 @@ export interface TicketRun {
 /** Where /build works: one branch in the main checkout. */
 export interface BuildRecord {
   branch: string;
-  /** The branch the PR will target. */
+  /** The branch /build started from; /review diffs against it. */
   base: string;
   /** Merge base of the branch and `base` when the build started. */
   baseSha: string;

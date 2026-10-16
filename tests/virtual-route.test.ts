@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { COMMANDS } from "../src/commands.js";
 import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import { createRegistryChat } from "../src/providers/pi-chat.js";
-import { permissiveRegistry, publishedWorkflow, seededRng, singleTaskRequest, tempRepo, tieredConfig, tieredYaml, workflow } from "./helpers.js";
+import { permissiveRegistry, builtWorkflow, seededRng, singleTaskRequest, tempRepo, tieredConfig, tieredYaml, workflow } from "./helpers.js";
 
 const priorHome = process.env.HOME;
 
@@ -54,7 +54,7 @@ const user = (content: string) => ({ role: "user", content });
 
 describe("virtual model route with tiers", () => {
   it("picks via the selector, returns the registry model, stores state, and logs a route event without a status line", async () => {
-    const { app, cwd } = await publishedWorkflow();
+    const { app, cwd } = await builtWorkflow();
     writeUserConfig(tieredYaml());
     bindWorkflow(app);
     const { handlers, route, providers } = fakePi();
@@ -76,7 +76,7 @@ describe("virtual model route with tiers", () => {
   });
 
   it("serves a security-sensitive turn from the premium tier and reports it", async () => {
-    const { app, cwd } = await publishedWorkflow();
+    const { app, cwd } = await builtWorkflow();
     mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
     writeFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), tieredYaml());
     bindWorkflow(app);
@@ -89,7 +89,7 @@ describe("virtual model route with tiers", () => {
   });
 
   it("still works when the context has no UI", async () => {
-    const { app, cwd } = await publishedWorkflow();
+    const { app, cwd } = await builtWorkflow();
     bindWorkflow(app);
     const { handlers, route } = fakePi();
     handlers.get("session_start")!({}, { cwd });
@@ -101,7 +101,7 @@ describe("virtual model route with tiers", () => {
 describe("/advisor command", () => {
   it("is listed, dispatches to the workflow, and shows the answer without changing the phase", async () => {
     expect(COMMANDS.map((c) => c.name)).toContain("advisor");
-    const { app, cwd } = await publishedWorkflow();
+    const { app, cwd } = await builtWorkflow();
     bindWorkflow(app);
     const { commands } = fakePi();
     const notes: string[] = [];

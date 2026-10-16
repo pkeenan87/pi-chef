@@ -14,7 +14,7 @@ import { ticketPrompt } from "./prompts.js";
 import { decide } from "./routing.js";
 import { groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, ticketsToGroups } from "./tickets.js";
 
-/** Phases /build may start or resume from. PUBLISHED: more tickets for the same pull request. */
+/** Phases /build may start or resume from. PUBLISHED: an old task file; more tickets on the same branch. */
 const BUILDABLE: Phase[] = ["AWAITING_PLAN_APPROVAL", "FAILED", "REVIEWING", "IMPLEMENTING", "BLOCKED", "PUBLISHED"];
 
 const MAX_SUMMARY_CHARS = 3000;
@@ -431,7 +431,7 @@ export function buildReport(ctx: WorkflowContext, stopped?: string): string {
     return `| ${ticket.id} | ${ticket.title.replace(/\|/g, "/")} | ${model} | ${run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"} | ${run ? formatUsd(run.costUsd) : "-"} | ${result} |`;
   });
   const finished = tickets.every((ticket) => state.ticketRuns?.[ticket.id]?.status === "done");
-  const next = finished ? "Next: /ship to review the branch and open the PR." : `Next: ${stopped ?? "run /build to continue."} /build resumes from here.`;
+  const next = finished ? "Next: /review to check the branch, then push and open the PR yourself (git push, then origin pr create or gh pr create)." : `Next: ${stopped ?? "run /build to continue."} /build resumes from here.`;
   return [`### Build${state.build ? ` · ${state.build.branch}` : ""}`, "", "| Ticket | Title | Model | Time | Cost | Result |", "| --- | --- | --- | --- | --- | --- |", ...rows, "", next].join("\n");
 }
 
@@ -518,5 +518,5 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
   const workflow = getWorkflow();
   workflow.report(workflow.buildReport(stopped));
   if (stopped) return fail(code, stopped);
-  return done(`Built ${built} ticket(s). Run /ship to review the branch and open the PR.`);
+  return done(`Built ${built} ticket(s). Run /review to check the branch, then push and open the PR yourself (git push, then origin pr create or gh pr create).`);
 }

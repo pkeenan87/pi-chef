@@ -11,10 +11,11 @@ describe("state machine", () => {
     expect(canTransition("AWAITING_PLAN_APPROVAL", "IMPLEMENTING")).toBe(true);
     expect(canTransition("IMPLEMENTING", "REVIEWING")).toBe(true);
     expect(canTransition("REVIEWING", "IMPLEMENTING")).toBe(true);
-    // /ship needs no review phase; shipping again, or building more tickets, stays on the same pull request.
-    expect(canTransition("IMPLEMENTING", "PUBLISHED")).toBe(true);
-    expect(canTransition("PUBLISHED", "PUBLISHED")).toBe(true);
+    // /review does not move phases, and nothing enters PUBLISHED any more; an old file in it can still leave.
+    expect(canTransition("IMPLEMENTING", "PUBLISHED")).toBe(false);
+    expect(canTransition("PUBLISHED", "PUBLISHED")).toBe(false);
     expect(canTransition("PUBLISHED", "IMPLEMENTING")).toBe(true);
+    expect(canTransition("PUBLISHED", "COMPLETE")).toBe(true);
   });
 
   it("no longer enters the retired phases, but a task loaded in one can always leave it", () => {
@@ -22,7 +23,7 @@ describe("state machine", () => {
       for (const from of ["IDLE", "PLANNING", "AWAITING_PLAN_APPROVAL", "IMPLEMENTING", "REVIEWING", "PUBLISHED", "COMPLETE", "FAILED", "BLOCKED"] as const) {
         expect(canTransition(from, retired), `${from} -> ${retired}`).toBe(false);
       }
-      for (const to of ["PUBLISHED", "COMPLETE", "PLANNING", "IDLE"] as const) {
+      for (const to of ["COMPLETE", "PLANNING", "IDLE"] as const) {
         expect(canTransition(retired, to), `${retired} -> ${to}`).toBe(true);
       }
     }
@@ -32,6 +33,6 @@ describe("state machine", () => {
     const paused = move({ ...base, phase: "IMPLEMENTING" }, "PAUSED", "2026-10-14T00:00:00.000Z", "wait");
     expect(paused.pausedFrom).toBe("IMPLEMENTING");
     expect(canTransition("PAUSED", "IMPLEMENTING", paused)).toBe(true);
-    expect(canTransition("PAUSED", "PUBLISHED", paused)).toBe(false);
+    expect(canTransition("PAUSED", "COMPLETE", paused)).toBe(false);
   });
 });

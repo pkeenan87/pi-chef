@@ -168,7 +168,7 @@ describe("loadConfig layering", () => {
 
   it("deep-merges sections, takes min budgets, and never lets the project relax approvals", () => {
     writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
-    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { publish: auto }\n");
+    writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { merge: manual }\n");
     const config = loadConfig(project);
     expect(config.routing.minConfidence).toBe(0.9);
     expect(config.routing.maxEscalations).toBe(1);
@@ -176,14 +176,17 @@ describe("loadConfig layering", () => {
     expect(config.budgets.dailyUsd).toBe(10);
     expect(config.workers.ticketContextTokens).toBe(60000);
     expect(config.workers.tokenBudget).toBe(1000);
-    expect(config.approvals.publish).toBe("required");
     expect(config.approvals.merge).toBe("manual");
   });
 
-  it("user may opt into auto publish", () => {
+  it("accepts approvals.publish from an old file, ignores it, and warns", () => {
     writeUser(`${base}approvals: { publish: auto }\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
-    expect(loadConfig(project).approvals.publish).toBe("auto");
+    const config = loadConfig(project);
+    expect(config.approvals).toEqual({ plan: "required", merge: "manual", securitySensitiveFix: "required" });
+    expect(config.warnings).toContain("approvals.publish is no longer used; /review never pushes.");
+    writeUser(`${base}approvals: { publish: nonsense }\n`);
+    expect(loadConfig(project).warnings).toContain("approvals.publish is no longer used; /review never pushes.");
   });
 
   it("validates the layered result", () => {

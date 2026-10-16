@@ -1,7 +1,6 @@
 import type { WorkflowConfig } from "../config.js";
 import type { ProviderId } from "../domain.js";
 import type { GitWorkspace } from "../git/workspace.js";
-import type { GitHubClient } from "../github/types.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { DecisionsClient } from "../providers/clients.js";
 import type { ChatFn } from "../providers/pi-chat.js";
@@ -54,13 +53,11 @@ export interface WorkflowOptions {
   auth: AuthProbe;
   classifier?: Classifier;
   git?: GitWorkspace;
-  github?: GitHubClient;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
   progress?: (message: string) => void;
   report?: (markdown: string) => void;
   runner?: CheckRunner;
-  push?: (branch: string) => Promise<void>;
   /** Decisions-API classifiers by provider (foundry, vercel). Preferred over `classifier` when the tier selects one. */
   deciders?: Partial<Record<ProviderId, DecisionsClient>>;
   chat?: ChatFn;
