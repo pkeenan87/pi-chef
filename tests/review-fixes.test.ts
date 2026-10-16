@@ -22,7 +22,7 @@ function isolatedHome(userYaml?: string): string {
   const home = mkdtempSync(path.join(tmpdir(), "pi-home-"));
   if (userYaml) {
     mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), userYaml);
+    writeFileSync(path.join(home, ".pi", "agent", "conductor.yaml"), userYaml);
   }
   process.env.HOME = home;
   return home;

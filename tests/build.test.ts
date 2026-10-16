@@ -111,7 +111,7 @@ describe("/build commits", () => {
     expect(result.ok, result.text).toBe(true);
     expect(result.text).toContain("/review");
     const branch = await git(t.cwd, "branch", "--show-current");
-    expect(branch).toBe(`cost/${t.taskId}`);
+    expect(branch).toBe(`conductor/${t.taskId}`);
     expect(await git(t.cwd, "log", "--format=%s", "-3")).toBe("02: Ticket 02\n01: Ticket 01\nbase");
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD~1")).toBe("f01.txt");
     expect(await git(t.cwd, "status", "--porcelain")).toBe("");
@@ -466,7 +466,7 @@ describe("/build branch and approval", () => {
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
     expect(await git(t.cwd, "branch", "--show-current")).toBe("feature/mine");
-    expect(await git(t.cwd, "branch", "--list", "cost/*")).toBe("");
+    expect(await git(t.cwd, "branch", "--list", "conductor/*")).toBe("");
     const build = t.load().build!;
     expect(build.branch).toBe("feature/mine");
     expect(build.base).toBe(await t.app.git.defaultBranch());
@@ -496,7 +496,7 @@ describe("/build branch and approval", () => {
     expect(result.text).toContain("Commit or stash them first, or answer yes when /build asks");
     expect(d.state.fresh).toBe(0);
     expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
-    expect(await git(t.cwd, "branch", "--show-current")).not.toContain("cost/");
+    expect(await git(t.cwd, "branch", "--show-current")).not.toContain("conductor/");
     expect(t.load().build).toBeUndefined();
     // Once a build exists, a dirty tree is the ticket's own work.
     await git(t.cwd, "add", "mine.txt");

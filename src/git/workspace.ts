@@ -11,8 +11,8 @@ export interface GitResult {
 }
 
 /** Name and email to fall back to when the repo has no identity of its own (the user's identity is used otherwise). */
-const FALLBACK_NAME = "pi-cost";
-const FALLBACK_EMAIL = "pi-cost@localhost";
+const FALLBACK_NAME = "pi-conductor";
+const FALLBACK_EMAIL = "pi-conductor@localhost";
 
 interface Identity {
   name: boolean;
@@ -40,7 +40,7 @@ async function resolveIdentity(cwd: string): Promise<Identity> {
 }
 
 async function runGit(cwd: string, args: string[], identity: Identity): Promise<GitResult> {
-  // Commits are authored by the user; the pi-cost identity is only a fallback for the parts git has no value for.
+  // Commits are authored by the user; the pi-conductor identity is only a fallback for the parts git has no value for.
   // commit.gpgsign=false always: a signing prompt would hang a non-interactive commit.
   const config = [
     ...(identity.name ? [] : ["-c", `user.name=${FALLBACK_NAME}`]),

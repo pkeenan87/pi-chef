@@ -214,7 +214,7 @@ describe("/implement git preflight", () => {
     const { tmpdir } = await import("node:os");
     const { execFileSync } = await import("node:child_process");
     const { GitWorkspace } = await import("../src/git/workspace.js");
-    const plain = mkdtempSync(path.join(tmpdir(), "pi-cost-nogit-"));
+    const plain = mkdtempSync(path.join(tmpdir(), "pi-conductor-nogit-"));
     const git = new GitWorkspace(plain);
     expect(await git.preflight()).toMatch(/is not a git repository/);
     execFileSync("git", ["init", "-q"], { cwd: plain });

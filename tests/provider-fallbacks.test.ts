@@ -9,7 +9,7 @@ import { createRegistryChat } from "../src/providers/pi-chat.js";
 import { decideRoute } from "../src/router/policy.js";
 
 function authFile(contents: Record<string, { type: string }>): string {
-  const file = path.join(mkdtempSync(path.join(tmpdir(), "pi-cost-auth-")), "auth.json");
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "pi-conductor-auth-")), "auth.json");
   writeFileSync(file, JSON.stringify(contents));
   return file;
 }
