@@ -22,12 +22,20 @@ const PATTERNS: RegExp[] = [
   /\bBearer\s+[A-Za-z0-9\-._~+/]{16,}=*/gi,
   // Credentials embedded in URLs: scheme://user:pass@host
   /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@"']+:[^\s@/"']+@/gi,
-  // key = value / key: value / "key": "value", with optional prefix such as DB_ or client_.
-  new RegExp(
-    String.raw`(?<![A-Za-z0-9])["']?[A-Za-z0-9_.-]{0,40}${KEY_WORD}["']?\s*[:=]\s*["']?[^\s"',}]+`,
-    "gi",
-  ),
 ];
+
+// key = value / key: value / "key": "value", with optional prefix such as DB_ or client_. Groups: key and separator,
+// opening quote, value. Handled apart from PATTERNS because a value that is code, not a literal, stays.
+const KEY_VALUE = new RegExp(String.raw`(?<![A-Za-z0-9])(["']?[A-Za-z0-9_.-]{0,40}${KEY_WORD}["']?\s*[:=]\s*)(["']?)([^\s"',}]+)`, "gi");
+
+/** An unquoted value that is a structure, an environment lookup, a call, a keyword, or a number: code, not a secret. */
+function isNotLiteral(value: string): boolean {
+  const bare = value.replace(/;+$/, "");
+  if (/^[{[($]/.test(bare)) return true;
+  if (/^(?:process\.env|env\.|os\.environ|import\.meta\.env)/i.test(bare)) return true;
+  if (/^(?:null|true|false|undefined)$/i.test(bare) || /^-?\d+(?:\.\d+)?$/.test(bare)) return true;
+  return /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*\(/.test(bare);
+}
 
 function replacement(match: string): string {
   const url = /^([a-z][a-z0-9+.-]*:\/\/)[^\s:/@"']+:[^\s@/"']+@$/i.exec(match);
@@ -40,7 +48,8 @@ export function redact(value: string): string {
     pattern.lastIndex = 0;
     next = next.replace(pattern, replacement);
   }
-  return next;
+  KEY_VALUE.lastIndex = 0;
+  return next.replace(KEY_VALUE, (match: string, _key: string, quote: string, value: string) => (!quote && isNotLiteral(value) ? match : "[REDACTED]"));
 }
 export function containsSecret(value: string): boolean {
   return redact(value) !== value;
