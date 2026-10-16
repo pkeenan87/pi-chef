@@ -23,6 +23,8 @@ export interface ProviderConfig {
   apiKeyEnv?: string;
   /** Foundry: literal resource endpoint (not a secret) used when `endpointEnv` is unset. */
   endpoint?: string;
+  /** Foundry: the Azure resource group of the resource named by `endpoint`. Only `/status foundry` reads it (to list deployments); user config only. */
+  resourceGroup?: string;
   /** Foundry: "v1" uses `<endpoint>/openai/v1/...` (no api-version); "deployments" is the legacy route. Defaults to deployments when apiVersion is set, else v1. */
   routeStyle?: "v1" | "deployments";
   /** Vercel: directory that has been `vercel link`ed (relative paths resolve from the project root). */
@@ -518,6 +520,9 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
     if (name === "vercel" && provider.auth && provider.auth !== "vercel-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Vercel auth must be vercel-cli.");
     }
+    if (provider.resourceGroup !== undefined && (typeof provider.resourceGroup !== "string" || !/^[A-Za-z0-9._()-]{1,90}$/.test(provider.resourceGroup))) {
+      invalid(where, `providers.${name}.resourceGroup`, "must be an Azure resource group name");
+    }
     for (const key of ["endpoint", "projectDir", "envFile", "baseUrl", "model"] as const) {
       if (provider[key] !== undefined && (typeof provider[key] !== "string" || provider[key] === "")) {
         invalid(where, `providers.${name}.${key}`, "must be a non-empty string");
@@ -839,7 +844,7 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  */
 const DEFAULT_PROVIDER_TYPE: Record<string, string> = { foundry: "azure-foundry", vercel: "vercel-ai-gateway", local: "openai-compatible" };
 
-const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile"] as const;
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "resourceGroup"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
   if (typeof value !== "string") return false;

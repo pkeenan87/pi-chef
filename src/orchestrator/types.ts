@@ -3,6 +3,7 @@ import type { ProviderId } from "../domain.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
+import type { AzRunner } from "./status-foundry.js";
 import type { UsableRegistry } from "../providers/usable.js";
 import type { CheckRunner } from "../review/review.js";
 import type { Indicator, IndicatorSink } from "./progress.js";
@@ -55,6 +56,8 @@ export interface WorkflowOptions {
   now?: () => Date;
   id?: () => string;
   auth: AuthProbe;
+  /** Runs the Azure CLI for `/status foundry`; tests pass a fake. */
+  azure?: AzRunner;
   git?: GitWorkspace;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;

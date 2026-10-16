@@ -1,8 +1,10 @@
-import { modelLabel } from "../config.js";
-import { PROVIDERS, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
+import { modelLabel, tierCandidates } from "../config.js";
+import { selectCandidate } from "../router/select.js";
+import { foundryLines } from "./status-foundry.js";
+import { PROVIDERS, TIER_KEYS, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
-import { routingSummary } from "./routing.js";
+import { availability, candidateCheck, routingSummary } from "./routing.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
 import { isSecuritySensitive } from "../router/classify.js";
@@ -114,11 +116,36 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
   return done(lines.join("\n"), summary);
 }
 
-export function status(ctx: WorkflowContext): Promise<CommandResult> {
-  return guard(() => statusReport(ctx));
+export function status(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {
+  return guard(() => statusReport(ctx, arg.trim()));
 }
 
-async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
+/**
+ * The "Routing check" section: for each tier the candidate that would run now, and every skipped candidate with its
+ * reason (the same reasons route events and stop messages use). Nothing is called and nothing is recorded.
+ */
+export async function routingCheckLines(ctx: WorkflowContext): Promise<string[]> {
+  const seen = await availability(ctx);
+  const check = candidateCheck(ctx);
+  const table = ctx.store.readMetrics();
+  const lines = ["Routing check:"];
+  for (const tier of TIER_KEYS) {
+    const selection = selectCandidate({ tier, taskType: "general", config: ctx.config, table, availability: seen, candidateCheck: check, strictAvailability: true, rng: () => 0.5, at: ctx.now() });
+    const label = (item: { provider: string; model: string }) => modelLabel(ctx.config, item.provider, item.model);
+    const usable = selection.considered.filter((item) => !item.excludedReason);
+    const others = usable.filter((item) => item.provider !== selection.candidate?.provider || item.model !== selection.candidate?.model).map(label);
+    lines.push(
+      selection.candidate
+        ? `  ${tier} → ${label(selection.candidate)}${others.length > 0 ? ` (also usable: ${others.join(", ")})` : ""}`
+        : `  ${tier} → nothing usable${tierCandidates(ctx.config, tier).length === 0 ? " (no model configured)" : ""}`,
+    );
+    for (const item of selection.considered) if (item.excludedReason) lines.push(`    skipped ${label(item)}: ${item.excludedReason}`);
+  }
+  return lines;
+}
+
+async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandResult> {
+  if (arg !== "" && arg !== "foundry") return fail("USAGE", "Use /status or /status foundry.");
   const state = active(ctx);
   const auth = await Promise.all(PROVIDERS.map((provider) => ctx.authProbe.inspect(provider)));
   const budget = budgetState(ctx, state?.taskId).status;
@@ -137,6 +164,8 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     state?.routing ? `Model: ${routeLine(ctx, state.routing)}` : "",
     ...modelBreakdown(ctx).map((line) => `Model stats: ${line}`),
     ...auth.map((view) => `${view.provider}: ${view.status} (${view.method}) ${view.detail}`),
+    ...(await routingCheckLines(ctx)),
+    ...(arg === "foundry" ? await foundryLines(ctx) : []),
   ].filter(Boolean);
   return done(text.join("\n"), { state, auth, budget, corruptEventLines: corrupt });
 }

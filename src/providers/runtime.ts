@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import type { WorkflowConfig } from "../config.js";
 import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeployment, foundryDeploymentApis, tierCandidates } from "../config.js";
 import { redact } from "../redact.js";
+import { assertCommandSafe } from "../sandbox.js";
 import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from "../domain.js";
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
 import { foundryV1Base, type FoundryConfig } from "./clients.js";
@@ -59,11 +60,13 @@ export interface ProviderRuntime {
 }
 
 export async function runAz(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  assertCommandSafe("az", args);
   try {
     const { stdout, stderr } = await exec("az", args, { encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024 });
     return { code: 0, stdout, stderr };
   } catch (error) {
     const failed = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+    if (failed.code === "ENOENT") return { code: 127, stdout: "", stderr: "az is not on PATH" };
     return { code: typeof failed.code === "number" ? failed.code : 1, stdout: failed.stdout ?? "", stderr: failed.stderr ?? failed.message ?? "" };
   }
 }

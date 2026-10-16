@@ -6,6 +6,7 @@ import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
+import { runAz } from "../providers/runtime.js";
 import { advisor } from "./advisor.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
@@ -49,6 +50,7 @@ export class Workflow {
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
       authProbe: options.auth,
+      azure: options.azure ?? runAz,
       rng: options.rng,
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
@@ -291,8 +293,8 @@ export class Workflow {
     return cost(this.ctx, format);
   }
 
-  status(): Promise<CommandResult> {
-    return status(this.ctx);
+  status(arg = ""): Promise<CommandResult> {
+    return status(this.ctx, arg);
   }
 
   auth(arg = ""): Promise<CommandResult> {

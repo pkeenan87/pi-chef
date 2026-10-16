@@ -3,6 +3,7 @@ import type { WorkflowConfig } from "../config.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
+import type { AzRunner } from "./status-foundry.js";
 import type { UsableRegistry } from "../providers/usable.js";
 import type { CheckRunner } from "../review/review.js";
 import { redact } from "../redact.js";
@@ -21,6 +22,8 @@ export interface WorkflowContext {
   readonly now: () => Date;
   readonly id: () => string;
   authProbe: AuthProbe;
+  /** Runs the Azure CLI (argv, never a shell). Only `/status foundry` uses it. */
+  azure: AzRunner;
   readonly rng?: () => number;
   /** Check runner that skips a check already passed on an identical clean tree. */
   readonly checkRunner: CheckRunner;
