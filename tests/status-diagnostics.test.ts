@@ -50,12 +50,11 @@ async function statusOf(config: string, az: ReturnType<typeof fakeAz>, arg = "",
 describe("/status Routing check", () => {
   it("shows, per tier, the candidate that will run and each skipped one with its reason", async () => {
     const text = await statusOf(CONFIG(), fakeAz(() => ok("[]")));
-    expect(text).toContain("Routing check:");
-    expect(text).toContain("  ticketHigh → foundry/gpt-6.1-sol → my-sol");
-    expect(text).toContain("    skipped openai/gpt-6.1-sol: provider openai has no login (run /login openai)");
-    expect(text).toContain("  ticketLow → foundry/grok-4-7");
-    expect(text).toContain("  deterministic → nothing usable");
-    expect(text).toContain("    skipped local/qwen2.5-coder:7b: provider local is not registered (no providers.local in ~/.pi/agent/chef.yaml)");
+    expect(text).toContain("| Tier | Runs | Skipped |");
+    expect(text).toContain("| ticketHigh | foundry/gpt-6.1-sol → my-sol | openai/gpt-6.1-sol: provider openai has no login (run /login openai) |");
+    expect(text).toContain("| ticketLow | foundry/grok-4-7 |");
+    expect(text).toContain("| deterministic | nothing usable |");
+    expect(text).toContain("local/qwen2.5-coder:7b: provider local is not registered (no providers.local in ~/.pi/agent/chef.yaml)");
   });
 
   it("never runs az without being asked", async () => {
@@ -76,12 +75,15 @@ describe("/status foundry", () => {
     const az = fakeAz(() => ok(DEPLOYMENTS));
     const text = await statusOf(CONFIG("resourceGroup: rg-ai"), az, "foundry");
     expect(az.calls).toEqual([["cognitiveservices", "account", "deployment", "list", "-g", "rg-ai", "-n", "res", "-o", "json"]]);
-    expect(text).toContain("Foundry deployments: 2 on res (resource group rg-ai)");
-    expect(text).toContain("  gpt-4o-prod: gpt-4o 2025-01-01");
-    expect(text).toContain("  grok-4-7: grok-4-7 1");
+    expect(text).toContain("### Foundry deployments");
+    expect(text).toContain("2 deployment(s) on res (resource group rg-ai)");
+    expect(text).toContain("| Deployment | Model | Version | Used by tiers |");
+    expect(text).toContain("| gpt-4o-prod | gpt-4o | 2025-01-01 | - |");
+    expect(text).toContain("| grok-4-7 | grok-4-7 | 1 | ticketLow |");
     expect(text).not.toContain("do-not-print");
     // grok-4-7 exists; gpt-6.1-sol maps to my-sol, which does not.
-    expect(text).toContain('Missing: foundry/gpt-6.1-sol → my-sol (used by standard, ticketHigh)');
+    expect(text).toContain("Tier entries with no matching deployment:");
+    expect(text).toContain('- Missing: foundry/gpt-6.1-sol → my-sol (used by standard, ticketHigh)');
     expect(text).toContain('providers.foundry.deployments: { "gpt-6.1-sol": "gpt-4o-prod" }');
     expect(text).not.toMatch(/Missing: foundry\/grok-4-7/);
   });
@@ -96,17 +98,17 @@ describe("/status foundry", () => {
 
   it("says when az is not installed or not logged in, and when the resource is not found", async () => {
     const missing = await statusOf(CONFIG("resourceGroup: rg-ai"), fakeAz(() => ({ code: 127, stdout: "", stderr: "az is not on PATH" })), "foundry");
-    expect(missing).toContain("Foundry deployments: az is not on PATH");
+    expect(missing).toContain("az is not on PATH");
     const loggedOut = await statusOf(CONFIG("resourceGroup: rg-ai"), fakeAz(() => ({ code: 1, stdout: "", stderr: "ERROR: Please run 'az login' to setup account." })), "foundry");
-    expect(loggedOut).toContain("Foundry deployments: az is not logged in; run az login.");
+    expect(loggedOut).toContain("az is not logged in; run az login.");
     const none = await statusOf(CONFIG(), fakeAz(() => ok("\n")), "foundry");
-    expect(none).toContain("no resource named res was found");
+    expect(none).toContain("No resource named res was found");
   });
 
   it("reports an unconfigured provider or an endpoint whose host is not an Azure resource without calling az", async () => {
     const az = fakeAz(() => ok("[]"));
     expect(await statusOf("branchPrefix: x\n", az, "foundry")).toContain("provider foundry is not registered (no providers.foundry in ~/.pi/agent/chef.yaml)");
-    expect(await statusOf('providers:\n  foundry: { endpoint: "https://example.com" }\n', az, "foundry")).toContain("cannot derive the resource name");
+    expect(await statusOf('providers:\n  foundry: { endpoint: "https://example.com" }\n', az, "foundry")).toContain("Cannot derive the resource name");
     expect(az.calls).toEqual([]);
   });
 

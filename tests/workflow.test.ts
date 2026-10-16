@@ -41,8 +41,10 @@ describe("workflow", () => {
     rmSync(path.join(frozen, taskDir, "state.json"));
     const restarted = new Workflow({ cwd, config: testConfig(), auth: readyAuth(), now: () => new Date("2026-10-14T12:00:00.000Z"), confirm: async () => true, runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })) });
     const status = await restarted.status();
-    expect(status.text).toContain("AWAITING_PLAN_APPROVAL");
-    expect(status.text).toContain("Approved plan v1");
+    expect(status.text).toContain("| Task | ");
+    expect(status.text).toContain("(AWAITING_PLAN_APPROVAL) |");
+    expect(status.text).toMatch(/\| Plan \| v1 approved \d\d:\d\d \|/);
+    expect(status.text).toContain("## Status · Approved v1 · run /build");
   });
 
   it("keeps secrets out of artifacts", async () => {
@@ -89,7 +91,7 @@ describe("workflow", () => {
     await app.approveDraft();
     const result = await app.startBuild();
     expect(result.code).toBe("SECURITY_PAUSE");
-    expect((await app.status()).text).toContain("PAUSED");
+    expect((await app.status()).text).toContain("(PAUSED) |");
   });
 });
 
@@ -174,7 +176,7 @@ describe("build and review robustness", () => {
     const dir = path.join(cwd, ".pi-workflows", "tasks", app.activeTaskId()!);
     const events = path.join(dir, "events.jsonl");
     writeFileSync(events, `${readFileSync(events, "utf8").replace(/\n$/, "")}\nnot json\n{"seq":99}\n`);
-    expect((await app.status()).text).toMatch(/corrupt line/);
+    expect((await app.status()).text).toMatch(/### Warnings\n\n- 1 corrupt line|### Warnings[\s\S]*corrupt line/);
   });
 
   it("rejects a dependency cycle at plan time", async () => {

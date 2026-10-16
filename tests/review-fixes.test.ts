@@ -93,8 +93,9 @@ describe("O3/O4 extension config handling", () => {
     handlers.get("session_start")!({}, uiCtx(cwd, notes));
     expect(notes.join("\n")).toMatch(/Ignored project providers\.foundry\.endpoint/);
     notes.length = 0;
-    await commands.get("status")!.handler("", uiCtx(cwd, notes));
-    expect(notes.join("\n")).toMatch(/Config warning: Ignored project providers\.foundry\.endpoint/);
+    const sent: string[] = [];
+    await commands.get("status")!.handler("", { ...uiCtx(cwd, notes), sendMessage: async (message: { content: string }) => void sent.push(message.content) });
+    expect(sent.join("\n")).toMatch(/### Warnings\n\n- Config: Ignored project providers\.foundry\.endpoint/);
     expect(currentWorkflow()!.config.providers.foundry?.endpoint).toBe("https://res.services.ai.azure.com");
   });
 });

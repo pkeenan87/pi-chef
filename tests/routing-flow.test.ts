@@ -62,7 +62,7 @@ describe("route display", () => {
     expect(route.route.considered).toHaveLength(2);
     expect(route.route.considered[0]).toMatch(/^anthropic\/claude-sonnet-5-5: /);
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
-    expect((await app.status()).text).toMatch(/Model: standard → /);
+    expect((await app.status()).text).toMatch(/\| Last route \| standard → /);
   });
 });
 

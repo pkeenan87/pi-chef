@@ -114,7 +114,7 @@ export async function freezeApproval(ctx: WorkflowContext, state: TaskState): Pr
   const body = `${JSON.stringify(plan, null, 2)}\n`;
   ctx.store.writeOnceText(state.taskId, `plan.v${plan.version}.approved.json`, body);
   const at = iso(ctx);
-  return ctx.store.update(state.taskId, "plan approved", (task) => ({ ...task, approvedVersion: task.plan?.version, updatedAt: at }));
+  return ctx.store.update(state.taskId, "plan approved", (task) => ({ ...task, approvedVersion: task.plan?.version, approvedAt: at, updatedAt: at }));
 }
 
 /** Approves the active draft (the choice was already made on a review screen). */

@@ -1,15 +1,18 @@
 import { modelLabel, tierCandidates } from "../config.js";
 import { selectCandidate } from "../router/select.js";
-import { foundryLines } from "./status-foundry.js";
-import { PROVIDERS, TIER_KEYS, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
+import { foundrySection } from "./status-foundry.js";
+import { PROVIDERS, TIER_KEYS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type RoutingDecision, type TaskState } from "../domain.js";
+import type { ProviderAuthView } from "../providers/auth.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
 import { availability, candidateCheck, routingSummary } from "./routing.js";
+import { clock, reviewOutOfDate, taskState, type GitFacts } from "./state-label.js";
+import { reviewRows } from "./review-report.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
 import { isSecuritySensitive } from "../router/classify.js";
-import { reviewLabel } from "./build.js";
-import { formatDuration } from "./format.js";
+import { costLabel, reviewLabel } from "./build.js";
+import { cell, formatUsdShort } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
 function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.readLedger()): string[] {
@@ -41,15 +44,6 @@ function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.
   );
 }
 
-function routingLines(ctx: WorkflowContext): string[] {
-  const summary = routingSummary(ctx);
-  const list = (models: string[]) => models.join(" | ") || "none";
-  return [
-    `Routing: session ${summary.session} · compaction ${summary.compaction} · ${summary.batch} · review ${summary.review}`,
-    `Ticket models: low ${list(summary.tickets.low)} · medium ${list(summary.tickets.medium)} · high ${list(summary.tickets.high)} · then ${list(summary.tickets.then)} (up to ${ctx.config.routing.maxEscalations} escalation(s))`,
-  ];
-}
-
 /** How the task is rated and by whom: the planner's rating once plan_spec ran, else the keyword scan of the request. */
 function classificationLine(classification: AcceptedClassification): string {
   const security = isSecuritySensitive(classification) ? ", security-sensitive" : "";
@@ -62,29 +56,6 @@ function classificationLine(classification: AcceptedClassification): string {
 function routeLine(ctx: WorkflowContext, routing: RoutingDecision): string {
   const target = routing.provider === "none" ? "literal edits" : modelLabel(ctx.config, routing.provider, routing.model);
   return `${routing.tier} → ${target}${routing.selectionReason ? ` · ${routing.selectionReason}` : ""}`;
-}
-
-const fmt = (value: number | null) => (value === null ? "unknown" : `$${value.toFixed(4)}`);
-
-/** One line per ticket that has run: state, model, tokens, cost, and peak context. */
-function ticketLines(ctx: WorkflowContext, state: TaskState | undefined): string[] {
-  const runs = Object.entries(state?.ticketRuns ?? {}).sort(([a], [b]) => a.localeCompare(b));
-  return runs.map(([id, run]) => {
-    const model = run.provider && run.model ? modelLabel(ctx.config, run.provider, run.model) : "no model yet";
-    const spend = run.costUsd === null ? "cost unknown" : `$${run.costUsd.toFixed(4)}`;
-    const split = run.reviews?.length && run.costSplit ? ` (impl ${fmt(run.costSplit.implementer)} · review ${fmt(run.costSplit.review)} · advisors ${fmt(run.costSplit.advisors)})` : "";
-    const trail = (run.attemptLog ?? []).map((item) => `${modelLabel(ctx.config, item.provider, item.model)} ${item.outcome === "success" ? "ok" : "failed"} in ${formatDuration(item.elapsedMs)}`).join(", ");
-    const review = run.reviews?.length ? ` · review ${reviewLabel(run)}` : "";
-    return `Ticket ${id}: ${run.status}${run.difficulty ? ` · ${run.difficulty}` : ""} · ${model}${review} · ${run.tokens} tokens over ${run.turns} turn(s) · ${spend}${split} · ${formatDuration(run.elapsedMs ?? 0)} · peak ~${run.maxContextTokens} ctx${run.crossedTarget ? " (over soft target)" : ""}${run.attempts > 1 ? ` · ${run.attempts} attempts` : ""}${trail ? ` · [${trail}]` : ""}${run.error && run.status !== "done" ? ` · ${run.error.slice(0, 120)}` : ""}`;
-  });
-}
-
-/** The /build branch, its base, and how many tickets are done. */
-function buildLines(state: TaskState | undefined): string[] {
-  if (!state?.build) return [];
-  const total = state.plan?.tickets?.length ?? 0;
-  const finished = Object.values(state.ticketRuns ?? {}).filter((run) => run.status === "done").length;
-  return [`Build: ${state.build.branch} (base ${state.build.base}) · tickets ${finished}/${total} done`];
 }
 
 export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> {
@@ -120,54 +91,138 @@ export function status(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {
   return guard(() => statusReport(ctx, arg.trim()));
 }
 
+/** One row of the Routing table: the tier, what would run now, and each skipped candidate with its reason. */
+export interface RoutingRow {
+  tier: string;
+  runs: string;
+  skipped: string[];
+}
+
 /**
- * The "Routing check" section: for each tier the candidate that would run now, and every skipped candidate with its
- * reason (the same reasons route events and stop messages use). Nothing is called and nothing is recorded.
+ * The Routing table's rows: for each tier the candidate that would run now, and every skipped candidate with its reason
+ * (the same reasons route events and stop messages use). Nothing is called and nothing is recorded.
  */
-export async function routingCheckLines(ctx: WorkflowContext): Promise<string[]> {
+export async function routingCheckRows(ctx: WorkflowContext): Promise<RoutingRow[]> {
   const seen = await availability(ctx);
   const check = candidateCheck(ctx);
   const table = ctx.store.readMetrics();
-  const lines = ["Routing check:"];
+  const rows: RoutingRow[] = [];
   for (const tier of TIER_KEYS) {
     const selection = selectCandidate({ tier, taskType: "general", config: ctx.config, table, availability: seen, candidateCheck: check, strictAvailability: true, rng: () => 0.5, at: ctx.now() });
     const label = (item: { provider: string; model: string }) => modelLabel(ctx.config, item.provider, item.model);
     const usable = selection.considered.filter((item) => !item.excludedReason);
     const others = usable.filter((item) => item.provider !== selection.candidate?.provider || item.model !== selection.candidate?.model).map(label);
-    lines.push(
-      selection.candidate
-        ? `  ${tier} → ${label(selection.candidate)}${others.length > 0 ? ` (also usable: ${others.join(", ")})` : ""}`
-        : `  ${tier} → nothing usable${tierCandidates(ctx.config, tier).length === 0 ? " (no model configured)" : ""}`,
-    );
-    for (const item of selection.considered) if (item.excludedReason) lines.push(`    skipped ${label(item)}: ${item.excludedReason}`);
+    rows.push({
+      tier,
+      runs: selection.candidate
+        ? `${label(selection.candidate)}${others.length > 0 ? ` (also usable: ${others.join(", ")})` : ""}`
+        : `nothing usable${tierCandidates(ctx.config, tier).length === 0 ? " (no model configured)" : ""}`,
+      skipped: selection.considered.filter((item) => item.excludedReason).map((item) => `${label(item)}: ${item.excludedReason}`),
+    });
   }
-  return lines;
+  return rows;
+}
+
+const mdTable = (head: string[], rows: string[][]) => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];
+
+/** "Review" row: how the last review went, in a phrase. */
+function reviewSummary(review: ReviewReport | undefined, git: GitFacts): string {
+  if (!review) return "not run";
+  const rows = reviewRows(review);
+  const kept = rows.filter((row) => row.item).length;
+  const dropped = rows.filter((row) => !row.item && row.verdict.startsWith("dropped")).length;
+  const when = clock(review.at);
+  const text = review.passed
+    ? [`passed${when ? ` ${when}` : ""}`, kept + dropped > 0 ? `${kept} kept, ${dropped} dropped` : "no findings"]
+    : ["did not pass", `${kept} finding${kept === 1 ? "" : "s"}`];
+  return [...text, ...(reviewOutOfDate(review, git) ? ["out of date"] : [])].join(" · ");
+}
+
+/** The Tickets table: each planned ticket with its difficulty, implementer, review, cost, and status. */
+function ticketTable(state: TaskState): string[] {
+  const tickets = state.plan?.tickets ?? [];
+  if (tickets.length === 0) return [];
+  const rows = tickets.map((ticket) => {
+    const run = state.ticketRuns?.[ticket.id];
+    const result = run?.status === "done" ? `done${run.commit ? ` ${run.commit.slice(0, 7)}` : ""}` : run?.status === "failed" ? `failed${run.error ? `: ${run.error}` : ""}` : run && run.attempts > 0 ? "in progress" : "pending";
+    return [cell(ticket.id), cell(ticket.title, 60), ticketDifficulty(ticket), cell(run?.provider && run.model ? `${run.provider}/${run.model}` : "-"), cell(reviewLabel(run)), cell(costLabel(run)), cell(result, 80)];
+  });
+  return ["### Tickets", "", ...mdTable(["#", "Ticket", "Difficulty", "Implementer", "Review", "Cost", "Status"], rows)];
+}
+
+/** The `/status` markdown: the state line, a summary table, tickets, routing, logins, and warnings. */
+export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | undefined, auth: ProviderAuthView[]): Promise<{ markdown: string; stateLine: string }> {
+  const records = ctx.store.readLedger();
+  const budget = budgetState(ctx, state?.taskId, records);
+  const corrupt = state ? ctx.store.corruptEventLines(state.taskId) : 0;
+  const git: GitFacts = {};
+  let ahead: number | undefined;
+  try {
+    git.head = await ctx.git.head();
+    if (state?.build) ahead = await ctx.git.aheadOf(state.build.base);
+  } catch {
+    // Not a repository, or no commit yet: the git facts stay out of the report.
+  }
+  const label = taskState(state, state?.review, git);
+  const approved = state?.approvedVersion;
+  const plan = approved ? `v${approved} approved${clock(state?.approvedAt) ? ` ${clock(state?.approvedAt)}` : ""}` : state?.plan ? `Draft v${state.plan.version}` : "none";
+  const summary = routingSummary(ctx);
+  const unknown = budget.task.unknownRecords;
+  const budgetCell = [
+    `task ${unknown > 0 ? "≥ " : ""}${formatUsdShort(budget.task.knownUsd)} / $${ctx.config.budgets.taskUsd}`,
+    `daily ${budget.daily.unknownRecords > 0 ? "≥ " : ""}${formatUsdShort(budget.daily.knownUsd)} / $${ctx.config.budgets.dailyUsd}`,
+    budget.status,
+    ...(unknown + budget.daily.unknownRecords > 0 ? [`${unknown} task / ${budget.daily.unknownRecords} daily record(s) with unknown cost, counted at an estimate`] : []),
+  ].join(" · ");
+  const pairs: [string, string][] = [
+    ["Task", state ? `${state.taskId} (${state.phase})` : "none"],
+    ["Plan", plan],
+    ["Branch", state?.build ? `${state.build.branch} (base ${state.build.base})${ahead !== undefined ? ` · ${ahead} commit${ahead === 1 ? "" : "s"} ahead` : ""}` : "not started"],
+    ["Review", reviewSummary(state?.review, git)],
+    ["Next", label.next],
+    ["Budget", budgetCell],
+    ["Session model", `${summary.session}${ctx.config.session.pin ? " (pinned)" : ""}`],
+    ...(state?.classification ? [["Rating", classificationLine(state.classification).replace(/^Rating \(([^)]*)\): /, "$1: ")] as [string, string]] : []),
+    ...(state?.routing ? [["Last route", routeLine(ctx, state.routing)] as [string, string]] : []),
+  ];
+  const routing = (await routingCheckRows(ctx)).map((row) => [cell(row.tier), cell(row.runs, 160), cell(row.skipped.join("; ") || "-", 400)]);
+  const logins = auth.map((view) => [cell(view.provider), view.method === "api-key" && view.status === "ready" ? "api-key" : view.status, cell(`${view.method}${view.detail ? ` · ${view.detail}` : ""}`, 160)]);
+  const missingPricing = unpricedModels(records, ctx.config.pricing);
+  const warnings = [
+    ...(ctx.config.warnings ?? []).map((warning) => `Config: ${warning}`),
+    ...(corrupt > 0 ? [`${corrupt} corrupt line(s) in the task event log. state.json is the source of truth; inspect events.jsonl.`] : []),
+    ...(missingPricing.length > 0 ? [`No pricing row for ${missingPricing.join(", ")}; their spend is unknown. Add a row to pricing.`] : []),
+    ...(state?.blockedReason && !["BLOCKED", "PAUSED", "FAILED"].includes(state.phase) ? [`Note: ${state.blockedReason}`] : []),
+  ];
+  const tickets = state ? ticketTable(state) : [];
+  const markdown = [
+    `## Status · ${label.line}`,
+    "",
+    ...mdTable(["", ""], pairs.map(([key, value]) => [key, cell(value, 400)])),
+    ...(tickets.length > 0 ? ["", ...tickets] : []),
+    "",
+    "### Routing",
+    "",
+    ...mdTable(["Tier", "Runs", "Skipped"], routing),
+    "",
+    "### Logins",
+    "",
+    ...mdTable(["Provider", "Status", "Detail"], logins),
+    ...(warnings.length > 0 ? ["", "### Warnings", "", ...warnings.map((warning) => `- ${warning}`)] : []),
+  ].join("\n");
+  return { markdown, stateLine: label.line };
 }
 
 async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandResult> {
   if (arg !== "" && arg !== "foundry") return fail("USAGE", "Use /status or /status foundry.");
   const state = active(ctx);
   const auth = await Promise.all(PROVIDERS.map((provider) => ctx.authProbe.inspect(provider)));
+  const { markdown: base, stateLine } = await statusMarkdown(ctx, state, auth);
+  const markdown = arg === "foundry" ? [base, "", ...(await foundrySection(ctx))].join("\n") : base;
+  // The chat block holds the tables (no clipping); the command result stays one line. Without a UI the result is the markdown.
+  ctx.report?.(markdown);
   const budget = budgetState(ctx, state?.taskId).status;
-  const corrupt = state ? ctx.store.corruptEventLines(state.taskId) : 0;
-  const text = [
-    state ? `Task ${state.taskId} phase ${state.phase}` : "No active task.",
-    state?.approvedVersion ? `Approved plan v${state.approvedVersion}` : "No approved plan.",
-    state?.blockedReason ? `Note: ${state.blockedReason}` : "",
-    corrupt > 0 ? `Warning: ${corrupt} corrupt line(s) in the task event log. state.json is the source of truth; inspect events.jsonl.` : "",
-    ...buildLines(state),
-    ...ticketLines(ctx, state),
-    `Budget: ${budget}`,
-    ...routingLines(ctx),
-    ...(ctx.config.warnings ?? []).map((warning) => `Config warning: ${warning}`),
-    state?.classification ? classificationLine(state.classification) : "",
-    state?.routing ? `Model: ${routeLine(ctx, state.routing)}` : "",
-    ...modelBreakdown(ctx).map((line) => `Model stats: ${line}`),
-    ...auth.map((view) => `${view.provider}: ${view.status} (${view.method}) ${view.detail}`),
-    ...(await routingCheckLines(ctx)),
-    ...(arg === "foundry" ? await foundryLines(ctx) : []),
-  ].filter(Boolean);
-  return done(text.join("\n"), { state, auth, budget, corruptEventLines: corrupt });
+  return done(ctx.report ? stateLine : markdown, { state, auth, budget, corruptEventLines: state ? ctx.store.corruptEventLines(state.taskId) : 0, stateLine });
 }
 
 export function auth(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {

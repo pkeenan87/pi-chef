@@ -320,6 +320,10 @@ export interface ReviewReport {
   summary: string;
   /** The model pass, when it ran. Separate from `findings` so policy stays deterministic. */
   modelReview?: ModelReview;
+  /** When the review finished (ISO). */
+  at?: string;
+  /** Git HEAD when the review ran; /status flags the review as out of date when HEAD has moved. Missing means unknown. */
+  headSha?: string;
   /** Wall time of the whole review. */
   elapsedMs?: number;
   /** Time per stage, and spend for the model stages (from the ledger entries this review recorded). */
@@ -530,6 +534,8 @@ export interface TaskState {
   routing?: RoutingDecision;
   plan?: PlanDocument;
   approvedVersion?: number;
+  /** When the plan was approved (ISO); shown by /status. */
+  approvedAt?: string;
   publishApproved: boolean;
   /** Per-ticket progress, keyed by ticket id. */
   ticketRuns?: Record<string, TicketRun>;
