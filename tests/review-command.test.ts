@@ -148,7 +148,7 @@ describe("/review with no task", () => {
     expect(sessionReport(t.app).passed).toBe(false);
     expect(t.reports.at(-1)).toContain("## Review did not pass");
     expect(t.dialogs).toHaveLength(1);
-    expect(t.dialogs[0]!.markdown).toContain("1. Check failed: unit (`npm test`) exit 1: FAIL injected");
+    expect(t.dialogs[0]!.markdown).toContain("| 1 | BLOCKING | npm test | unit failed with exit 1: FAIL injected | Check | — |");
     expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(head);
     expect(await git(t.cwd, "status", "--porcelain")).toContain("src/wip.ts");
   });
@@ -162,8 +162,8 @@ describe("/review with no task", () => {
     expect(report.passed).toBe(true);
     expect(report.findings.filter((finding) => finding.severity === "blocking")).toEqual([]);
     expect(report.modelReview?.findings).toHaveLength(1);
-    expect(t.reports.at(-1)).toContain("- HIGH   src/retry.ts — retry never backs off.");
-    expect(t.dialogs[0]!.markdown).toContain("1. HIGH src/retry.ts: retry never backs off. (evidence: const retry = 3)");
+    expect(t.reports.at(-1)).toMatch(/\| 1 \| HIGH \| src\/retry\.ts \| retry never backs off\. \|/);
+    expect(t.dialogs[0]!.markdown).toMatch(/\| 1 \| HIGH \| src\/retry\.ts \| retry never backs off\. \|/);
     expect(t.app.store.readLedger().find((entry) => entry.reason === "model review")).toMatchObject({ taskId: "session", phase: "REVIEWING" });
   });
 });
@@ -191,11 +191,11 @@ describe("/review findings dialog", () => {
       { value: "fix-some", label: "Fix…", input: "What should be fixed? (finding numbers like 1, 3, and/or your own instructions)" },
       { value: "close", label: "Close" },
     ]);
-    const lines = dialog!.markdown.split("\n").filter((line) => /^\d+\. /.test(line));
+    const lines = dialog!.markdown.split("\n").filter((line) => /^\| \d+ \|/.test(line));
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toMatch(/^1\. BLOCKING security:/);
-    expect(lines[1]).toMatch(/^2\. Check failed: unit \(`npm test`\)/);
-    expect(lines[2]).toMatch(/^3\. MEDIUM src\/retry\.ts: no jitter\./);
+    expect(lines[0]).toMatch(/^\| 1 \| BLOCKING \| security \|/);
+    expect(lines[1]).toMatch(/^\| 2 \| BLOCKING \| npm test \|/);
+    expect(lines[2]).toMatch(/^\| 3 \| MEDIUM \| src\/retry\.ts \| no jitter\./);
   });
 
   it("Fix all starts a turn with every finding, the check commands, and the rules; nothing is committed", async () => {

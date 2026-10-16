@@ -279,6 +279,7 @@ type Settled =
  * model's metric on a pass. A review that is unavailable does not block the commit; it adds a warning.
  */
 async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, lastText: string, credit: boolean, review?: () => Promise<TicketReviewOutcome | undefined>): Promise<Settled> {
+  ctx.indicator?.stage("checks");
   const outcome = await runChecks(ctx, state, ticket);
   if (outcome.verdict !== "pass") return { kind: "failed", verdict: outcome.verdict, detail: failureDetail(outcome.evidence) };
   const warnings: string[] = [];
@@ -294,6 +295,7 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
       warnings.push(reviewed.warning);
     }
   }
+  ctx.indicator?.stage("committing");
   const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
@@ -334,7 +336,8 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
         const began = iso(ctx);
         // Nobody can say which model wrote a hand fix: the review runs without an implementer, and no model metric moves.
         const handFixed: TicketRun = { ...run, provider: undefined, model: undefined };
-        const settled = await settle(ctx, state, ticket, run.summary ?? "", false, () => reviewTicket(ctx, state, ticket, handFixed));
+        ctx.indicator?.start(`Build · ticket ${ticket.id}`);
+        const settled = await settle(ctx, state, ticket, run.summary ?? "", false, () => reviewTicket(ctx, state, ticket, handFixed)).finally(() => ctx.indicator?.stop());
         if (settled.kind === "committed" || settled.kind === "review-failed") {
           const spent = ticketSpend(ctx, state.taskId, ticket.id, began);
           const elapsed = Math.max(0, ctx.now().getTime() - new Date(began).getTime());
@@ -499,6 +502,8 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
       return { kind: "stopped", code: "ABORTED", reason: `Stopped while ticket ${ticketId} was running. It stays in progress; /build resumes it.` };
     }
 
+    // Shown between the ticket's turns only: Pi's own spinner covers the turn itself.
+    ctx.indicator?.start(`Build · ticket ${ticketId}`);
     const settled = await settle(ctx, state, ticket, result.lastText, true, () => reviewTicket(ctx, state, ticket, run));
     if (settled.kind === "committed") {
       const m = measure();
@@ -541,6 +546,8 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
     return { kind: "stopped", code: stop.code, reason: `${stop.head} Fix it in the chat and run /build again, or just run /build to retry on a stronger model.` };
   } catch (error) {
     return { kind: "stopped", code: (error as { code?: string }).code ?? "ERROR", reason: redact((error as Error).message || "Could not finish the ticket.") };
+  } finally {
+    ctx.indicator?.stop();
   }
 }
 

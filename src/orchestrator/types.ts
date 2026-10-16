@@ -4,6 +4,7 @@ import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import type { CheckRunner } from "../review/review.js";
+import type { Indicator, IndicatorSink } from "./progress.js";
 import type { TaskStore } from "../storage/store.js";
 
 export interface WorkflowBinding {
@@ -20,6 +21,8 @@ export interface WorkflowBinding {
   progress?: (message: string) => void;
   /** Posts a multi-line markdown block in the chat transcript (a ticket's result, the build summary, a review). */
   report?: (markdown: string) => void;
+  /** The live Pi UI for the progress line; undefined without a UI. Set on every bind, from the live ctx. */
+  indicatorSink?: IndicatorSink;
   /** Shows a full plan in a scrollable dialog and returns the chosen action. Absent without a UI. */
   review?: PlanReviewFn;
   /** Posts a plan as a displayed message in the chat transcript. */
@@ -59,6 +62,8 @@ export interface WorkflowOptions {
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   startTurn?: (text: string) => void;
+  /** Replaces the progress indicator (tests inject a fake). */
+  indicator?: Indicator;
   /** Uniform [0, 1) used for exploration when choosing among a tier's candidates. */
   rng?: () => number;
 }

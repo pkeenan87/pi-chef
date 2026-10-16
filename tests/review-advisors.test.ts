@@ -159,15 +159,18 @@ describe("/review advisors", () => {
     expect(review.advisors).toHaveLength(2);
     expect(review.resolution!.findings.map((item) => item.status)).toEqual(["accepted", "accepted", "rejected"]);
     expect(review.advisorRule).toEqual({ reason: "branch has a high ticket", planned: ["gpt-6-astra", "claude-fable-5-1"] });
-    expect(t.reports.at(-1)).toContain("Advisors: Astra, Fable (branch has a high ticket)");
+    expect(t.reports.at(-1)).toContain("| Advisors | openai/gpt-6-astra, anthropic/claude-fable-5-1 (branch has a high ticket) |");
 
     const dialog = t.dialogs[0]!;
     expect(dialog.title).toBe("Review · 2 finding(s)");
     expect(dialog.markdown).toContain("Advisors: Astra, Fable (branch has a high ticket)");
-    expect(dialog.markdown).toContain("1. HIGH src/retry.ts: retry never backs off. [Opus · Astra agrees]");
-    expect(dialog.markdown).toContain("2. MEDIUM src/retry.ts: no jitter. [Fable · Opus accepts]");
-    expect(dialog.markdown).toContain("> LOW src/retry.ts: rename retry to attempts. [Astra] — Opus rejects: style only");
-    expect(dialog.markdown).not.toMatch(/3\. .*rename/);
+    expect(dialog.markdown).toContain("| # | Severity | Where | Finding | Raised by | Opus |");
+    expect(dialog.markdown).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | Astra agrees |");
+    expect(dialog.markdown).toContain("| 2 | MEDIUM | src/retry.ts | no jitter. | Fable | accepts |");
+    expect(dialog.markdown).toContain("| – | LOW | src/retry.ts | rename retry to attempts. | Astra | rejects: style only |");
+    expect(dialog.markdown).not.toMatch(/\| 3 \|/);
+    // The chat block carries the same rows with the same numbers.
+    expect(t.reports.at(-1)).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | Astra agrees |");
   });
 
   it("Fix all sends only the accepted findings; Fix… may still reference the rejected one by text", async () => {
@@ -193,11 +196,12 @@ describe("/review advisors", () => {
     expect(review.advisors).toHaveLength(2);
     const dialog = t.dialogs[0]!;
     expect(dialog.title).toBe("Review · 2 finding(s)");
-    expect(dialog.markdown).toContain("1. HIGH src/retry.ts: retry never backs off.");
-    expect(dialog.markdown).toContain("> unresolved advisor concern (Fable): MEDIUM src/retry.ts: no jitter.");
-    expect(dialog.markdown).toContain("> unresolved advisor concern (Astra)");
+    expect(dialog.markdown).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | — |");
+    expect(dialog.markdown).toContain("| – | MEDIUM | src/retry.ts | no jitter. | Fable | unresolved |");
+    expect(dialog.markdown).toContain("| – | MEDIUM | src/retry.ts | rename retry to attempts. | Astra | unresolved |");
     expect(t.turns[0]).not.toContain("unresolved advisor concern");
-    expect(t.reports.at(-1)).toContain("could not weigh the advisors' answers");
+    expect(t.reports.at(-1)).toContain("could not weigh their answers");
+    expect(t.reports.at(-1)).toContain("unresolved");
   });
 
   it("never changes passed: advisors disagreeing does not fail a passing review, and a failing check still fails", async () => {
@@ -228,26 +232,26 @@ describe("/review advisors", () => {
     const medium = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
     await medium.app.review();
     expect(advisorCalls(medium).map((call) => call.model)).toEqual(["gpt-6-astra"]);
-    expect(medium.reports.at(-1)).toContain("Advisors: Astra (highest ticket is medium)");
+    expect(medium.reports.at(-1)).toContain("| Advisors | openai/gpt-6-astra (highest ticket is medium) |");
     const low = await setup({ tickets: [sampleTicket("01", { difficulty: "low" })] });
     const result = await low.app.review();
     expect(advisorCalls(low)).toHaveLength(0);
     expect(passCalls(low)[0]!.system).not.toContain("Independent advisors will be asked");
-    expect(low.reports.at(-1)).toContain("Advisors: none (only low tickets)");
+    expect(low.reports.at(-1)).toContain("| Advisors | none (only low tickets) | — | — |");
     expect(reportOf(result).modelReview!.resolution).toBeUndefined();
     // Without advisors the numbered findings are Opus's own.
-    expect(low.dialogs[0]!.markdown).toContain("1. HIGH src/retry.ts: retry never backs off.");
+    expect(low.dialogs[0]!.markdown).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | — |");
   });
 
   it("an ad-hoc branch gets Astra above 400 changed lines and nobody below", async () => {
     const big = await setup({ lines: 500 });
     await big.app.review();
     expect(advisorCalls(big).map((call) => call.model)).toEqual(["gpt-6-astra"]);
-    expect(big.reports.at(-1)).toContain("Advisors: Astra (ad-hoc branch with 500 changed lines, over 400)");
+    expect(big.reports.at(-1)).toContain("| Advisors | openai/gpt-6-astra (ad-hoc branch with 500 changed lines, over 400) |");
     const small = await setup({ lines: 50 });
     await small.app.review();
     expect(advisorCalls(small)).toHaveLength(0);
-    expect(small.reports.at(-1)).toContain("Advisors: none (ad-hoc branch with 50 changed lines, 400 or fewer)");
+    expect(small.reports.at(-1)).toContain("| Advisors | none (ad-hoc branch with 50 changed lines, 400 or fewer) | — | — |");
   });
 
   it("skips the advisors and says so when the model pass produced nothing", async () => {

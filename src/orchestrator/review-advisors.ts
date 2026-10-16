@@ -96,6 +96,7 @@ export async function adviseReview(
   const clipped = await clipDiffSummarized(ctx, input.taskId, omitLockfiles(input.diff), ctx.config.advisors.maxDiffChars);
   const packet = reviewPacket({ plan: input.plan, review: input.review, files, diffText: clipped.text });
   const questions = input.review.questions?.length ? input.review.questions : DEFAULT_REVIEW_QUESTIONS;
+  ctx.indicator?.stage(`advisors · ${input.advisors.map((item) => shortModel(item.model)).join(", ")}`);
   input.progress(`asking ${input.advisors.map((item) => `${item.provider}/${item.model}`).join(", ")}`);
   const asked = await consultAdvisors(ctx, { purpose: "branch review", packet, questions, candidates: input.advisors, taskId: input.taskId });
   if (asked.skipped) {
@@ -105,6 +106,7 @@ export async function adviseReview(
   input.progress(`advisors answered: ${asked.results.map((item) => `${shortModel(item.model)} ${item.error ? "failed" : item.verdict}`).join(", ")}`);
   const base: Partial<ModelReview> = { advisors: asked.results, questions, costUsdAdvisors: asked.costUsd };
   if (!asked.results.some((item) => !item.error)) return base;
+  ctx.indicator?.stage(`resolving with ${shortModel(input.decision.model)}`);
   const resolved = await resolveReview(ctx, { ...input, packet, results: asked.results });
   return { ...base, ...(resolved.resolution ? { resolution: resolved.resolution } : { resolutionError: resolved.error }), costUsd: sumUsd([input.review.costUsd ?? null, resolved.costUsd]) };
 }

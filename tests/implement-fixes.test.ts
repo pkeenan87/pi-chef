@@ -183,11 +183,12 @@ describe("model review", () => {
     const review = await app.review();
     expect(review.ok, review.text).toBe(true);
     const text = reportText(app);
-    expect(text).toMatch(/Model review \(\S+\/\S+; 0\.0s, \$0\.\d{4}\): 1 finding\(s\)\./);
-    expect(text).toContain("- HIGH   src/ingest.ts — ingest() throws on empty input");
-    expect(text).toContain("## Review passed");
-    expect(text).toContain("### Checks (1 of 1 passed)");
-    expect(text).toContain("- ✓ unit");
+    expect(text).toMatch(/\| Model review \| \S+\/\S+ · 1 finding \| 0\.0s \| (<\$0\.01|\$\d+\.\d{2}) \|/);
+    expect(text).toMatch(/\| 1 \| HIGH \| src\/ingest\.ts \| ingest\(\) throws on empty input/);
+    expect(text).toMatch(/^## Review passed · 0\.0s · (<\$0\.01|\$\d+\.\d{2})\n/);
+    expect(text).toContain("| Checks | 1 of 1 passed | 0.0s | — |");
+    expect(text).toContain("| npm test | ✓ pass | 0.0s |");
+    expect(text).toContain("### Findings");
     expect(text).toContain("### Next");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.system).toContain("JSON array");
@@ -205,7 +206,7 @@ describe("model review", () => {
     await adHocChange(quietCwd);
     const silent = await quiet.review();
     expect(silent.ok).toBe(true);
-    expect(reportText(quiet)).toContain("### Model review\n- did not run");
+    expect(reportText(quiet)).toContain("| Model review | did not run | — | — |");
     expect(off.calls).toHaveLength(0);
 
     const broken: ChatFn = async () => {
@@ -217,7 +218,9 @@ describe("model review", () => {
     const review = await app.review();
     expect(review.ok).toBe(true);
     // Both review candidates were tried; each failed call is an unknown charge, never zero.
-    expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: rate limited; \S+\/\S+: rate limited/);
+    expect(reportText(app)).toMatch(/no findings: the call failed: \S+\/\S+: rate limited; \S+\/\S+: rate limited/);
+    expect(reportText(app)).toMatch(/^## Review passed · [\d.]+s · ≥ \$0\.00 \(some unknown\)\n/);
+    expect(reportText(app)).toMatch(/\| Model review \| .* \| [\d.]+s \| unknown \|/);
     const calls = app.store.readLedger().filter((item) => item.reason === "model review");
     expect(calls).toHaveLength(2);
     for (const entry of calls) expect(entry).toMatchObject({ actualUsd: null, outcome: "failure" });
@@ -299,13 +302,12 @@ describe("verbose output", () => {
     expect(progress.some((line) => /^Review: asking \S+\/\S+ to review part 1 of \d+ \(\d+k chars\)$/.test(line))).toBe(true);
     expect(progress.some((line) => /^Review: model pass done: \d+ finding\(s\) in 0\.0s, \$0\.\d{4}$/.test(line))).toBe(true);
     // Severity order across parts, and the top line says how the pass ran.
-    expect(text).toMatch(/Model review \(\S+\/\S+; 2 parts, 0\.0s, \$0\.\d{4}\)/);
-    expect(text.indexOf("- HIGH")).toBeLessThan(text.indexOf("- LOW"));
+    expect(text).toMatch(/\| Model review \| \S+\/\S+ · 2 parts · 2 findings · part of the diff was not reviewed \| 0\.0s \|/);
+    expect(text.indexOf("| HIGH |")).toBeLessThan(text.indexOf("| LOW |"));
     const data = savedReport(app) as unknown as { modelReview: { chunks: number; truncated: boolean; error?: string } };
     expect(data.modelReview.chunks).toBe(2);
     // The padded file is larger than one part, so it was cut: the header says so.
     expect(data.modelReview.truncated).toBe(true);
-    expect(text).toContain("(part of the diff was not reviewed)");
   });
 
   it("stops a model review call at review.timeoutMs", async () => {
@@ -318,6 +320,6 @@ describe("verbose output", () => {
     await adHocChange(cwd);
     const review = await app.review();
     expect(review.ok).toBe(true);
-    expect(reportText(app)).toMatch(/produced no findings: the call failed: \S+\/\S+: timed out after 1\.0s; \S+\/\S+: timed out after 1\.0s/);
+    expect(reportText(app)).toMatch(/no findings: the call failed: \S+\/\S+: timed out after 1\.0s; \S+\/\S+: timed out after 1\.0s/);
   }, 15_000);
 });

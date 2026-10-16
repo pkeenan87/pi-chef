@@ -17,6 +17,7 @@ import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAns
 import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { approveDraft, plan, route, showPlan } from "./planning.js";
+import { ProgressIndicator } from "./progress.js";
 import { review } from "./review.js";
 import { auth, cost, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
@@ -33,6 +34,7 @@ export class Workflow {
   readonly git: GitWorkspace;
   readonly cwd: string;
   private readonly ctx: WorkflowContext;
+  private readonly progressLine?: ProgressIndicator;
 
   constructor(options: WorkflowOptions) {
     this.cwd = options.cwd;
@@ -60,6 +62,11 @@ export class Workflow {
       planStatus: options.planStatus,
       startTurn: options.startTurn,
     };
+    if (options.indicator) ctx.indicator = options.indicator;
+    else {
+      this.progressLine = new ProgressIndicator(ctx.now);
+      ctx.indicator = this.progressLine;
+    }
     this.ctx = ctx;
   }
 
@@ -86,11 +93,14 @@ export class Workflow {
     ctx.progress = binding.progress ?? ctx.progress;
     ctx.report = binding.report ?? ctx.report;
     ctx.review = binding.review;
+    // The sink is the live ctx's UI; it is replaced on every bind so a stopped line never draws on a dead session.
+    this.progressLine?.attach(binding.indicatorSink);
     ctx.show = binding.show ?? ctx.show;
   }
 
   /** Aborts work still running for this workflow (the advisory model review). Call when the session ends. */
   dispose(): void {
+    this.ctx.indicator?.stop();
     this.ctx.shutdown.abort();
     // Re-armed so a workflow that is reused afterwards can run again.
     this.ctx.shutdown = new AbortController();
