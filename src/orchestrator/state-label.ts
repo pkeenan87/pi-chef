@@ -1,5 +1,5 @@
 import type { ReviewReport, TaskState } from "../domain.js";
-import { cell } from "./format.js";
+import { flat } from "./format.js";
 import { reviewItems } from "./review-report.js";
 
 /** The git facts the label needs: HEAD now, when it could be read. */
@@ -35,7 +35,7 @@ const label = (head: string, next: string): TaskStateLabel => ({ line: `${head} 
  */
 export function taskState(state: TaskState | undefined, review: ReviewReport | undefined, git: GitFacts = {}): TaskStateLabel {
   if (!state || state.phase === "IDLE") return label("No active task", "/plan <request> to start");
-  const reason = (fallback: string) => cell(state.blockedReason || fallback, 120);
+  const reason = (fallback: string) => flat(state.blockedReason || fallback, 120);
   switch (state.phase) {
     case "PLANNING":
       return { line: `Planning · ${state.planning?.stage === "tickets" ? "writing tickets" : "interview"}`, next: "answer the planner" };
@@ -83,7 +83,7 @@ export function taskState(state: TaskState | undefined, review: ReviewReport | u
   const stopped = Object.entries(runs).find(([, run]) => run.status === "failed" || run.status === "in-progress");
   if (stopped) {
     const [id, run] = stopped;
-    const why = cell(run.error || (run.failedBy ? `${run.failedBy} failed` : "stopped"), 60);
+    const why = flat(run.error || (run.failedBy ? `${run.failedBy} failed` : "stopped"), 60);
     return label(`Stopped · ticket ${id}: ${why}`, "/build resumes");
   }
   if (finished >= total && total > 0) return label(`Built · ${finished} of ${total} tickets done`, "run /review");

@@ -33,6 +33,7 @@ describe("state machine", () => {
     const paused = move({ ...base, phase: "IMPLEMENTING" }, "PAUSED", "2026-10-14T00:00:00.000Z", "wait");
     expect(paused.pausedFrom).toBe("IMPLEMENTING");
     expect(canTransition("PAUSED", "IMPLEMENTING", paused)).toBe(true);
-    expect(canTransition("PAUSED", "COMPLETE", paused)).toBe(false);
+    // Closing works from any phase, a paused task included.
+    expect(canTransition("PAUSED", "COMPLETE", paused)).toBe(true);
   });
 });

@@ -153,7 +153,7 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       let branch = current;
       if (current === "HEAD") return fail("GIT_NOT_READY", "HEAD is detached. Switch to a branch, then run /build again.");
       if (current === base) {
-        branch = `${ctx.config.branchPrefix}/${state.taskId}`;
+        branch = `${ctx.config.branchPrefix}/${state.name ?? state.taskId}`;
         await ctx.git.switchCreate(branch);
       }
       let baseSha: string;

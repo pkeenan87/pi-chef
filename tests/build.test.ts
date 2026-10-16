@@ -111,7 +111,7 @@ describe("/build commits", () => {
     expect(result.ok, result.text).toBe(true);
     expect(result.text).toContain("/review");
     const branch = await git(t.cwd, "branch", "--show-current");
-    expect(branch).toBe(`chef/${t.taskId}`);
+    expect(branch).toBe(`chef/${t.app.store.load(t.taskId)!.name}`);
     expect(await git(t.cwd, "log", "--format=%s", "-3")).toBe("02: Ticket 02\n01: Ticket 01\nbase");
     expect(await git(t.cwd, "show", "--name-only", "--format=", "HEAD~1")).toBe("f01.txt");
     expect(await git(t.cwd, "status", "--porcelain")).toBe("");
