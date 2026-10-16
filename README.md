@@ -206,7 +206,7 @@ The YAML must not contain secrets, API keys, or tokens.
 
 | Key | Meaning |
 |---|---|
-| `branchPrefix` (default `chef`) | `/build` names the branch `<branchPrefix>/<task-id>` when they start from the default branch |
+| `branchPrefix` (default `chef`) | `/build` names the branch `<branchPrefix>/<task name>` (for example `chef/retry-ingest-parser`) when they start from the default branch. A task that already has a build branch keeps it |
 | `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
 | `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
 | `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
@@ -521,27 +521,38 @@ git push -u origin HEAD
 origin pr create   # or: gh pr create
 ```
 
-Three commands. `/show-plan` re-reads the plan, and approves a draft you saved earlier.
+Three commands. `/show-plan` re-reads the plan, and approves a draft you saved earlier. `/plans` lists your tasks and switches between them.
 
 ### /plan
 
-`/plan <request>` runs in your normal Pi session on the session model (Opus by default), with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), a new `/plan` closes it first with a `Closed <task>.` chat line. A task with unfinished tickets is revised instead.
+`/plan <request>` runs in your normal Pi session on the session model (Opus by default), with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. Every `/plan <request>` starts a new task (see Tasks and /plans below). If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), it is closed first with a `Closed <name>.` chat line. An unfinished task is parked, untouched: `Parked <name> (<state>). /plans <name> switches back.` To change the plan you already have, use Request changes in the review picker or in `/show-plan`.
 
-1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
+1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` with no request, or with the same request again). The status line reads `plan · interview round N (k/7 questions)`.
 2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps) and rates the task (`complexity`, `risk`, `securitySensitive`, `classificationReason`; see [Classification](#classification)). Code rejects a spec without an approach, file changes, or verification.
 3. **Tickets.** The model submits vertical, independently testable slices with `plan_tickets`. Code validates unique ids, existing blockers, no cycles, at least one acceptance criterion, and that each ticket fits `workers.ticketContextTokens` (the larger of the model's estimate and a code estimate of chars/4 plus listed file sizes plus 20K overhead). An oversize ticket is sent back to be split. A ticket's `checks` are command lines, one command per entry, never prose. `plan_tickets` rejects a check the deny rules would refuse, and one whose first word is not a command on `PATH`, so the planner rewrites it. Each ticket carries technical `implementation` steps beside its behavior and acceptance criteria. Before submitting, the model drafts the tickets and calls `plan_consult` (next step).
 4. **Advisor consult.** `plan_consult` takes the draft `tickets` (same schema as `plan_tickets`, validated the same way) and 2-3 specific `questions` about the riskiest parts. It puts them to every available advisor, one per provider (Astra and Fable in the sample config), in parallel. Each advisor sees the saved spec (clipped), the draft tickets rendered compactly and the questions, never the session transcript, and answers with a verdict, answers and concerns. The answers are stored on the task (`planning.consult`) and returned to the model, which must resolve any disagreement itself and then call `plan_tickets` with the final tickets and `advisorResolution`: what it accepted, what it rejected, and why. The consult stores a sha256 of the spec and the canonical draft tickets. A second call with the same hash returns the stored answers with no model calls; one with changed tickets runs a new, deliberately paid consult, at most `advisors.maxPlanConsults` (default 2) per plan version, after which the latest stored answers are returned with a note. Parallel calls pay once. `plan_tickets` refuses tickets whose hash differs from the consult's ("The tickets changed since plan_consult; call plan_consult again...") unless the model sets `reconsultWaived: true` and says in `advisorResolution` why the change needs no new advice; the waiver is recorded on the plan and shown in the Advisor review section. A revision after **Request changes** is a new draft that may consult again. When advisors are available (`advisors.plan`, default true), `plan_tickets` refuses with "Call plan_consult first" until a consult exists and requires a non-empty `advisorResolution`; with no advisor available, or when the budget skipped them, it requires neither and the plan notes that. Advisors advise and never gate; the plan is still yours to approve.
 5. **Review.** `plan_tickets` saves the draft and the model ends its turn with a one-line summary. When that turn settles, the full plan (spec and every ticket) is posted in the chat as markdown, with no popup, and then a compact picker asks what to do. An aborted turn (Esc) skips this; `/show-plan` offers the draft later. The Tickets section opens with a summary table (`#`, `Ticket`, `Difficulty`, `Implementer`, `Advisors`, `Blocked by`): the implementer is the first model of the ticket's difficulty tier and the advisors are those the per-ticket review will consult (none for low, one other-provider advisor for medium, both for high). Each ticket heading carries its difficulty (`### 01 · medium · Title`), and the `plan_tickets` result the model summarizes from includes the same table. The picker offers **Approve plan**, **Request changes** (typed feedback goes back to the model, which starts the revision turn), **Edit tickets** (the edited plan is posted again and the picker returns), or **Save as draft**. Esc also saves a draft. The plan opens with an **Advisor review** section: each advisor's verdict and concerns (labelled by model), any errors, then `Opus resolution: ...`. Approving freezes `plan.vN.approved.json` (write-once). The plan is posted once, before the picker, and written to `tasks/<id>/plan.md`, and each ticket to `tasks/<id>/tickets/NN-slug.md`. A material scope change needs a new approval.
 
-`/show-plan` prints the plan. For a draft it opens the same review (Approve plan, Request changes, Close), so you can approve later.
+`/show-plan` prints the plan of the active task under a header with its name and state line. For a draft it opens the same review (Approve plan, Request changes, Close), so you can approve later.
 
 `/plan --no-questions <request>` skips the interview: the model records the choices it would have recommended as assumptions in the spec. A request that contains a literal ```` ```tasks ```` block is drafted directly (`plan.md`, `plan.json`, no model turn). Such a plan has no tickets, so `/build` asks you to run `/plan` again.
+
+### Tasks and /plans
+
+One request is one task. A task has a short readable **name** made from the request (`retry-ingest-parser`: lowercase, the first few meaningful words, at most 32 characters, `-2`, `-3` when taken), its plan, tickets, build branch, spend and review. The directory under `.pi-workflows/tasks/` keeps the long id, so tasks from older versions work unchanged; one without a name shows a name derived from its request, or its id. `/status` shows `name (id)`.
+
+- **`/plan <request>` never revises another task.** It makes a new one and makes it active. A finished active task is closed; an unfinished one is parked as it is (phase, tickets and branch untouched) and `/plans <name>` brings it back.
+- **The active task follows the branch.** If the branch you have checked out is the build branch of an open task, that task is active, whatever you used last. Otherwise (the default branch, a branch no task owns, a detached HEAD) the last task you created or switched to is active (`.pi-workflows/active-task.json`). The branch is read once per command, and usage is ledgered to the stored task without asking git. While you sit on a task's build branch, that task wins over a task you just started with `/plan`: switch branches first to work on a new request.
+- **`/plans`** lists open tasks, newest first, with the active one marked `●` (name, state line, tickets done/total, branch, updated). `/plans --all` adds closed ones.
+- **`/plans <name>`** (a name, an id, or a unique prefix) makes that task active, checks out its build branch when the working tree is clean (otherwise it says the branch was not changed and that `/build` needs a clean tree), and posts its plan; a draft gets the approve picker.
+- **`/plans close <name>`** closes a task: it moves to `COMPLETE` with `closedAt` and `closedReason: closed by user`. It asks first if tickets are unbuilt or the build has not passed review. Files and branches are kept and git is never touched. If it was the active task, the most recently updated unfinished task becomes active, or none.
+- **`/build`** on a task whose branch exists but is not checked out switches to it when the tree is clean, and says so; with uncommitted changes it stops and names the branch.
 
 ### /build
 
 `/build` runs the approved tickets one at a time. It refuses a plan that is not approved, a plan with no tickets, a budget that is already spent, and (for a security-sensitive plan) asks you to confirm first. It does not run in the background: it holds the Pi command until it finishes or stops.
 
-**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build with uncommitted changes (outside `.pi-workflows/`) lists them and asks whether to commit them first as a separate "Changes before /build" commit on the build branch, so they do not land in ticket 01's commit. Answer no (or run without a UI) and it refuses with `DIRTY_TREE`. Commits are authored with your git identity; `pi-chef <pi-chef@localhost>` is used only when git has no name or email configured. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
+**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task name>` (the task id for a task from an older version) and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build with uncommitted changes (outside `.pi-workflows/`) lists them and asks whether to commit them first as a separate "Changes before /build" commit on the build branch, so they do not land in ticket 01's commit. Answer no (or run without a UI) and it refuses with `DIRTY_TREE`. Commits are authored with your git identity; `pi-chef <pi-chef@localhost>` is used only when git has no name or email configured. Running `/build` from a different branch than the recorded one switches to the recorded branch when the tree is clean, and refuses (naming the branch) when it is not.
 
 **Per ticket**, in dependency order (`blockedBy`):
 
@@ -606,9 +617,9 @@ Decision = the reviewer's call after the advisors; dropped findings are not sent
 
 | | |
 | --- | --- |
-| Task | task-20261014-ab12 (IMPLEMENTING) |
+| Task | retry-ingest-parser (task-20261014-ab12) |
 | Plan | v2 approved 12:25 |
-| Branch | chef/task-ab12 (base main) · 3 commits ahead |
+| Branch | chef/retry-ingest-parser (base main) · 3 commits ahead |
 | Review | passed 14:32 · 2 kept, 1 dropped |
 | Next | push and open the PR (a new /plan closes this task) |
 | Budget | task $1.92 / $20 · daily $3.10 / $75 · ok |
@@ -625,7 +636,7 @@ Decision = the reviewer's call after the advisors; dropped findings are not sent
 ...
 ```
 
-The states: `No active task`, `Planning · interview` or `writing tickets`, `Draft v3 · waiting for approval`, `Approved v2 · run /build`, `Building · ticket 02 of 5`, `Stopped · ticket 02: <reason> · /build resumes`, `Built · 5 of 5 tickets done · run /review`, `Reviewed · passed HH:MM` or `Reviewed · N finding(s) to fix`, `Complete`, and the reason for a blocked or paused task. A review made before a later commit gets ` · review is out of date (commits since) · /review again` (the review records the git HEAD it ran at; an older review without one is never flagged). Tasks from the removed publish flow show `Published (older task)`. A `Warnings` section appears only when there is something to say (config warnings, corrupt event lines, models with no pricing row). Without a chat UI the command returns the whole markdown.
+The states: `No active task`, `Planning · interview` or `writing tickets`, `Draft v3 · waiting for approval`, `Approved v2 · run /build`, `Building · ticket 02 of 5`, `Stopped · ticket 02: <reason> · /build resumes`, `Built · 5 of 5 tickets done · run /review`, `Reviewed · passed HH:MM` or `Reviewed · N finding(s) to fix`, `Complete`, and the reason for a blocked or paused task. A review made before a later commit gets ` · review is out of date (commits since) · /review again` (the review records the git HEAD it ran at; an older review without one is never flagged). Tasks from the removed publish flow show `Published (older task)`. When other unfinished tasks exist, a line under the overview says `Also open: <n> task(s) — /plans`. A `Warnings` section appears only when there is something to say (config warnings, corrupt event lines, models with no pricing row). Without a chat UI the command returns the whole markdown.
 
 ## Cost
 
@@ -657,8 +668,10 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 - **Esc during `/build`.** The build stops after the current turn. The ticket stays in progress and nothing is committed. Run `/build` to continue.
 - **A failed ticket.** `/build` stops and says why. Fix it in the chat (the working tree keeps the failed attempt), then run `/build`: the checks run again, and if they pass your fix is committed and the build goes on. If you change nothing, the ticket goes to a model one step up the ticket ladder. A new plan version keeps the runs of tickets whose text is unchanged and builds the rest again.
 - **A failed `/review`.** Choose Fix all (or Fix…) in the picker under the report, or fix by hand, then run `/review` again. `/review` commits and pushes nothing.
-- **A crash or closed Pi.** Commits already made stay on the branch. `/build` resumes from the first ticket that is not done. It needs you on the recorded branch, and says which `git switch` to run if you are not.
+- **A crash or closed Pi.** Commits already made stay on the branch. `/build` resumes from the first ticket that is not done. It switches to the recorded branch if the tree is clean, and says so; with uncommitted changes it stops and names the branch.
 - **An expired login** pauses the task. Rate-limit and outage errors from the Foundry and local clients surface as provider errors and do not rewrite policy.
+- **The wrong task is active.** `/plans` shows which one is (`●`) and `/plans <name>` switches. The checked-out branch wins when it is an open task's build branch. If `active-task.json` is lost or points at nothing, `/plans <name>` repairs it; the tasks themselves are never in it.
+- **A task you no longer want.** `/plans close <name>` closes it and keeps its files and branch; delete the branch yourself with git if you want it gone.
 - **Old task files** that still have worktree, integration, or autopilot fields, or a retired phase, still load; those fields are ignored.
 
 ## Commands
@@ -666,7 +679,8 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | Command | Effect |
 |---|---|
 | `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits |
-| `/show-plan` | Show the full plan. A draft opens the review so you can approve it |
+| `/show-plan` | Show the active task's full plan under its name and state. A draft opens the review so you can approve it |
+| `/plans [--all]`, `/plans <name>`, `/plans close <name>` | List tasks (the active one marked), switch to one (checks out its branch when clean, shows its plan), or close one (files and branches kept). `/plan` always starts a new task and parks an unfinished one |
 | `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then an Opus review (with advisors for medium and high tickets), then a commit, on one branch. Run again to resume |
 | `/review` | Review the changes against the base branch (setup, checks, static scan, advisory model pass, advisors by ticket difficulty), list the findings, and offer to fix them in this session. Never commits or pushes |
 | `/route <task>` | Preview routing |
@@ -676,9 +690,9 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
 | `/chef` | List the commands |
 
-`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, `/plan`, and `/status`.
+`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, `/plan`, `/plans` (task names and `close`, `--all`), and `/status`.
 
-Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a finished task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
+Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a finished task; `/plans close` closes any task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
 
 ## Layout
 
