@@ -243,6 +243,26 @@ export interface ModelReviewPart {
   failures: string[];
 }
 
+/** A finding after the reviewer weighed the advisors' answers. */
+export interface ResolvedFinding extends ModelFinding {
+  status: "accepted" | "rejected";
+  /** Why the reviewer accepted or rejected it. */
+  rationale: string;
+  /** Who raised it: "opus" (the reviewer) or an advisor's model name. */
+  source: string;
+  /** The other advisors' model names (or "opus") that agree with it. */
+  agreedBy: string[];
+}
+
+/** The reviewer's final say on the findings after the advisors answered. */
+export interface ReviewResolution {
+  findings: ResolvedFinding[];
+  rationale?: string;
+  /** "provider/model" of the reviewer that resolved. */
+  by: string;
+  costUsd: number | null;
+}
+
 export interface ModelReview {
   /** The routed review model (the first candidate). `parts` says who actually reviewed each part. */
   provider: string;
@@ -257,6 +277,19 @@ export interface ModelReview {
   costUsd?: number | null;
   /** Why there are no or fewer model findings (budget, no model, failed parts, or unparseable output). */
   error?: string;
+  /** Which advisors the rule picked and why (for example "branch has a high ticket"), even when none was consulted. */
+  advisorRule?: { reason: string; planned: string[] };
+  /** The reviewer's questions for the advisors (at most 3). */
+  questions?: string[];
+  /** What each advisor answered. Advisory only. */
+  advisors?: AdvisorOpinion[];
+  /** Why the advisors were not consulted, when the rule picked some. */
+  advisorsSkipped?: string;
+  /** The reviewer's resolution of its findings and the advisors' concerns. Absent when the resolve call failed. */
+  resolution?: ReviewResolution;
+  /** Why the resolve call produced nothing (the findings and concerns then stand unresolved). */
+  resolutionError?: string;
+  costUsdAdvisors?: number | null;
 }
 
 export interface ReviewReport {

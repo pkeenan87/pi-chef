@@ -17,6 +17,7 @@ const CHROME_LINES = 9;
 function styleLine(line: string, theme: Theme): string {
   if (/^#{1,2} /.test(line)) return theme.fg("accent", theme.bold(line.replace(/^#+ /, "")));
   if (/^#{3,} /.test(line)) return theme.bold(line.replace(/^#+ /, ""));
+  if (/^> /.test(line)) return theme.fg("dim", line.slice(2));
   if (/^\*\*.+\*\*$/.test(line)) return theme.fg("muted", line.slice(2, -2));
   return line;
 }

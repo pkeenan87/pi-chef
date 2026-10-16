@@ -1,7 +1,7 @@
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import { ticketDifficulty, type AdvisorOpinion, type RoutingDecision, type TaskState, type Ticket, type TicketReviewFinding, type TicketReviewRecord, type TicketRun } from "../domain.js";
 import { redact } from "../redact.js";
-import { advisorsFor, availableAdvisors, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
+import { advisorBlock, advisorsFor, availableAdvisors, clipDiff, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
 import { bracketSpans, omitLockfiles } from "../review/model-review.js";
 import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
@@ -20,8 +20,6 @@ import { decide } from "./routing.js";
 const REVIEW_MAX_TOKENS = 4000;
 const MAX_FINDINGS = 12;
 const MAX_QUESTIONS = 3;
-/** Room left in the diff budget below which a file is only listed as cut instead of cut in half. */
-const MIN_PARTIAL_CHARS = 2000;
 const DEFAULT_QUESTIONS = ["Does the diff meet every acceptance criterion, or is one only claimed?", "Which bug, edge case or missing test is most likely to be overlooked here?"];
 
 const SEVERITIES = new Set(["high", "medium", "low"]);
@@ -41,32 +39,6 @@ export async function ticketDiff(ctx: WorkflowContext): Promise<string> {
     })
     .join("");
   return redact(omitLockfiles(kept));
-}
-
-/**
- * Cuts a diff to `maxChars` at file boundaries and says what was cut: a file that does not fit is cut in half when
- * there is room left for a useful part, and every later file is dropped. The note names each cut file.
- */
-export function clipDiff(diff: string, maxChars: number): { text: string; cut: string[] } {
-  if (diff.length <= maxChars) return { text: diff, cut: [] };
-  const name = (section: string) => /^diff --git a\/.+? b\/(.+)$/m.exec(section.split("\n", 1)[0] ?? "")?.[1] ?? "(unnamed section)";
-  let used = 0;
-  let text = "";
-  const cut: string[] = [];
-  for (const section of diff.split(/(?=^diff --git )/m).filter(Boolean)) {
-    const room = maxChars - used;
-    if (section.length <= room) {
-      text += section;
-      used += section.length;
-    } else if (room >= MIN_PARTIAL_CHARS && cut.length === 0) {
-      text += `${section.slice(0, room)}\n`;
-      used = maxChars;
-      cut.push(`${name(section)} (partly shown)`);
-    } else {
-      cut.push(`${name(section)} (not shown)`);
-    }
-  }
-  return { text: `${text}\n[diff clipped to ${maxChars} characters; cut: ${cut.join(", ")}]`, cut };
 }
 
 function ticketText(ticket: Ticket): string {
@@ -237,15 +209,6 @@ export type TicketReviewOutcome =
   | { kind: "unavailable"; record: TicketReviewRecord; warning: string };
 
 const label = (item: { provider: string; model: string }) => `${item.provider}/${item.model}`;
-
-function advisorBlock(opinion: AdvisorOpinion): string {
-  if (opinion.error) return `## ${label(opinion)}\nDid not answer: ${opinion.error}`;
-  return [
-    `## ${label(opinion)} (verdict: ${opinion.verdict ?? "unsure"})`,
-    ...opinion.answers.map((item) => `Q: ${item.question}\nA: ${item.answer}`),
-    ...(opinion.concerns.length ? ["Concerns:", ...opinion.concerns.map((item) => `- ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.issue}${item.suggestion ? ` (suggestion: ${item.suggestion})` : ""}`)] : ["No concerns raised."]),
-  ].join("\n");
-}
 
 const findingLine = (item: TicketReviewFinding) => `- ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.issue}`;
 

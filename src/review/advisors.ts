@@ -60,6 +60,36 @@ export function advisorsFor(input: { difficulty: Difficulty; implementerProvider
   return other ? [other] : [];
 }
 
+export interface ReviewAdvisorPick {
+  advisors: AdvisorCandidate[];
+  /** Why, in words for the report header (for example "branch has a high ticket"). */
+  reason: string;
+}
+
+/**
+ * Which advisors the branch-level /review consults (pure). `maxDifficulty` is the highest difficulty among the
+ * branch's plan tickets, or undefined when there is no plan with tickets (an ad-hoc branch).
+ *  - a high ticket: all of them (one per provider);
+ *  - highest is medium: one from a different vendor than the reviewer;
+ *  - only low tickets: none;
+ *  - ad hoc: one from a different vendor when more than `adHocMinLines` lines changed, else none.
+ */
+export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLines: number; adHocMinLines: number; reviewerProvider: string; candidates: AdvisorCandidate[] }): ReviewAdvisorPick {
+  const { maxDifficulty } = input;
+  const pick = (difficulty: Difficulty, reason: string): ReviewAdvisorPick => {
+    const advisors = advisorsFor({ difficulty, implementerProvider: input.reviewerProvider, candidates: input.candidates });
+    return { advisors, reason: advisors.length === 0 ? `${reason}, but no advisor is available` : reason };
+  };
+  if (maxDifficulty === undefined) {
+    const lines = `${input.changedLines} changed lines`;
+    if (input.changedLines > input.adHocMinLines) return pick("medium", `ad-hoc branch with ${lines}, over ${input.adHocMinLines}`);
+    return { advisors: [], reason: `ad-hoc branch with ${lines}, ${input.adHocMinLines} or fewer` };
+  }
+  if (maxDifficulty === "high") return pick("high", "branch has a high ticket");
+  if (maxDifficulty === "medium") return pick("medium", "highest ticket is medium");
+  return { advisors: [], reason: "only low tickets" };
+}
+
 /** The advisor tier's chat candidates that can be called now, plus a note for each one skipped. */
 export async function availableAdvisors(ctx: WorkflowContext): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
   const seen = await availability(ctx);
@@ -197,3 +227,43 @@ export async function consultAdvisors(
   );
   return { results, costUsd: sumUsd(results.map((item) => item.costUsd)) };
 }
+
+/** Room left in the diff budget below which a file is only listed as cut instead of cut in half. */
+const MIN_PARTIAL_CHARS = 2000;
+
+/**
+ * Cuts a diff to `maxChars` at file boundaries and says what was cut: a file that does not fit is cut in half when
+ * there is room left for a useful part, and every later file is dropped. The note names each cut file.
+ */
+export function clipDiff(diff: string, maxChars: number): { text: string; cut: string[] } {
+  if (diff.length <= maxChars) return { text: diff, cut: [] };
+  const name = (section: string) => /^diff --git a\/.+? b\/(.+)$/m.exec(section.split("\n", 1)[0] ?? "")?.[1] ?? "(unnamed section)";
+  let used = 0;
+  let text = "";
+  const cut: string[] = [];
+  for (const section of diff.split(/(?=^diff --git )/m).filter(Boolean)) {
+    const room = maxChars - used;
+    if (section.length <= room) {
+      text += section;
+      used += section.length;
+    } else if (room >= MIN_PARTIAL_CHARS && cut.length === 0) {
+      text += `${section.slice(0, room)}\n`;
+      used = maxChars;
+      cut.push(`${name(section)} (partly shown)`);
+    } else {
+      cut.push(`${name(section)} (not shown)`);
+    }
+  }
+  return { text: `${text}\n[diff clipped to ${maxChars} characters; cut: ${cut.join(", ")}]`, cut };
+}
+
+/** One advisor's answer as the reviewer reads it when resolving. */
+export function advisorBlock(opinion: AdvisorOpinion): string {
+  if (opinion.error) return `## ${opinion.provider}/${opinion.model}\nDid not answer: ${opinion.error}`;
+  return [
+    `## ${opinion.provider}/${opinion.model} (verdict: ${opinion.verdict ?? "unsure"})`,
+    ...opinion.answers.map((item) => `Q: ${item.question}\nA: ${item.answer}`),
+    ...(opinion.concerns.length ? ["Concerns:", ...opinion.concerns.map((item) => `- ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.issue}${item.suggestion ? ` (suggestion: ${item.suggestion})` : ""}`)] : ["No concerns raised."]),
+  ].join("\n");
+}
+

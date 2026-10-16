@@ -1,7 +1,9 @@
 import path from "node:path";
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
 import { type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewReport, type RoutingDecision, type TierCandidate } from "../domain.js";
+import { availableAdvisors, reviewAdvisorsFor } from "../review/advisors.js";
 import { modelReviewLines, runModelReview } from "../review/model-review.js";
+import { acceptedLines, advisorsHeader, rejectedLines, unresolvedConcernLines } from "../review/review-resolution.js";
 import { reviewDiff } from "../review/review.js";
 import { fallbackClassification } from "../router/classify.js";
 import { reviewMetricType } from "../router/stats.js";
@@ -10,6 +12,7 @@ import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
 import { active, done, guard, iso, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
+import { adviseReview, changedFiles, changedLineCount, planMaxDifficulty } from "./review-advisors.js";
 import { announce, decide } from "./routing.js";
 import { splitCheckLine } from "./tickets.js";
 
@@ -57,6 +60,7 @@ export function reviewMarkdown(report: ReviewReport, options: { setupConfigured:
   return [
     `## Review ${report.passed ? "passed" : "did not pass"}${report.elapsedMs !== undefined ? ` · ${formatDuration(report.elapsedMs)}` : ""}`,
     report.summary,
+    ...(advisorsHeader(report.modelReview) ? [advisorsHeader(report.modelReview)!] : []),
     "",
     `### Checks (${report.checks.filter((check) => check.ran && check.exitCode === 0).length} of ${report.checks.length} passed)`,
     ...(checks.length ? checks : ["- none ran"]),
@@ -112,7 +116,7 @@ export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision
  * review" and counted against its own candidate, and never a reason for the review to pass or fail. Returns undefined
  * when the pass is off in config.
  */
-async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string, plan: PlanDocument, decision: RoutingDecision | undefined, diff: string): Promise<ModelReview | undefined> {
+async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string, plan: PlanDocument, decision: RoutingDecision | undefined, diff: string, askQuestions = false): Promise<ModelReview | undefined> {
   if (!ctx.config.review.model) return undefined;
   const skip = (error: string): ModelReview => ({ provider: decision?.provider ?? "none", model: decision?.model ?? "none", findings: [], truncated: false, error });
   if (!ctx.chat) return skip("no model connection (only available inside a Pi session).");
@@ -134,6 +138,7 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
       timeoutMs: ctx.config.review.timeoutMs,
       signal: ctx.shutdown.signal,
       onProgress: progress,
+      askQuestions,
       stop: () => exhausted()?.replace(/\.$/, ""),
       onCall: async (call) => {
         // A failed call may or may not have been billed: its usage is unknown, never zero.
@@ -194,6 +199,11 @@ export function reviewItems(report: ReviewReport): ReviewItem[] {
     const command = [check.command, ...check.args].join(" ");
     items.push({ kind: "check", text: `Check failed: ${check.name} (\`${command}\`)${check.ran ? ` exit ${check.exitCode}` : " did not run"}: ${checkTail(check) || "no output"}` });
   }
+  // After the advisors answered, the reviewer's accepted findings are the model findings; rejected ones are notes.
+  if (report.modelReview?.resolution) {
+    for (const { text } of acceptedLines(report.modelReview)) items.push({ kind: "model", text });
+    return items;
+  }
   for (const finding of report.modelReview?.findings ?? []) {
     const evidence = finding.evidence ? ` (evidence: ${finding.evidence.replace(/\s+/g, " ").slice(0, 200)})` : "";
     items.push({ kind: "model", text: `${finding.severity.toUpperCase()} ${finding.file ? `${finding.file}: ` : ""}${finding.message}${evidence}` });
@@ -201,10 +211,17 @@ export function reviewItems(report: ReviewReport): ReviewItem[] {
   return items;
 }
 
+/** Findings that are listed but not numbered and not sent by "Fix all": rejected by the reviewer, or advisor concerns it could not weigh. Dimmed `> ` lines. */
+export function reviewNotes(report: ReviewReport): string[] {
+  const model = report.modelReview;
+  if (!model) return [];
+  return model.resolution ? rejectedLines(model) : model.resolutionError ? unresolvedConcernLines(model.advisors ?? []) : [];
+}
+
 const numbered = (items: ReviewItem[]) => items.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
 
 /** The message that sends findings to the model in the current session. */
-function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string): string {
+function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string, notes: string[] = []): string {
   const commands = checks.map((check) => `- \`${[check.command, ...check.args].join(" ")}\``);
   return redact(
     [
@@ -212,6 +229,7 @@ function fixMessage(items: ReviewItem[], checks: { command: string; args: string
       "",
       request ? "All findings, for reference (the numbers match the list):" : "Findings:",
       numbered(items),
+      ...(request && notes.length ? ["", "Not numbered (rejected by the reviewer or unresolved; fix one only if the request refers to it):", ...notes.map((line) => `- ${line.replace(/^> /, "")}`)] : []),
       "",
       "Rules:",
       "- Fix them in this working tree and keep the changes scoped to what is listed.",
@@ -251,6 +269,16 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     const checks = reviewChecks(ctx, plan);
     progress(`started · ${branch} against ${ref} · ${ctx.config.setup.length} setup step(s), ${checks.length} check(s) · model ${decision.candidate ? `${decision.provider}/${decision.model}` : "off"}`);
     const diff = redact(rawDiff);
+    // Which advisors this branch gets, by its plan's ticket difficulty (or its size when there is no plan).
+    const pick = ctx.config.review.model && ctx.chat && decision.candidate
+      ? reviewAdvisorsFor({
+          maxDifficulty: planMaxDifficulty(plan),
+          changedLines: changedLineCount(changedFiles(diff)),
+          adHocMinLines: ctx.config.advisors.adHocMinLines,
+          reviewerProvider: decision.provider,
+          candidates: (await availableAdvisors(ctx)).candidates,
+        })
+      : undefined;
     const report = await reviewDiff({
       diff,
       checks,
@@ -262,7 +290,15 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
       planAcceptance: plan?.acceptance ?? [],
     });
     const reviewPlan: PlanDocument = plan ?? { version: 0, createdAt: iso(ctx), summary: `Ad-hoc changes on ${branch}.`, risks: [], acceptance: [], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false };
-    report.modelReview = await modelPass(ctx, taskId, classification.task_type, reviewPlan, decision, report.diff ?? diff);
+    const modelReview = await modelPass(ctx, taskId, classification.task_type, reviewPlan, decision, report.diff ?? diff, !!pick?.advisors.length);
+    if (modelReview && pick) {
+      const rule = { reason: pick.reason, planned: pick.advisors.map((item) => item.model) };
+      const reviewed = modelReview.parts?.some((part) => part.reviewedBy);
+      const advice = pick.advisors.length === 0 ? {} : reviewed
+        ? await adviseReview(ctx, { taskId, taskType: classification.task_type, decision, candidates: reviewCandidates(ctx, decision), review: modelReview, plan: reviewPlan, diff: report.diff ?? diff, advisors: pick.advisors, progress })
+        : { advisorsSkipped: "the model pass produced no result" };
+      report.modelReview = { ...modelReview, ...advice, advisorRule: rule };
+    } else report.modelReview = modelReview;
     report.elapsedMs = ctx.now().getTime() - started;
     const setupConfigured = ctx.config.setup.length > 0;
     const saved = state ? `.pi-workflows/tasks/${state.taskId}/reports/review.md` : `.pi-workflows/reports/review-${stamp(ctx)}.md`;
@@ -281,6 +317,8 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     // The chat block above holds the detail; the command result stays short.
     const text = ctx.report ? `${report.summary} (${formatDuration(report.elapsedMs)}; details above)` : markdown;
     const items = reviewItems(report);
+    const notes = reviewNotes(report);
+    const header = advisorsHeader(report.modelReview);
     const result = (message: string): CommandResult =>
       report.passed ? { ok: true, text: message, data: report } : { ok: false, code: "REVIEW_BLOCKING", text: `${message}\nFix the problems, then /review again. Nothing was committed or pushed.`, data: report };
     if (items.length === 0 && report.passed) return result(`Review passed: ${report.checks.length} check(s), no findings.`);
@@ -288,7 +326,7 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
 
     const choice = await ctx.review({
       title: `Review · ${items.length} finding(s)`,
-      markdown: `## ${items.length} finding(s)\n\n${numbered(items)}`,
+      markdown: [...(header ? [header, ""] : []), `## ${items.length} finding(s)`, "", numbered(items), ...(notes.length ? ["", "### Listed, not sent by Fix all", "", ...notes] : [])].join("\n"),
       actions: [
         { value: "fix-all", label: "Fix all" },
         { value: "fix-some", label: "Fix…", input: "What should be fixed? (finding numbers like 1, 3, and/or your own instructions)" },
@@ -297,7 +335,7 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     });
     const request = choice?.value === "fix-some" ? (choice.text ?? "").trim() : undefined;
     if (ctx.startTurn && (choice?.value === "fix-all" || (choice?.value === "fix-some" && request))) {
-      ctx.startTurn(fixMessage(items, checks, request));
+      ctx.startTurn(fixMessage(items, checks, request, notes));
       // The turn is the outcome here; the verdict is in the report and in state.review.
       return done(request ? `Sent your fix request to the model (${items.length} finding(s) listed for reference).` : `Sent ${items.length} finding(s) to the model to fix.`, report);
     }

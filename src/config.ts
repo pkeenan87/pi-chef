@@ -158,9 +158,10 @@ export interface WorkflowConfig {
   /**
    * Second opinions during /build: after a ticket's checks pass, the review tier reads its diff and, by difficulty,
    * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off; `plan: false` skips the
-   * advisor consult on every plan (plan_consult).
+   * advisor consult on every plan (plan_consult). `adHocMinLines`: an ad-hoc branch (no plan) with more changed lines
+   * than this gets one advisor in /review.
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -200,7 +201,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400 },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -505,6 +506,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(raw.advisors, "timeoutMs", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
+    checkNumber(raw.advisors, "adHocMinLines", where, { min: 0, integer: true }, "advisors");
   }
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
