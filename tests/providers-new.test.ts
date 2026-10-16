@@ -3,6 +3,7 @@ import { createFoundryClient, foundryV1Base } from "../src/providers/clients.js"
 import { createRuntime, createReachabilityProbe, foundryConfigFrom, registerChatProviders } from "../src/providers/runtime.js";
 import { createVercelTokenSource, jwtExpiryMs, tokenFromDotenv } from "../src/providers/vercel.js";
 import { FileAuthProbe } from "../src/providers/auth.js";
+import { foundryApiConflicts, foundryDeploymentApis, parseConfig } from "../src/config.js";
 import { tieredConfig, unsignedJwt } from "./helpers.js";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -186,5 +187,67 @@ describe("local reachability and provider registration", () => {
     // decisions models (jev) are not chat models and are not registered
     expect(registered.vercel!.models.map((m) => m.id)).toEqual(["xai/grok-4"]);
     expect(registered.local!.models.map((m) => m.id)).toEqual(["qwen2.5-coder:7b"]);
+  });
+});
+
+describe("Foundry api setting and per-model override", () => {
+  type Registered = { api: string; baseUrl: string; models: { id: string; api?: string }[] };
+  const register = (config: ReturnType<typeof tieredConfig>) => {
+    const registered: Record<string, Registered> = {};
+    registerChatProviders({ registerProvider: (name, cfg) => { registered[name] = cfg as never; } }, config, {}, {});
+    return registered.foundry!;
+  };
+
+  it("defaults the provider to openai-completions with no per-model api", () => {
+    const foundry = register(tieredConfig());
+    expect(foundry.api).toBe("openai-completions");
+    expect(foundry.models.every((model) => model.api === undefined)).toBe(true);
+  });
+
+  it("honors providers.foundry.api", () => {
+    const config = tieredConfig();
+    config.providers.foundry!.api = "openai-responses";
+    expect(register(config).api).toBe("openai-responses");
+  });
+
+  it("emits a per-model api only where it differs from the provider's", () => {
+    const config = tieredConfig();
+    config.tiers.ticketHigh = [{ provider: "foundry", model: "gpt-6.1-sol", api: "openai-responses" }];
+    const foundry = register(config);
+    expect(foundry.api).toBe("openai-completions");
+    expect(foundry.models.find((model) => model.id === "gpt-6.1-sol")?.api).toBe("openai-responses");
+    expect(foundry.models.find((model) => model.id === "grok-4-7")?.api).toBeUndefined();
+    config.providers.foundry!.api = "openai-responses";
+    expect(register(config).models.find((model) => model.id === "gpt-6.1-sol")?.api).toBeUndefined();
+  });
+
+  it("the first tier wins when one deployment has different apis, and a warning says so", () => {
+    const config = tieredConfig();
+    config.tiers.ticketHigh = [{ provider: "foundry", model: "gpt-6.1-sol", api: "openai-responses" }];
+    config.tiers.standard = [{ provider: "foundry", model: "gpt-6.1-sol" }];
+    const { apis, conflicts } = foundryDeploymentApis(config);
+    expect(conflicts.length).toBeGreaterThan(0);
+    expect(foundryApiConflicts(config)[0]).toMatch(/foundry\/gpt-6\.1-sol/);
+    expect(apis.get("gpt-6.1-sol")).toBe("openai-completions");
+    expect(register(config).models.find((model) => model.id === "gpt-6.1-sol")?.api).toBeUndefined();
+  });
+
+  it("builds the Responses URL Pi's SDK posts to: <endpoint>/openai/v1/responses", async () => {
+    const urls: string[] = [];
+    const client = createFoundryClient({
+      auth: ready,
+      config: async () => ({ endpoint: "https://r.services.ai.azure.com", audience: "a", api: "openai-responses", style: "v1" }),
+      token: async () => ({ token: "t" }),
+      fetchImpl: (async (url: string) => { urls.push(url); return json({ output_text: "hi" }); }) as unknown as typeof fetch,
+    });
+    await client.complete({ model: "gpt-6.1-sol", messages: [{ role: "user", content: "x" }] });
+    expect(urls[0]).toBe(`${foundryV1Base("https://r.services.ai.azure.com")}/responses`);
+  });
+
+  it("validates tier api values, and only for foundry candidates", () => {
+    const yaml = (entry: string) => `tiers:\n  ticketHigh:\n    - ${entry}\n`;
+    expect(parseConfig(yaml("{ provider: foundry, model: gpt-6.1-sol, api: openai-responses }")).tiers.ticketHigh?.[0]?.api).toBe("openai-responses");
+    expect(() => parseConfig(yaml("{ provider: foundry, model: gpt-6.1-sol, api: soap }"))).toThrow(/api/);
+    expect(() => parseConfig(yaml("{ provider: openai, model: gpt-6.1-sol, api: openai-responses }"))).toThrow(/foundry/);
   });
 });

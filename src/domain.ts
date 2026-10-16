@@ -66,10 +66,16 @@ export const TIER_KEYS = [...TIERS, "advisor"] as const;
 export type TierKey = (typeof TIER_KEYS)[number];
 
 /** One chat model that can serve a tier. */
+/** Wire API of a Foundry deployment. Only Foundry candidates use it; see `providers.foundry.api` for the provider default. */
+export type ChatApi = "openai-responses" | "openai-completions" | "azure-openai-responses";
+export const CHAT_APIS: readonly ChatApi[] = ["openai-responses", "openai-completions", "azure-openai-responses"];
+
 export interface TierCandidate {
   provider: ProviderId;
   model: string;
   label?: string;
+  /** Foundry only: overrides `providers.foundry.api` for this deployment (for example Sol needs openai-responses for tools). */
+  api?: ChatApi;
 }
 
 /** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */
