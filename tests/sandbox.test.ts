@@ -101,7 +101,7 @@ describe("branch switch detection", () => {
 
 describe("buildBashBlock", () => {
   it("explains itself for a push or a branch move, and is silent otherwise", () => {
-    const reason = "/build commits and ships; do not push or switch branches during a ticket.";
+    const reason = "/build commits each ticket; do not push or switch branches during a ticket.";
     expect(buildBashBlock("git push origin HEAD")).toBe(reason);
     expect(buildBashBlock("git switch -c other")).toBe(reason);
     expect(buildBashBlock("npm test && git status")).toBeUndefined();

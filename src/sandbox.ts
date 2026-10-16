@@ -272,5 +272,5 @@ export function switchesBranch(command: string): boolean {
 
 /** Why a bash command is refused while a /build ticket runs, or undefined. */
 export function buildBashBlock(command: string): string | undefined {
-  return runsGitPush(command) || switchesBranch(command) ? "/build commits and ships; do not push or switch branches during a ticket." : undefined;
+  return runsGitPush(command) || switchesBranch(command) ? "/build commits each ticket; do not push or switch branches during a ticket." : undefined;
 }

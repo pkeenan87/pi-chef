@@ -167,7 +167,7 @@ describe("pi extension surface", () => {
           const ticket = text.match(/^# Ticket (\d+):/m)![1]!;
           log.push(`send ${ticket} on ${(ctx.model as { id: string }).id} via ${opener}`);
           // The hook sees the running ticket and refuses a push or a branch move, but not ordinary commands.
-          expect(await bashHook("git push origin HEAD")).toMatchObject({ block: true, reason: expect.stringContaining("/build commits and ships") });
+          expect(await bashHook("git push origin HEAD")).toMatchObject({ block: true, reason: expect.stringContaining("/build commits each ticket") });
           expect(await bashHook("git switch main")).toMatchObject({ block: true });
           expect(await bashHook("npm test")).toBeUndefined();
           writeFileSync(path.join(cwd, `f${ticket}.txt`), "x\n");
