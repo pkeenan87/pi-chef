@@ -3,6 +3,8 @@ import type { WorkflowConfig } from "../config.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
+import type { AzRunner } from "./status-foundry.js";
+import type { UsableRegistry } from "../providers/usable.js";
 import type { CheckRunner } from "../review/review.js";
 import { redact } from "../redact.js";
 import type { TaskStore } from "../storage/store.js";
@@ -20,6 +22,8 @@ export interface WorkflowContext {
   readonly now: () => Date;
   readonly id: () => string;
   authProbe: AuthProbe;
+  /** Runs the Azure CLI (argv, never a shell). Only `/status foundry` uses it. */
+  azure: AzRunner;
   readonly rng?: () => number;
   /** Check runner that skips a check already passed on an identical clean tree. */
   readonly checkRunner: CheckRunner;
@@ -36,6 +40,8 @@ export interface WorkflowContext {
   /** Live one-line progress while work runs and no model streams (/review, /build between turns). A no-op without a UI. */
   indicator?: Indicator;
   chat?: ChatFn;
+  /** Pi's model registry for the live session. When bound, routing skips candidates it does not know or holds no credentials for. */
+  registry?: UsableRegistry;
   status?: (text: string | undefined) => void;
   /** Plan-interview progress line (separate from the routing status so a routed turn does not overwrite it). */
   planStatus?: (text: string | undefined) => void;

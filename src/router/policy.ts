@@ -1,6 +1,6 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
 import { BASE_TIERS, modelMetricKey, TICKET_TIERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
-import { selectCandidate, type Availability, type Selection } from "./select.js";
+import { selectCandidate, type Availability, type CandidateCheck, type Selection } from "./select.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { circuitOpenFor, rankingCost, rate, reviewMetricType, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
 
@@ -37,6 +37,8 @@ export interface RouteOptions {
   circuitWindowMs?: number;
   /** Which providers are callable now. Omitted means all are. */
   availability?: Availability;
+  /** Per-candidate usability (Pi's registry knows the model and holds credentials for it). */
+  candidateCheck?: CandidateCheck;
   /** Smaller of the task and daily budget left, in USD. */
   budgetRemainingUsd?: number;
   /** Subscription quota use for shadow-price ranking. Never affects budgets. */
@@ -78,6 +80,7 @@ export function decideRoute(
       config,
       table,
       availability: options.availability,
+      candidateCheck: options.candidateCheck,
       budgetRemainingUsd: options.budgetRemainingUsd,
       quota: options.quota,
       rng,
@@ -132,9 +135,12 @@ export function decideRoute(
   let selection = probe(tier);
   // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
   const movable = (code: string) => code === "excluded" || code === "no_candidates" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
+  // What each tier tried before the ladder moved up, so a final stop names every candidate and its reason.
+  const tried: string[] = [];
   while (selection.blocked && tier !== "deterministic" && movable(selection.blocked.code)) {
     const escalated = escalateImplementation(tier, cap, config);
     if (escalated === tier) break;
+    if (selection.blocked.code === "unavailable") tried.push(selection.blocked.message);
     reasons.push(`escalated_from_${tier}_${selection.blocked.code}`);
     tier = escalated;
     selection = probe(tier);
@@ -152,7 +158,7 @@ export function decideRoute(
       selectionReason = selection.blocked?.code === "unavailable" ? "local model unreachable; applying the plan's literal edits" : "no model; applying the plan's literal edits";
       if (selection.blocked?.code === "unavailable") reasons.push("local_unreachable");
     } else {
-      blocked = selection.blocked?.message ?? "No model is available for this tier.";
+      blocked = [...tried, selection.blocked?.message ?? "No model is available for this tier."].join(" ");
     }
   }
   const provider = candidate?.provider ?? "none";

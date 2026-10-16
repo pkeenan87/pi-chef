@@ -70,14 +70,14 @@ pricing:
   });
 
   it("a config's tiers replace the built-in list per tier only", () => {
-    const config = parseConfig("tiers:\n  ticketHigh: [{ provider: openai, model: mine }]\n".replace("tiers:", "providers:\n  openai: { type: openai, auth: account-login, model: m }\nmodels: { cheap: openai, standard: openai, premium: openai }\ntiers:"));
+    const config = parseConfig("tiers:\n  ticketHigh: [{ provider: openai, model: mine }]\n".replace("tiers:", "providers:\n  openai: { type: openai, auth: account-login, model: m }\ntiers:"));
     expect(tierCandidates(config, "ticketHigh").map((item) => item.model)).toEqual(["mine"]);
     expect(tierCandidates(config, "ticketMedium").map((item) => item.model)).toEqual(["claude-sonnet-5-5"]);
   });
 
-  it("drops an empty-model entry from the legacy models path and falls to the built-in list", () => {
+  it("a config with no tiers uses the built-in list for every tier", () => {
     const config = parseConfig("branchPrefix: cost\n");
-    expect(config.models.premium).toBe("openai");
+    expect(config.tiers).toEqual({});
     expect(tierCandidates(config, "premium")).toEqual(DEFAULT_TIERS.premium);
   });
 

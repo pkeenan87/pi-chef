@@ -6,6 +6,7 @@ import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
+import { runAz } from "../providers/runtime.js";
 import { advisor } from "./advisor.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
@@ -49,6 +50,7 @@ export class Workflow {
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
       authProbe: options.auth,
+      azure: options.azure ?? runAz,
       rng: options.rng,
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
@@ -85,6 +87,7 @@ export class Workflow {
   bind(binding: WorkflowBinding): void {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
+    ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
     ctx.startTurn = binding.startTurn ?? ctx.startTurn;
@@ -110,7 +113,7 @@ export class Workflow {
     return this.store.readActive();
   }
 
-  /** Which providers can be called right now. Providers absent from the config are left out (treated as available). */
+  /** Which providers can be called right now, each with the reason when it cannot. */
   availability(): Promise<Availability> {
     return availability(this.ctx);
   }
@@ -129,7 +132,7 @@ export class Workflow {
   decide(
     classification: AcceptedClassification,
     purpose: "plan" | "implement" | "review" | "preview",
-    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier } = {},
+    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
   ): Promise<RoutingDecision> {
     return decide(this.ctx, classification, purpose, extra);
   }
@@ -290,8 +293,8 @@ export class Workflow {
     return cost(this.ctx, format);
   }
 
-  status(): Promise<CommandResult> {
-    return status(this.ctx);
+  status(arg = ""): Promise<CommandResult> {
+    return status(this.ctx, arg);
   }
 
   auth(arg = ""): Promise<CommandResult> {

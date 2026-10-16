@@ -158,7 +158,7 @@ Then add these lines to the project's `.gitignore`:
 .pi-workflows/*.local.yaml
 ```
 
-A user-level file at `~/.pi/agent/chef.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
+A user-level file at `~/.pi/agent/chef.yaml` (or `chef.yml`) is the base, and the project file `.pi-workflows/config.yaml` (or `config.yml`) layers on top of it. If both extensions exist the `.yaml` file is used and a warning names the `.yml` file that was ignored. The legacy `~/.pi/agent/cost-workflow.yaml` (or `.yml`) is still read when it is the only user file. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
 
 Task files, the cost ledger, metrics, and reports are gitignored. The config file is not.
 
@@ -185,7 +185,9 @@ npm run typecheck
 
 **Layering.** `~/.pi/agent/chef.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
 
-**User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, and `envFile` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
+**User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `resourceGroup` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
+
+**Config errors.** Session start always shows a config problem through a warning, redacted, naming the file and the key. A bad section drops only itself, with a warning, and the rest of the file loads: an invalid `tiers.<name>` list or entry (the built-in tier applies), an invalid `session` or `quota` section, and a tier that names a provider the file does not define. A file that cannot be used at all is rejected: unreadable YAML, a secret, `approvals.merge` other than `manual`, an invalid provider, budget, or routing value. The notice then reads "<path> was ignored; built-in tiers are in use, and chef commands stay stopped until it is fixed" plus the reason, because the file also carries your policy (budgets, allowlists) and the commands do not run without it. A provider Pi refuses to register is reported by name and the others still register. `foundry`, `vercel`, and `local` blocks do not need a `type`.
 
 **Policy fields a project can only tighten.**
 
@@ -284,13 +286,29 @@ providers:
     api: openai-completions           # or openai-responses
 ```
 
-The current Foundry route is the OpenAI-compatible v1 API at `https://<resource>.services.ai.azure.com/openai/v1/` (also `<resource>.openai.azure.com/openai/v1/`). The deployment name goes in `model`, there is no `api-version`, and the Entra token audience is `https://ai.azure.com`. A `tiers` entry for Foundry names a deployment, for example `{ provider: foundry, model: grok-4-7 }`.
+The current Foundry route is the OpenAI-compatible v1 API at `https://<resource>.services.ai.azure.com/openai/v1/` (also `<resource>.openai.azure.com/openai/v1/`). The deployment name goes in `model`, there is no `api-version`, and the Entra token audience is `https://ai.azure.com`. A `tiers` entry for Foundry names a model, for example `{ provider: foundry, model: grok-4-7 }`; `providers.foundry.deployments` maps that model to your Azure deployment name when they differ (next section).
 
 Configs written for the legacy deployments route keep working: set `apiVersion` (and the `cognitiveservices` audience) and omit `routeStyle`, and requests go to `/openai/deployments/<name>/chat/completions?api-version=...` as before. Set `routeStyle: v1` to opt in.
 
 `az account get-access-token` supplies the bearer for a call. Chat models registered with Pi read it through an `!az account get-access-token ...` command. Do not set `AZURE_OPENAI_API_KEY` for this workflow.
 
 Foundry serves chat models only (for example a `gpt-6-astra` deployment as an advisor).
+
+### Deployments with different names
+
+`providers.foundry.deployments` maps a Foundry `model` value used in the tiers (including the built-in ones) to your Azure deployment name. A model with no entry is called by its own name.
+
+```yaml
+providers:
+  foundry:
+    endpoint: https://<resource>.services.ai.azure.com
+    resourceGroup: my-rg              # optional, user config only; /status foundry uses it to list deployments
+    deployments:
+      gpt-6.1-sol: my-sol
+      grok-4-7: grok-4-6
+```
+
+Pi is registered with the deployment name (`my-sol`). Route events, labels, `/status`, and stop messages show `foundry/gpt-6.1-sol → my-sol`; metrics keep the model name. Pricing tries a row for the deployment name first, then the model name, so add a `pricing` row for `foundry` / `my-sol` when its price differs. If a deployment name reads like a different model or version than its key (different version digits, as with `grok-4-7` mapped to `grok-4-6`), the load warns that a pricing row for the deployment is recommended; this is a warning only. `deployments` may be set in a project config as well as the user config (it only renames Foundry targets). The old `deployments.cheap`, `reasoning`, and `classifier` keys are ignored with a warning; name the models under `tiers` instead.
 
 ### Foundry as the fallback for OpenAI and xAI
 
@@ -329,7 +347,7 @@ If your ChatGPT Enterprise login does not work in Pi for OpenAI, or you have no 
        audience: https://ai.azure.com
    ```
 
-4. If your deployment names differ from the model names, copy the tier lists from `.pi-workflows/config.yaml` into your config and change the Foundry `model` values. Keep `api: openai-responses` on `gpt-6.1-sol`.
+4. If your deployment names differ from the model names, add a `deployments:` map under `providers.foundry` (see above). Run `/status foundry` to list your deployments and see which tier entries have none.
 5. Copy the Foundry `pricing` rows (check them against your Azure rate card), run `/auth status` to see `foundry: ready`, then `/status`.
 
 OpenAI and xAI candidates stay in the lists; with no working login they are unavailable and the Foundry entry that follows each one is used.
@@ -371,7 +389,7 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 | ticketHigh | Sol 6.1 `gpt-6.1-sol`. Difficulty `high` |
 | advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Consulted on every plan (`plan_consult`, both), by `/build`'s per-ticket review (medium: one, high: both) and by `/review` (by the branch's highest ticket difficulty). Astra is $0 on a ChatGPT subscription; Fable is billed per token on an API key |
 
-**Built-in tiers.** With no `tiers:` in any config, every tier above uses the sample config's candidates, so a bare user config still routes to real model ids (never an empty one). A config's `tiers` replaces the built-in list per tier. For `cheap`, `standard` and `premium`, a legacy `models:` entry whose provider names a `model` still wins over the built-in list. The built-in lists carry no prices: the runtime never prices from source. When the effective config has no `pricing` row for a tier's models, `/status` and session start show one warning, "No pricing rows for <models>: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.", and those models rank last as `price_unknown`. A tier with no usable model (an empty model id is dropped) moves up the ladder; if nothing is usable the route stops with "No model configured for tier <tier>; add tiers.<tier> to your config."
+**Built-in tiers.** With no `tiers:` in any config, every tier above uses the sample config's candidates, so a bare user config still routes to real model ids (never an empty one). A config's `tiers` replaces the built-in list per tier. The built-in lists carry no prices: the runtime never prices from source. When the effective config has no `pricing` row for a tier's models, `/status` and session start show one warning, "No pricing rows for <models>: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.", and those models rank last as `price_unknown`. A tier with no usable model (an empty model id is dropped) moves up the ladder; if nothing is usable the route stops with "No model configured for tier <tier>; add tiers.<tier> to your config."
 
 Who does what, by default: the main session runs on Opus (`session.model`); Haiku writes compaction summaries and Luna the standalone batch jobs; `/build` tickets go to Grok, Sonnet or Sol by difficulty and climb one step on each failure (Grok, Sonnet, Sol, Opus); `/review` asks Opus.
 
@@ -383,7 +401,7 @@ tiers:
     - { provider: openai, model: gpt-6-luna }
 ```
 
-The old `models: { cheap: foundry, ... }` map still works. Each entry becomes a one-candidate tier. A tier listed under `tiers` replaces its `models` entry. `deterministic` and `advisor` exist only under `tiers`; `batch` falls back to `cheap` when it is not listed.
+The old `models: { cheap: openai, ... }` map is deprecated and loads with a warning. A `models` entry becomes a one-candidate tier only when `providers.<name>.model` names the model (never for `foundry`, which has no single model) and `tiers` does not list that tier; otherwise it is dropped with a warning. There are no built-in `models` defaults any more, so adding a provider never invalidates a file. Use `tiers` instead.
 
 How a candidate is picked:
 
@@ -418,6 +436,21 @@ quota:
 - **Tier choice is unchanged.** Hard and security-sensitive work still goes to `premium` by policy. The shadow price only decides which premium model serves it, for example Sol over Opus when Anthropic is over its cap.
 - **Layering.** `quota` is a ranking preference, not a policy field, so a project file overrides the user file per model row and per provider cap.
 - `/cost` lists quota use per provider (tokens today and this week, against any caps), apart from billed spend. `/cost json` includes it as `quota`. Each `route` event shows the shadow part of each candidate's score.
+
+### Why a model is skipped
+
+Route events, `/status` (Routing check), and the stop message of `/build` use the same wording for each skipped candidate:
+
+| Message | What to do |
+| --- | --- |
+| `provider foundry is not registered (no providers.foundry in ~/.pi/agent/chef.yaml)` | Add a `providers.foundry` block to the user config. Same form for `vercel` and `local` |
+| `provider foundry is not registered (providers.foundry has no endpoint; set endpoint in ~/.pi/agent/chef.yaml)` | Set `endpoint` (or export the `endpointEnv` variable) |
+| `provider openai has no login (run /login openai)` | Sign in with the account. Same form for `anthropic` and `xai`; `login has expired` when the session ran out |
+| `provider foundry has no Azure login (run az login)` | Run `az login` |
+| `model gpt-6.1-sol is not among the foundry provider's registered models` | Pi does not know that model id. Check the tier entry |
+| `deployment my-sol (mapped from gpt-6.1-sol) is not among the foundry provider's registered models` | The mapped deployment is not registered. Check `providers.foundry.deployments` and run `/status foundry` |
+
+Routing checks every candidate the way the `/build` preflight does: Pi's model registry must know the model and hold credentials for it (`find` and `hasConfiguredAuth`), in addition to the login the auth probe sees. A candidate that fails is skipped and the next one in the tier is tried, then the next tier up the ladder. `/build` stops only when nothing is usable, and the stop lists every candidate with its own reason. A provider the config never names is still checked: an account provider needs a Pi login, and `foundry`, `vercel`, and `local` need their block.
 
 ### Showing the chosen model
 
@@ -609,11 +642,11 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
-| `/status` | Phase, build progress, auth, budget |
+| `/status [foundry]` | Phase, build progress, auth, budget, and a Routing check (per tier, the candidate that will run and each skipped one with its reason). `/status foundry` also runs `az cognitiveservices account deployment list` (only when you ask) and flags tier entries whose deployment does not exist |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
 | `/chef` | List the commands |
 
-`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, and `/plan`.
+`help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, `/plan`, and `/status`.
 
 Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a finished task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
 

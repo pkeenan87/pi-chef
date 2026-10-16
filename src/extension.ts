@@ -2,17 +2,19 @@ import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, Sess
 import { convertToLlm, isToolCallEventType, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
-import { configPaths, DEFAULT_SESSION, loadConfig, parseModelRef, setBillingResolver, type WorkflowConfig } from "./config.js";
+import { homedir } from "node:os";
+import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
+import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
 import { reviewPlan } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
-import type { CommandResult, TokenUsage } from "./domain.js";
+import { WorkflowError, type CommandResult, type TokenUsage } from "./domain.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { SEARCH_MODEL } from "./tools/web-search.js";
@@ -57,8 +59,8 @@ function stamp(file: string): string {
  * files are invalid; the previous good config is kept so a later fix applies without a restart.
  */
 function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
-  const { projectPath, userPath, legacyUserPath } = configPaths(root);
-  const key = `${stamp(projectPath)}|${stamp(userPath)}|${stamp(legacyUserPath)}`;
+  // Every candidate (.yaml and .yml) is stamped, so adding, removing, or editing whichever file is used reloads.
+  const key = configPaths(root).watch.map(stamp).join("|");
   if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
   const config = loadConfig(root);
   const changed = !!loaded && loaded.root === root;
@@ -69,10 +71,38 @@ function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean
 /** Registers Foundry, Vercel, and local chat models with Pi, once per distinct provider/tier configuration. */
 function syncProviders(config: WorkflowConfig): void {
   if (!piRef || typeof piRef.registerProvider !== "function") return;
-  const signature = JSON.stringify([config.providers, config.tiers, config.models]);
+  const signature = JSON.stringify([config.providers, config.tiers]);
   if (signature === registeredSignature) return;
   registeredSignature = signature;
-  registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel });
+  const errors: string[] = [];
+  registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel }, process.env, errors);
+  // Each provider is tried on its own; what Pi refused is reported, never swallowed.
+  if (errors.length > 0) throw new Error(errors.join("; "));
+}
+
+/** Notices from places with no UI (extension load, a command with no ctx); shown by the next session_start. */
+const deferredNotices: string[] = [];
+
+/**
+ * What to tell the user about a config or registration failure: redacted, and naming the file when one was rejected.
+ * A rejected file stops chef commands (policy fields such as budgets and allowlists come from it), so the notice says so.
+ */
+function problemNotice(error: unknown): string {
+  if (error instanceof ConfigFileError) {
+    const reason = error.reason.split(homedir()).join("~");
+    return `${displayPath(error.file)} was ignored; built-in tiers are in use, and chef commands stay stopped until it is fixed. ${reason}`;
+  }
+  const text = asResult(error).text;
+  return error instanceof WorkflowError ? `Chef config problem: ${text}` : `Chef could not register its models with Pi: ${text}`;
+}
+
+function tell(ctx: ExtensionContext | undefined, text: string): void {
+  try {
+    if (ctx?.hasUI) ctx.ui.notify(text, "warning");
+    else deferredNotices.push(text);
+  } catch {
+    deferredNotices.push(text);
+  }
 }
 
 /** Prices follow the credential Pi holds: API-key rows while a provider is on an API key. */
@@ -99,8 +129,8 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     active.reconfigure(config, { auth: runtime.auth });
     try {
       syncProviders(config);
-    } catch {
-      /* provider registration problems show up when the model is used */
+    } catch (error) {
+      tell(ctx, problemNotice(error));
     }
   }
   if (ctx) {
@@ -109,7 +139,8 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
     const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
     active.bind({
-      chat: registry ? createRegistryChat(registry, apiKeyFallback) : undefined,
+      registry: registry as unknown as UsableRegistry | undefined,
+      chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
       status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef", text) : undefined,
       planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef-plan", text) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
@@ -229,7 +260,7 @@ async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: Exten
     const conversation = serializeConversation(convertToLlm(messages));
     if (!conversation.trim()) return undefined;
     const apiKeyFallback = (provider: string) => workflow.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
-    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback), {
+    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(workflow.config, provider, model)), {
       conversation,
       previousSummary: preparation.previousSummary,
       customInstructions: event.customInstructions,
@@ -342,18 +373,18 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   const driver: BuildDriver = {
     async fresh(model, run, ticketId) {
       // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
-      const known = model.id ? live.modelRegistry?.find(model.provider, model.id) : undefined;
-      const registry = live.modelRegistry as { hasConfiguredAuth?: (model: never) => boolean } | undefined;
-      let signedIn = !!known;
-      if (known && typeof registry?.hasConfiguredAuth === "function") {
-        try {
-          signedIn = registry.hasConfiguredAuth(known as never);
-        } catch {
-          signedIn = false;
-        }
+      // Routing applies the same test (registryProblem) to every candidate, so this only trips when Pi changed since.
+      let preflight: string | undefined;
+      try {
+        const config = getWorkflow().config;
+        const name = model.provider === "foundry" ? foundryModelOf(config, model.id) : model.id;
+        preflight = live.modelRegistry ? registryProblem(config, live.modelRegistry as unknown as UsableRegistry, model.provider, name) : `model ${model.id} cannot be checked: this Pi session has no model registry`;
+        if (preflight) preflight = `${modelLabel(config, model.provider, name)}: ${preflight}`;
+      } catch (error) {
+        preflight = `${model.provider}/${model.id} could not be checked: ${redact(error instanceof Error ? error.message : String(error))}`;
       }
-      if (!known || !signedIn) {
-        return { stopped: `Ticket ${ticketId} is routed to ${model.provider}/${model.id}, which Pi does not know or is not signed in. Fix the tier config or sign in, then /build again.` };
+      if (preflight) {
+        return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the tier config or sign in, then /build again.` };
       }
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
       let opened = false;
@@ -480,12 +511,20 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     // A new session may start with an empty provider registry, so register again.
     registeredSignature = undefined;
+    // Every failure below is shown (once per distinct text), whichever step finds it; the session itself never crashes.
+    const shown = new Set<string>();
+    const show = (text: string) => {
+      if (shown.has(text)) return;
+      shown.add(text);
+      if (ctx.hasUI) ctx.ui.notify(text, "warning");
+    };
+    for (const text of deferredNotices.splice(0)) show(text);
     try {
       const workflow = workflowFor(ctx.cwd);
-      for (const warning of workflow.config.warnings ?? []) if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+      for (const warning of workflow.config.warnings ?? []) show(warning);
     } catch (error) {
       // The router and tools still register; each command reports the config error when it runs.
-      if (ctx.hasUI) ctx.ui.notify(`Chef config problem: ${asResult(error).text}`, "warning");
+      show(problemNotice(error));
     }
     pi.appendEntry("chef-workflow", { cwd: ctx.cwd });
     // A /plan that was running before a restart resumes with its tools and progress line.
@@ -498,8 +537,9 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     try {
       // Foundry, Vercel, and local models must be in Pi's registry before anything can select them.
       syncProviders(refreshConfig(ctx.cwd).config);
-    } catch {
-      /* a bad config is reported by the commands; it must not stop the session from starting */
+    } catch (error) {
+      // A bad config or a refused registration must not stop the session from starting, but it is always shown.
+      show(problemNotice(error));
     }
     restoreSlot[SET_MODEL] = typeof pi.setModel === "function" ? (model) => pi.setModel(model) : undefined;
     try {
@@ -608,7 +648,8 @@ export default function extension(pi: ExtensionAPI): void {
   // before any session starts. session_start registers them again with the session's cwd.
   try {
     syncProviders(refreshConfig(process.cwd()).config);
-  } catch {
-    /* session_start retries; a bad config is reported by the commands */
+  } catch (error) {
+    // No UI yet: session_start retries, and shows this if it is still true then.
+    deferredNotices.push(problemNotice(error));
   }
 }

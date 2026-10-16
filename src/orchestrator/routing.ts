@@ -1,25 +1,44 @@
-import { tierCandidates } from "../config.js";
+import { modelLabel, tierCandidates } from "../config.js";
 import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { decideRoute } from "../router/policy.js";
-import type { Availability } from "../router/select.js";
+import type { Availability, CandidateCheck } from "../router/select.js";
+import { authProblem, configProblem, registryProblem, userConfigPath } from "../providers/usable.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, quotaState } from "./budget.js";
 import { iso, type WorkflowContext } from "./context.js";
 
-/** Which providers can be called right now. Providers absent from the config are left out (treated as available). */
+/**
+ * Which providers can be called right now, every one of them. A provider that is not configured (Foundry, Vercel, local
+ * without a block in the user config) is unavailable, and an account provider is checked against Pi's login even when the
+ * config never names it: leaving a provider out used to make routing treat it as signed in. `detail` is the reason.
+ */
 export async function availability(ctx: WorkflowContext): Promise<Availability> {
   const out: Availability = {};
+  const userPath = userConfigPath(ctx.cwd);
   await Promise.all(
-    PROVIDERS.filter((provider) => ctx.config.providers[provider]).map(async (provider) => {
+    PROVIDERS.map(async (provider) => {
+      const missing = configProblem(ctx.config, provider, userPath);
+      if (missing) {
+        out[provider] = { ok: false, detail: missing };
+        return;
+      }
       try {
         const view = await ctx.authProbe.inspect(provider);
-        out[provider] = { ok: view.status === "ready", detail: view.status === "ready" ? undefined : `${view.status}: ${view.detail}` };
+        const problem = authProblem(view);
+        out[provider] = problem ? { ok: false, detail: problem } : { ok: true };
       } catch (error) {
-        out[provider] = { ok: false, detail: redact((error as Error).message) };
+        out[provider] = { ok: false, detail: `provider ${provider} could not be checked: ${redact((error as Error).message)}` };
       }
     }),
   );
   return out;
+}
+
+/** The /build preflight's test for one candidate, applied to routing whenever a Pi model registry is bound. */
+export function candidateCheck(ctx: WorkflowContext): CandidateCheck | undefined {
+  const registry = ctx.registry;
+  if (!registry) return undefined;
+  return (candidate) => registryProblem(ctx.config, registry, candidate.provider, candidate.model);
 }
 
 /** decideRoute with live availability, remaining budget, and learned per-model metrics. Does not announce. */
@@ -37,6 +56,7 @@ export async function decide(
     ticketTier: extra.ticketTier,
     strictAvailability: extra.strictAvailability,
     availability: await availability(ctx),
+    candidateCheck: candidateCheck(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, extra.taskId),
     quota: quotaState(ctx),
     rng: ctx.rng,
@@ -52,18 +72,18 @@ export async function announce(
   setStatus: (text: string) => void = (text) => ctx.status?.(text),
 ): Promise<void> {
   const why = (decision.blocked ?? decision.selectionReason ?? "").split(";")[0]!.slice(0, 80);
-  const target = decision.provider === "none" ? "literal edits" : `${decision.provider}/${decision.model}`;
+  const target = decision.provider === "none" ? "literal edits" : modelLabel(ctx.config, decision.provider, decision.model);
   setStatus(`${decision.tier} → ${target}${why ? ` · ${why}` : ""}`);
   if (!taskId) return;
   const considered = (decision.considered ?? []).map(
-    (item) => `${item.provider}/${item.model}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
+    (item) => `${modelLabel(ctx.config, item.provider, item.model)}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
   );
   await ctx.store.appendRoute(taskId, { purpose, tier: decision.tier, provider: decision.provider, model: decision.model, reason: why, considered }, iso(ctx));
 }
 
 /** Who does what under the current config: the session model, compaction, review, and tickets, with their chat models. */
 export function routingSummary(ctx: WorkflowContext): { session: string; compaction: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
-  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).map((item) => `${item.provider}/${item.model}`);
+  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).map((item) => modelLabel(ctx.config, item.provider, item.model));
   const { reviewTier } = ctx.config.routing;
   const { model, pin, compactionTier } = ctx.config.session;
   return {

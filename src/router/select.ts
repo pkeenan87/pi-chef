@@ -1,4 +1,4 @@
-import { tierCandidates, type WorkflowConfig } from "../config.js";
+import { modelLabel, tierCandidates, type WorkflowConfig } from "../config.js";
 import { modelMetricKey, type ConsideredCandidate, type ProviderId, type TierCandidate, type TierKey } from "../domain.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { attemptOverhead, circuitOpenFor, shadowCost, tierCost, type SuccessTable } from "./stats.js";
@@ -26,7 +26,12 @@ export interface SelectOptions {
    * "run /login" instead of silently escalating to a more expensive tier.
    */
   strictAvailability?: boolean;
+  /** Why one candidate cannot be opened (Pi does not know the model, or holds no credentials for it), else undefined. Applied with the provider's availability. */
+  candidateCheck?: CandidateCheck;
 }
+
+/** Per-candidate usability beyond the provider's own availability. Returns the reason, or undefined when the candidate is usable. */
+export type CandidateCheck = (candidate: TierCandidate) => string | undefined;
 
 export interface Selection {
   tier: TierKey;
@@ -109,8 +114,14 @@ export function selectCandidate(options: SelectOptions): Selection {
     cost.set(candidate, price);
     const excluded = hardExclusion({ config, table, taskType, tier, candidate, price, at, budgetRemainingUsd: options.budgetRemainingUsd });
     if (excluded) hard.set(candidate, excluded);
+    if (hard.has(candidate)) continue;
+    // Both checks must pass: the provider is ready, and Pi can open this very model.
     const view = options.availability?.[candidate.provider];
-    if (!hard.has(candidate) && view && !view.ok) soft.set(candidate, `unavailable${view.detail ? `: ${view.detail}` : ""}`);
+    if (view && !view.ok) soft.set(candidate, view.detail ?? "unavailable");
+    else {
+      const problem = options.candidateCheck?.(candidate);
+      if (problem) soft.set(candidate, problem);
+    }
   }
   const eligible = candidates.filter((candidate) => !hard.has(candidate));
   const consideredBase = (picked?: Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number; overheadUsd?: number }>, pool?: TierCandidate[]): ConsideredCandidate[] =>
@@ -147,7 +158,7 @@ export function selectCandidate(options: SelectOptions): Selection {
         considered: consideredBase(),
         reason: `no ${tier} provider is available`,
         unpriced: false,
-        blocked: { code: "unavailable", message: `No ${tier} provider is available: ${[...soft.values()].join("; ")}.` },
+        blocked: { code: "unavailable", message: `No ${tier} model is usable: ${eligible.map((candidate) => `${modelLabel(config, candidate.provider, candidate.model)} (${soft.get(candidate)})`).join("; ")}.` },
       };
     }
     pool = eligible;

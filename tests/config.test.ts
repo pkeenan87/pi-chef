@@ -20,7 +20,6 @@ providers:
   foundry:
     type: azure-foundry
     auth: azure-cli
-    deployments: { classifier: c, reasoning: r, cheap: c }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:1/v1", model: m }
 `;
 
@@ -62,9 +61,8 @@ describe("parseConfig validation", () => {
     expect(() => parseConfig(`pricing:\n${row}${row}`)).toThrow(/duplicates/);
   });
 
-  it("rejects a tier whose provider is missing or has no model name", () => {
-    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
-    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
+  it("rejects a tier candidate whose provider is not defined", () => {
+    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\ntiers:\n  cheap: [{ provider: foundry, model: m }]\n")).toThrow(/tiers\.cheap\[0\]\.provider/);
   });
 
   it("accepts valid boundaries and normalizes dates", () => {
@@ -275,12 +273,15 @@ describe("loadConfig layering", () => {
 
   it("validates the layered result", () => {
     writeUser(base);
-    writeProject("models: { cheap: openai }\nproviders: { openai: { type: openai, auth: account-login } }\n");
+    writeProject("tiers: { cheap: [{ provider: openai, model: x }] }\nproviders: { openai: { type: openai, auth: account-login } }\n");
     // project overlay merges field-wise, so the user's model name survives
     expect(loadConfig(project).providers.openai?.model).toBe("gpt-5.4");
     writeUser("routing: { maxEscalations: 1 }\n");
-    writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\nmodels: { cheap: foundry }\n");
-    expect(() => loadConfig(project)).toThrow(/models\./);
+    writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\ntiers: { cheap: [{ provider: foundry, model: x }] }\n");
+    // Loading real files drops just the tier that names an undefined provider; the strict parse still rejects it.
+    const dropped = loadConfig(project);
+    expect(dropped.tiers.cheap).toBeUndefined();
+    expect(dropped.warnings?.join("\n")).toMatch(/tiers\.cheap\[0\]\.provider.*tiers\.cheap was dropped, so the built-in cheap tier applies/);
   });
 
   it("treats a user entry with no type as an adjustment, not a provider", () => {
@@ -312,7 +313,7 @@ describe("loadConfig layering", () => {
     writeProject(`providers:
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, baseUrl: "https://ai-gateway.vercel.sh/v1", projectDir: "." }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: m }
-  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", deployments: { cheap: c, reasoning: r } }
+  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com" }
 models: { cheap: local, standard: local, premium: local }
 `);
     const config = loadConfig(project);

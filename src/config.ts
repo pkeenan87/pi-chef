@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
-import { containsSecret } from "./redact.js";
+import { containsSecret, redact } from "./redact.js";
 import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
 export interface ProviderConfig {
@@ -13,12 +13,18 @@ export interface ProviderConfig {
   apiVersion?: string;
   audience?: string;
   api?: "openai-responses" | "openai-completions" | "azure-openai-responses";
-  deployments?: { classifier?: string; reasoning?: string; cheap?: string };
+  /**
+   * Foundry: maps a model name used in `tiers` (for example gpt-6.1-sol) to your Azure deployment name. A model with
+   * no entry is called by its own name. Pi is registered with the deployment name; routing shows `model → deployment`.
+   */
+  deployments?: Record<string, string>;
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
   /** Foundry: literal resource endpoint (not a secret) used when `endpointEnv` is unset. */
   endpoint?: string;
+  /** Foundry: the Azure resource group of the resource named by `endpoint`. Only `/status foundry` reads it (to list deployments); user config only. */
+  resourceGroup?: string;
   /** Foundry: "v1" uses `<endpoint>/openai/v1/...` (no api-version); "deployments" is the legacy route. Defaults to deployments when apiVersion is set, else v1. */
   routeStyle?: "v1" | "deployments";
   /** Vercel: directory that has been `vercel link`ed (relative paths resolve from the project root). */
@@ -120,9 +126,7 @@ export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
   providers: Partial<Record<ProviderId, ProviderConfig>>;
-  /** Legacy one-provider-per-tier map. Used for any tier that `tiers` does not list. */
-  models: Record<"cheap" | "standard" | "premium", ProviderId>;
-  /** Candidate models per tier, in preference order for ties. Overrides `models` for the tiers it lists. */
+  /** Candidate models per tier, in preference order for ties. A tier it does not list uses DEFAULT_TIERS. */
   tiers: Partial<Record<TierKey, TierCandidate[]>>;
   routing: {
     maxEscalations: number;
@@ -228,7 +232,6 @@ const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
   workspaceDir: ".pi-workflows",
   providers: {},
-  models: { cheap: "foundry", standard: "anthropic", premium: "openai" },
   tiers: {},
   routing: {
     maxEscalations: 3,
@@ -414,16 +417,29 @@ function warnOnce(warnings: string[], message: string): void {
  * Removes settings from earlier versions, each with one warning, so an old file still loads. The cost-opt/auto
  * virtual model, its router settings, and the Decisions classifier are gone.
  */
+const LEGACY_DEPLOYMENT_KEYS = ["cheap", "reasoning", "classifier"];
+
 function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = { ...raw };
   if (isRecord(out.providers)) {
     const providers: Record<string, unknown> = {};
     for (const [name, provider] of Object.entries(out.providers)) {
-      if (isRecord(provider) && "decisionsPath" in provider) {
+      let current: unknown = provider;
+      if (isRecord(current) && "decisionsPath" in current) {
         warnOnce(warnings, `providers.${name}.decisionsPath is no longer used; the Decisions classifier is gone.`);
-        const { decisionsPath: _gone, ...rest } = provider;
-        providers[name] = rest;
-      } else providers[name] = provider;
+        const { decisionsPath: _gone, ...rest } = current;
+        current = rest;
+      }
+      if (name === "foundry" && isRecord(current) && isRecord(current.deployments)) {
+        const kept: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(current.deployments)) {
+          if (LEGACY_DEPLOYMENT_KEYS.includes(key)) {
+            warnOnce(warnings, `providers.foundry.deployments.${key} is ignored: deployments now maps a Foundry model to your deployment name, for example { "gpt-6.1-sol": "my-sol" }. Name the model under tiers.`);
+          } else kept[key] = value;
+        }
+        current = { ...current, deployments: kept };
+      }
+      providers[name] = current;
     }
     out.providers = providers;
   }
@@ -473,7 +489,7 @@ function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<st
 }
 
 /** Validates and normalizes one raw YAML document. Returns a shallow copy with normalized fields. */
-function normalizeRaw(input: unknown, where: string, warnings: string[] = []): Record<string, unknown> {
+function normalizeRaw(input: unknown, where: string, warnings: string[] = [], lenient = false): Record<string, unknown> {
   if (!isRecord(input)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
   const raw = dropLegacy(input, warnings);
   assertNoSecrets(raw, where);
@@ -504,6 +520,9 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     if (name === "vercel" && provider.auth && provider.auth !== "vercel-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Vercel auth must be vercel-cli.");
     }
+    if (provider.resourceGroup !== undefined && (typeof provider.resourceGroup !== "string" || !/^[A-Za-z0-9._()-]{1,90}$/.test(provider.resourceGroup))) {
+      invalid(where, `providers.${name}.resourceGroup`, "must be an Azure resource group name");
+    }
     for (const key of ["endpoint", "projectDir", "envFile", "baseUrl", "model"] as const) {
       if (provider[key] !== undefined && (typeof provider[key] !== "string" || provider[key] === "")) {
         invalid(where, `providers.${name}.${key}`, "must be a non-empty string");
@@ -517,6 +536,15 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     }
     if (typeof provider.baseUrl === "string" && !isHttpsUrl(provider.baseUrl) && !(name === "local" && isLoopbackHttpUrl(provider.baseUrl))) {
       invalid(where, `providers.${name}.baseUrl`, name === "local" ? "must be an https URL, or http only for localhost" : "must be an https URL");
+    }
+    if (provider.deployments !== undefined) {
+      if (name !== "foundry") invalid(where, `providers.${name}.deployments`, "applies only to foundry");
+      if (!isRecord(provider.deployments)) invalid(where, `providers.${name}.deployments`, "must map a model name to a deployment name");
+      for (const [model, deployment] of Object.entries(provider.deployments)) {
+        if (typeof deployment !== "string" || !DEPLOYMENT_NAME.test(deployment)) {
+          invalid(where, `providers.${name}.deployments.${model}`, "must be a deployment name (letters, digits, dot, underscore, hyphen)");
+        }
+      }
     }
     if (provider.routeStyle !== undefined && provider.routeStyle !== "v1" && provider.routeStyle !== "deployments") {
       invalid(where, `providers.${name}.routeStyle`, 'must be "v1" or "deployments"');
@@ -545,7 +573,21 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
 
   const tiers = section(raw, "tiers", where);
   if (tiers) {
+    const kept: Record<string, unknown> = {};
     for (const [key, list] of Object.entries(tiers)) {
+      // A bad tier drops only that tier when loading real files: the built-in tier applies and the rest of the file still loads.
+      try {
+        checkTier(key, list);
+        kept[key] = list;
+      } catch (error) {
+        if (!lenient || !(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+        warnOnce(warnings, `${error.message}; tiers.${key} was dropped, so the built-in ${key} tier applies.`);
+      }
+    }
+    out.tiers = kept;
+  }
+  function checkTier(key: string, list: unknown): void {
+    {
       if (!(TIER_KEYS as readonly string[]).includes(key)) invalid(where, `tiers.${key}`, `is not a known tier (${TIER_KEYS.join(", ")})`);
       if (!Array.isArray(list) || list.length === 0) invalid(where, `tiers.${key}`, "must be a non-empty list of candidates");
       list.forEach((item, index) => {
@@ -579,10 +621,22 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
   }
   const session = section(raw, "session", where);
   if (session) {
+    const checkSession = () => {
     if (session.model !== undefined && (typeof session.model !== "string" || !parseModelRef(session.model))) invalid(where, "session.model", "must be provider/id, for example anthropic/claude-opus-5-5");
     if (session.pin !== undefined && typeof session.pin !== "boolean") invalid(where, "session.pin", "must be true or false");
     if (session.compactionTier !== undefined && (typeof session.compactionTier !== "string" || !CHAT_TIER_NAMES.includes(session.compactionTier))) {
       invalid(where, "session.compactionTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
+    }
+    };
+    if (!lenient) checkSession();
+    else {
+      try {
+        checkSession();
+      } catch (error) {
+        if (!(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+        warnOnce(warnings, `${error.message}; the whole session section was dropped, so the default session settings apply.`);
+        delete out.session;
+      }
     }
   }
   const workers = section(raw, "workers", where);
@@ -638,16 +692,25 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     invalid(where, "proprietaryCode", "must be a boolean");
   }
   out.pricing = normalizePricing(raw.pricing, where);
-  const quota = normalizeQuota(raw.quota, where);
-  if (quota) out.quota = quota;
+  try {
+    const quota = normalizeQuota(raw.quota, where);
+    if (quota) out.quota = quota;
+  } catch (error) {
+    // Quota only ranks models (it never bills), so a bad section is dropped with a warning when loading real files.
+    if (!lenient || !(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+    warnOnce(warnings, `${error.message}; the whole quota section was dropped, so no quota shadow prices apply.`);
+    delete out.quota;
+  }
   return out;
 }
+
+const DEPLOYMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 const MODEL_KEYS = ["cheap", "standard", "premium"] as const;
 
 /**
- * Cross-checks a resolved config: tier models must reference configured providers, and each
- * referenced provider must name a model so pricing and calls never use an empty id.
+ * Cross-checks a resolved config: tier candidates must reference configured providers. Only what the file wrote is
+ * checked; the built-in tiers are never validated against the file's providers.
  */
 export function validateResolvedConfig(config: WorkflowConfig, where = "config"): void {
   for (const [key, list] of Object.entries(config.tiers)) {
@@ -657,19 +720,37 @@ export function validateResolvedConfig(config: WorkflowConfig, where = "config")
       }
     });
   }
-  // With no provider configured nothing routes, as with no config file at all.
-  if (Object.keys(config.providers).length === 0) return;
-  for (const key of MODEL_KEYS) {
-    if (config.tiers[key]) continue;
-    const provider = config.models[key];
-    if (!config.providers[provider]) {
-      invalid(where, `models.${key}`, `references provider "${provider}" which is not defined under providers`);
+}
+
+/**
+ * The lenient form of `validateResolvedConfig`: a tier naming a provider the config does not define is dropped with a
+ * warning. The account providers (openai, anthropic, xai) need no block: their login is Pi's, and routing checks it.
+ */
+function dropUnresolvedTiers(config: WorkflowConfig, where: string, warnings: string[]): void {
+  for (const [key, list] of Object.entries(config.tiers)) {
+    const index = list?.findIndex((candidate) => !config.providers[candidate.provider] && !isAccountProvider(candidate.provider)) ?? -1;
+    if (index < 0) continue;
+    warnOnce(warnings, `${where}: tiers.${key}[${index}].provider references provider "${list![index]!.provider}" which is not defined under providers; tiers.${key} was dropped, so the built-in ${key} tier applies.`);
+    delete config.tiers[key as TierKey];
+  }
+}
+
+/**
+ * The deprecated `models: { cheap: <provider> }` map becomes a one-candidate tier when `providers.<provider>.model` names
+ * the model and `tiers` does not list that tier. Otherwise (Foundry, or no model) the entry is dropped with a warning.
+ */
+function applyLegacyModels(norm: Record<string, unknown>, config: WorkflowConfig, warnings: string[]): void {
+  if (!isRecord(norm.models) || Object.keys(norm.models).length === 0) return;
+  warnOnce(warnings, "models: is deprecated; list candidates under tiers: instead (a models entry becomes a one-model tier).");
+  for (const [key, provider] of Object.entries(norm.models)) {
+    if (!(MODEL_KEYS as readonly string[]).includes(key) || typeof provider !== "string" || !isProviderId(provider)) continue;
+    if (config.tiers[key as TierKey]) continue;
+    const model = config.providers[provider]?.model;
+    if (provider === "foundry" || !model) {
+      warnOnce(warnings, `models.${key}: ${provider} is dropped (${provider === "foundry" ? "name the Foundry model under tiers" : `set providers.${provider}.model`}); the built-in ${key} tier applies.`);
+      continue;
     }
-    const tier: Tier = key;
-    if (!modelNameFor(config, provider, tier)) {
-      const hint = provider === "foundry" ? "providers.foundry.deployments" : `providers.${provider}.model`;
-      invalid(where, hint, `must name a model because models.${key} uses ${provider}`);
-    }
+    config.tiers[key as TierKey] = [{ provider, model }];
   }
 }
 
@@ -678,7 +759,6 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
   return {
     ...DEFAULTS,
     providers: { ...DEFAULTS.providers, ...obj("providers") } as WorkflowConfig["providers"],
-    models: { ...DEFAULTS.models, ...obj("models") } as WorkflowConfig["models"],
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
     session: { ...DEFAULTS.session, ...obj("session") } as WorkflowConfig["session"],
@@ -730,12 +810,15 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
   return out;
 }
 
-function mergeConfig(raw: unknown, where: string, warnings: string[] = []): WorkflowConfig {
-  const norm = normalizeRaw(raw, where, warnings);
+function mergeConfig(raw: unknown, where: string, warnings: string[] = [], lenient = false): WorkflowConfig {
+  const norm = normalizeRaw(raw, where, warnings, lenient);
   const config = build(norm);
-  // A standalone document that spells out both providers and models must be self-consistent.
+  applyLegacyModels(norm, config, warnings);
+  applyDeploymentPricing(config, warnings);
+  // A standalone document that spells out both providers and tiers must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
-  if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
+  if (lenient) dropUnresolvedTiers(config, where, warnings);
+  else if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
     validateResolvedConfig(config, where);
   }
   return config;
@@ -759,7 +842,9 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  * untrusted (it ships with a cloned repo), so these come from the user config only. The one exception
  * is a provider the user did not define, where a project may repeat the built-in default.
  */
-const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile"] as const;
+const DEFAULT_PROVIDER_TYPE: Record<string, string> = { foundry: "azure-foundry", vercel: "vercel-ai-gateway", local: "openai-compatible" };
+
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "resourceGroup"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
   if (typeof value !== "string") return false;
@@ -856,10 +941,18 @@ export function layerConfigs(
     const u = isRecord(user.providers) ? user.providers : {};
     const p = isRecord(project.providers) ? project.providers : {};
     for (const name of new Set([...Object.keys(u), ...Object.keys(p)])) {
-      const entry = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
-      // A user entry with no type only adjusts a provider defined elsewhere (for example apiKeyFallback). With
-      // nothing under it, it is not a provider of its own.
-      if (isRecord(entry) && entry.type === undefined) continue;
+      let entry = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
+      if (isRecord(entry) && isRecord(u[name]) && isRecord(p[name]) && isRecord(u[name].deployments) && isRecord(p[name].deployments)) {
+        // Deployment names merge per model, the project winning, so a project can rename one target without dropping the user's others.
+        entry = { ...entry, deployments: { ...u[name].deployments, ...p[name].deployments } };
+      }
+      if (isRecord(entry) && entry.type === undefined) {
+        // Only an account provider (openai, anthropic, xai) with no type is an adjustment such as apiKeyFallback and is
+        // not a provider of its own. Foundry, Vercel, and local have no other form, so a missing type is filled in.
+        const defaultType = DEFAULT_PROVIDER_TYPE[name];
+        if (!defaultType) continue;
+        entry = { ...entry, type: defaultType };
+      }
       providers[name] = entry;
     }
     merged.providers = providers;
@@ -961,33 +1054,89 @@ export function layerConfigs(
   return merged;
 }
 
-/** Config files that loadConfig reads, so callers can watch them for changes. */
-export function configPaths(cwd: string): { projectPath: string; userPath: string; legacyUserPath: string } {
+/** First existing of `<base>.yaml` / `<base>.yml`; `.yaml` when neither exists. `ignored` is the `.yml` that lost to an existing `.yaml`. */
+function pickYaml(base: string): { path: string; exists: boolean; ignored?: string } {
+  const yaml = `${base}.yaml`;
+  const yml = `${base}.yml`;
+  if (existsSync(yaml)) return { path: yaml, exists: true, ignored: existsSync(yml) ? yml : undefined };
+  if (existsSync(yml)) return { path: yml, exists: true };
+  return { path: yaml, exists: false };
+}
+
+/** Config files that loadConfig reads, so callers can watch them for changes. `watch` lists every candidate file. */
+export function configPaths(cwd: string): { projectPath: string; userPath: string; legacyUserPath: string; watch: string[] } {
+  const agent = path.join(homedir(), ".pi", "agent");
+  const project = path.join(cwd, ".pi-workflows", "config");
+  const user = path.join(agent, "chef");
+  const legacy = path.join(agent, "cost-workflow");
   return {
-    projectPath: path.join(cwd, ".pi-workflows", "config.yaml"),
-    userPath: path.join(homedir(), ".pi", "agent", "chef.yaml"),
-    legacyUserPath: path.join(homedir(), ".pi", "agent", "cost-workflow.yaml"),
+    projectPath: pickYaml(project).path,
+    userPath: pickYaml(user).path,
+    legacyUserPath: pickYaml(legacy).path,
+    watch: [project, user, legacy].flatMap((base) => [`${base}.yaml`, `${base}.yml`]),
   };
+}
+
+/** `~/...` for paths under the home directory, so messages do not print a user name. */
+export function displayPath(file: string): string {
+  const home = homedir();
+  return file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
+}
+
+/** A config problem that makes a whole file unusable. `file` is the path that was rejected; `reason` is redacted. */
+export class ConfigFileError extends WorkflowError {
+  constructor(code: string, readonly file: string, readonly reason: string) {
+    super(code, reason);
+    this.name = "ConfigFileError";
+  }
+}
+
+/**
+ * Reads, parses, and checks one config file. Policy rejections (a secret, a merge that is not manual, a bad provider or
+ * budget) and unreadable YAML reject the whole file: they throw a ConfigFileError that names it. Only the sections
+ * `normalizeRaw` can drop on their own (a tier, session, or quota section) become warnings.
+ */
+function readConfigFile(file: string, warnings: string[]): Record<string, unknown> {
+  try {
+    let parsed: unknown;
+    try {
+      parsed = parse(readFileSync(file, "utf8"));
+    } catch (error) {
+      const first = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable";
+      throw new WorkflowError("CONFIG_INVALID", `${displayPath(file)}: YAML could not be read (${first})`);
+    }
+    return normalizeRaw(parsed, file, warnings, true);
+  } catch (error) {
+    if (error instanceof ConfigFileError) throw error;
+    const code = error instanceof WorkflowError ? error.code : "CONFIG_INVALID";
+    throw new ConfigFileError(code, file, redact(error instanceof Error && error.message ? error.message : String(error)));
+  }
 }
 
 export function loadConfig(cwd: string): WorkflowConfig {
   const { projectPath, userPath: newUserPath, legacyUserPath } = configPaths(cwd);
   const warnings: string[] = [];
+  const agent = path.join(homedir(), ".pi", "agent");
+  for (const base of [path.join(cwd, ".pi-workflows", "config"), path.join(agent, "chef"), path.join(agent, "cost-workflow")]) {
+    const { path: used, ignored } = pickYaml(base);
+    if (ignored) warnings.push(`${displayPath(ignored)} is ignored because ${displayPath(used)} exists; delete one of them.`);
+  }
   // The user file used to be cost-workflow.yaml: still read when it is the only one, and say to rename it.
   let userPath = newUserPath;
   if (existsSync(legacyUserPath)) {
-    if (existsSync(newUserPath)) warnings.push("~/.pi/agent/cost-workflow.yaml is ignored because ~/.pi/agent/chef.yaml exists; delete the old file.");
+    const legacyName = path.basename(legacyUserPath);
+    if (existsSync(newUserPath)) warnings.push(`~/.pi/agent/${legacyName} is ignored because ~/.pi/agent/${path.basename(newUserPath)} exists; delete the old file.`);
     else {
       userPath = legacyUserPath;
-      warnings.push("Rename ~/.pi/agent/cost-workflow.yaml to chef.yaml");
+      warnings.push(`Rename ~/.pi/agent/${legacyName} to chef.yaml`);
     }
   }
-  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;
-  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
+  const userRaw = existsSync(userPath) ? readConfigFile(userPath, warnings) : undefined;
+  const projectRaw = existsSync(projectPath) ? readConfigFile(projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
   const where = projectRaw ? projectPath : userPath;
-  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
-  validateResolvedConfig(config, where);
+  // Lenient: a bad tier, session, or quota section drops just that section (with a warning naming file and key).
+  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where, warnings, true);
   const unpriced = unpricedTierModels(config);
   if (unpriced.length > 0) {
     warnings.push(`No pricing rows for ${unpriced.join(", ")}: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.`);
@@ -1091,26 +1240,74 @@ export function estimateUsd(
 }
 
 /**
- * Candidates for a tier: the config's `tiers` list; else, for cheap/standard/premium, the legacy `models` entry when it
- * names a model; else the built-in list. Never returns an empty model id.
+ * Candidates for a tier: the config's `tiers` list, else the built-in list. Never returns an empty model id.
  * `deterministic` and `advisor` are empty when nothing applies.
  */
 export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
   const explicit = config.tiers[tier];
   if (explicit) return explicit.filter((candidate) => candidate.model !== "");
-  const builtIn = () => DEFAULT_TIERS[tier];
-  if (tier === "cheap" || tier === "standard" || tier === "premium") {
-    // The legacy `models` entry, when its provider names a model; else the built-in list.
-    const provider = config.models[tier];
-    const model = modelNameFor(config, provider, tier);
-    return model ? [{ provider, model }] : builtIn();
+  return DEFAULT_TIERS[tier];
+}
+
+/** The Azure deployment a Foundry model is called through: its `deployments` entry, else the model name itself. */
+export function foundryDeployment(config: WorkflowConfig, model: string): string {
+  const mapped = config.providers.foundry?.deployments?.[model];
+  return mapped && mapped !== "" ? mapped : model;
+}
+
+/** The model name a Foundry deployment stands for (reverse of `foundryDeployment`); the input when no entry maps to it. */
+export function foundryModelOf(config: WorkflowConfig, deployment: string): string {
+  for (const [model, mapped] of Object.entries(config.providers.foundry?.deployments ?? {})) if (mapped === deployment) return model;
+  return deployment;
+}
+
+/** The model id Pi knows a candidate by: the deployment name for Foundry, the model itself otherwise. */
+export function piModelId(config: WorkflowConfig, provider: string, model: string): string {
+  return provider === "foundry" ? foundryDeployment(config, model) : model;
+}
+
+/** `provider/model`, plus ` → deployment` when a Foundry mapping applies. Used in route events, labels, /status, and stops. */
+export function modelLabel(config: WorkflowConfig, provider: string, model: string): string {
+  const id = piModelId(config, provider, model);
+  return id === model ? `${provider}/${model}` : `${provider}/${model} → ${id}`;
+}
+
+const VERSION_DIGITS = /\d+/g;
+const MODEL_FAMILIES = ["gpt", "grok", "claude", "gemini", "llama", "mistral", "qwen", "deepseek", "phi"];
+
+/** Heuristic: the deployment name reads like a different model or version than the key it is mapped from. */
+function looksLikeDifferentModel(model: string, deployment: string): boolean {
+  const wanted = model.match(VERSION_DIGITS) ?? [];
+  const given = deployment.match(VERSION_DIGITS) ?? [];
+  if (given.length > 0 && !wanted.every((digits, index) => given[index] === digits)) return true;
+  const family = (name: string) => MODEL_FAMILIES.find((item) => new RegExp(`(^|[^a-z])${item}([^a-z]|$)`, "i").test(name));
+  const a = family(model);
+  const b = family(deployment);
+  return !!a && !!b && a !== b;
+}
+
+/**
+ * Foundry prices follow the deployment first, then the model: a pricing row for the deployment name wins and is also
+ * used for the model name; otherwise the model's row is also used for the deployment name. Pi reports usage under the
+ * deployment name, so both names must price the same. Warns when a mapped deployment's name suggests a different model.
+ */
+function applyDeploymentPricing(config: WorkflowConfig, warnings: string[]): void {
+  const map = config.providers.foundry?.deployments;
+  if (!map) return;
+  let rows = config.pricing;
+  for (const [model, deployment] of Object.entries(map)) {
+    if (model === deployment) continue;
+    const depRows = rows.filter((row) => row.provider === "foundry" && row.model === deployment);
+    const modelRows = rows.filter((row) => row.provider === "foundry" && row.model === model);
+    if (depRows.length > 0) rows = [...rows.filter((row) => !modelRows.includes(row)), ...depRows.map((row) => ({ ...row, model }))];
+    else {
+      if (modelRows.length > 0) rows = [...rows, ...modelRows.map((row) => ({ ...row, model: deployment }))];
+      if (looksLikeDifferentModel(model, deployment)) {
+        warnOnce(warnings, `providers.foundry.deployments: ${deployment} is mapped from ${model} but its name suggests a different model or version. Add a pricing row for foundry/${deployment} so its cost is right.`);
+      }
+    }
   }
-  const defined = builtIn();
-  if (defined.length > 0 || tier === "deterministic" || tier === "advisor") return defined;
-  // Standalone jobs run on the direct tier's models when nothing else applies.
-  if (tier === "batch") return tierCandidates(config, "cheap");
-  // Ticket tiers with nothing usable run on the general tier of the same strength.
-  return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+  config.pricing = rows;
 }
 
 /**
@@ -1149,16 +1346,4 @@ export function unpricedTierModels(config: WorkflowConfig): string[] {
     }
   }
   return [...out];
-}
-
-/** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */
-export function modelNameFor(config: WorkflowConfig, provider: ProviderId, tier: Tier): string {
-  if (provider === "foundry") {
-    const deployments = config.providers.foundry?.deployments;
-    if (tier === "cheap" || tier === "deterministic") {
-      return deployments?.cheap ?? deployments?.classifier ?? "";
-    }
-    return deployments?.reasoning ?? "";
-  }
-  return config.providers[provider]?.model ?? "";
 }

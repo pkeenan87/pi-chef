@@ -5,7 +5,7 @@ import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
-import { announce, availability } from "./routing.js";
+import { announce, availability, candidateCheck } from "./routing.js";
 
 /** Redacted, size-capped task context for the advisor: request, plan, classification, last failure, diff stat. */
 async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined): Promise<string> {
@@ -49,6 +49,7 @@ export function advisor(ctx: WorkflowContext, question: string): Promise<Command
       config: ctx.config,
       table: ctx.store.readMetrics(),
       availability: await availability(ctx),
+      candidateCheck: candidateCheck(ctx),
       budgetRemainingUsd: budgetRemainingUsd(ctx, taskId),
       quota: quotaState(ctx),
       rng: ctx.rng,
