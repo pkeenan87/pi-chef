@@ -158,9 +158,12 @@ pricing:
   - { provider: anthropic, model: claude-opus-4-8, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25, cacheReadPerMillionUsd: 0.50, cacheWritePerMillionUsd: 6.25 }
   - { provider: anthropic, model: claude-fable-5-1, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50, cacheReadPerMillionUsd: 0.25, cacheWritePerMillionUsd: 12.5 }
   - { provider: xai, model: grok-4.7, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 6, cacheReadPerMillionUsd: 0.5, cacheWritePerMillionUsd: 0 }
-  # Per-token Foundry deployments (placeholders)
-  - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
-  - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }
+  # Per-token Foundry deployments: the fallback when an account login does not work. Billed per token, so no quota
+  # rows. Azure list prices; verify against your Azure rate card. Rename `model` to your deployment names.
+  - { provider: foundry, model: "gpt-6.1-sol", effectiveFrom: "2026-10-16", inputPerMillionUsd: 2, outputPerMillionUsd: 10, cacheReadPerMillionUsd: 0.10 }
+  - { provider: foundry, model: gpt-6-luna, effectiveFrom: "2026-10-16", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.50, cacheReadPerMillionUsd: 0.01 }
+  - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-10-16", inputPerMillionUsd: 10, outputPerMillionUsd: 50, cacheReadPerMillionUsd: 1 }
+  - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-10-16", inputPerMillionUsd: 2, outputPerMillionUsd: 6, cacheReadPerMillionUsd: 0.50 }
 
 # Subscription quota (ranking only). The subscription rows above are $0, so without this the selector
 # would rank Haiku and Opus the same on cost. A shadow price (USD per million tokens, any token kind)
