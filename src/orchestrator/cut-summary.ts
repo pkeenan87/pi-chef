@@ -53,6 +53,7 @@ export function parseSummaries(text: string, names: string[]): Map<string, strin
 export async function summarizeCutFiles(ctx: WorkflowContext, taskId: string, files: CutFile[]): Promise<Map<string, string>> {
   const none = new Map<string, string>();
   if (files.length === 0 || !ctx.config.advisors.summarizeCut || !ctx.chat) return none;
+  if (ctx.shutdown.signal.aborted) return none;
   if (budgetState(ctx, taskId).status !== "ok") return none;
   const selection = selectCandidate({
     tier: "batch",
@@ -74,17 +75,23 @@ export async function summarizeCutFiles(ctx: WorkflowContext, taskId: string, fi
   const timeout = AbortSignal.timeout(ctx.config.advisors.timeoutMs);
   const signal = AbortSignal.any([ctx.shutdown.signal, timeout]);
   const ledger = (usage: Parameters<typeof record>[6], outcome: "success" | "failure") => record(ctx, taskId, phase, "batch", candidate.provider, candidate.model, usage, outcome, 0, "batch summary");
+  let response: Awaited<ReturnType<typeof ctx.chat>>;
   try {
-    const response = await ctx.chat(candidate, { messages: [{ role: "system", content: SYSTEM }, { role: "user", content: user }], maxTokens: MAX_TOKENS, signal });
-    const parsed = parseSummaries(response.text, listed.map((file) => file.name));
-    ledger(response.usage, parsed ? "success" : "failure");
-    await ctx.store.bumpMetric("summary", "batch", !!parsed, ctx.now(), candidate);
-    return parsed ?? none;
+    response = await ctx.chat(candidate, { messages: [{ role: "system", content: SYSTEM }, { role: "user", content: user }], maxTokens: MAX_TOKENS, signal });
   } catch {
     // It may or may not have been billed: unknown, never zero.
     ledger(emptyUsage(), "failure");
     return none;
   }
+  const parsed = parseSummaries(response.text, listed.map((file) => file.name));
+  try {
+    ledger(response.usage, parsed ? "success" : "failure");
+    await ctx.store.bumpMetric("summary", "batch", !!parsed, ctx.now(), candidate);
+  } catch {
+    // The call was made and is ledgered at most once (never again as a failure). The summary is optional: keep the bare list.
+    return none;
+  }
+  return parsed ?? none;
 }
 
 /** `clipDiff`, and when files were cut, the note carries a one-line summary of each instead of only their names. */

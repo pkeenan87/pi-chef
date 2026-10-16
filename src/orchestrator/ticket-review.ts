@@ -257,7 +257,7 @@ export async function reviewTicket(ctx: WorkflowContext, state: TaskState, ticke
   const reviewer = label(decision);
 
   const { text: diffText } = await clipDiffSummarized(ctx, state.taskId, await ticketDiff(ctx), ctx.config.advisors.maxDiffChars);
-  const found = await availableAdvisors(ctx);
+  const found = await availableAdvisors(ctx, state.taskId, state.classification?.task_type ?? "general");
   const advisors = advisorsFor({ difficulty: ticketDifficulty(ticket), implementerProvider: run.provider ?? "", candidates: found.candidates });
   const packet = advisorPacket(ticket, diffText);
 
@@ -302,13 +302,14 @@ export async function reviewTicket(ctx: WorkflowContext, state: TaskState, ticke
       rationale = `${rationale} (The advisors' answers could not be weighed: ${second.error ?? "the call failed"}.)`.slice(0, 1600);
     }
   }
+  const skippedNote = [consultation.skipped && advisors.length > 0 ? consultation.skipped : "", ...found.notes].filter(Boolean).join("; ");
   const record: TicketReviewRecord = {
     ...base,
     reviewer: first.by,
     verdict,
     findings: finalFindings,
     advisors: consultation.results,
-    ...(consultation.skipped && advisors.length > 0 ? { advisorsSkipped: consultation.skipped } : {}),
+    ...(skippedNote ? { advisorsSkipped: skippedNote } : {}),
     rationale: redact(rationale).slice(0, 1600),
     costUsd: { review: reviewCost, advisors: consultation.costUsd },
   };

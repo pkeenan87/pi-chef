@@ -83,6 +83,32 @@ describe("plan_consult", () => {
     expect(textOf(again)).toContain("duplicate events");
   });
 
+  it("never calls an advisor the org allowlist excludes", async () => {
+    const { calls, consult } = await setup({ mutate: (config) => { config.proprietaryCode = true; config.orgProviderAllowlist = ["anthropic"]; } });
+    await call(consult, { tickets: [ticket("01")], questions }, headless);
+    expect(calls.map((item) => item.model)).toEqual(["claude-fable-5-1"]);
+  });
+
+  it("a changed draft consults again (at most maxPlanConsults times); the same draft never does", async () => {
+    const { app, calls, consult } = await setup();
+    await call(consult, { tickets: [ticket("01")], questions }, headless);
+    const first = calls.length;
+    const changed = await call(consult, { tickets: [ticket("01", { whatToBuild: "Users retry a failed ingest, with a cap." })], questions }, headless);
+    expect(calls.length).toBe(first * 2);
+    expect(textOf(changed)).not.toContain("already consulted");
+    expect(app.store.load(app.activeTaskId()!)!.planning!.consult!.consults).toBe(2);
+    const third = await call(consult, { tickets: [ticket("01", { whatToBuild: "A third, different draft." })], questions }, headless);
+    expect(calls.length).toBe(first * 2);
+    expect(textOf(third)).toContain("most times allowed");
+  });
+
+  it("two parallel calls pay once", async () => {
+    const { calls, consult } = await setup();
+    const [a, b] = await Promise.all([call(consult, { tickets: [ticket("01")], questions }, headless), call(consult, { tickets: [ticket("01")], questions }, headless)]);
+    expect(calls).toHaveLength(2);
+    expect(textOf(a)).toBe(textOf(b));
+  });
+
   it("validates the tickets and the number of questions, and only works after plan_spec", async () => {
     const { consult } = await setup();
     await expect(call(consult, { tickets: [ticket("01", { acceptanceCriteria: [] })], questions }, headless)).rejects.toThrow(/acceptance criterion/);
@@ -101,6 +127,24 @@ describe("plan_tickets with advisors", () => {
     await call(consult, { tickets: [ticket("01")], questions }, headless);
     await expect(call(tickets, { tickets: [ticket("01")] }, headless)).rejects.toThrow(/advisorResolution is required/);
     await expect(call(tickets, { tickets: [ticket("01")], advisorResolution: "   " }, headless)).rejects.toThrow(/advisorResolution is required/);
+  });
+
+  it("refuses tickets that changed since the consult, unless the change is waived with a reason", async () => {
+    const { app, consult, tickets } = await setup();
+    await call(consult, { tickets: [ticket("01")], questions }, headless);
+    const edited = [ticket("01", { acceptanceCriteria: ["retry works", "retry is capped"] })];
+    await expect(call(tickets, { tickets: edited, advisorResolution: "fine" }, headless)).rejects.toThrow(/The tickets changed since plan_consult; call plan_consult again for this draft/);
+    await expect(call(tickets, { tickets: edited, reconsultWaived: true }, headless)).rejects.toThrow(/advisorResolution is required/);
+    await call(tickets, { tickets: edited, advisorResolution: "Only added a criterion; no design change.", reconsultWaived: true }, headless);
+    expect(app.store.load(app.activeTaskId()!)!.plan!.advisorReview!.reconsultWaived).toBe(true);
+    expect(readFileSync(path.join(planDir(app), "plan.md"), "utf8")).toContain("waived a new consult");
+  });
+
+  it("accepts the consulted tickets unchanged without a waiver", async () => {
+    const { app, consult, tickets } = await setup();
+    await call(consult, { tickets: [ticket("01")], questions }, headless);
+    await call(tickets, { tickets: [ticket("01")], advisorResolution: "ok" }, headless);
+    expect(app.store.load(app.activeTaskId()!)!.plan!.advisorReview!.reconsultWaived).toBeUndefined();
   });
 
   it("does not require them when no advisor is available, or when advisors.plan is off", async () => {

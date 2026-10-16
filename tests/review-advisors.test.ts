@@ -209,6 +209,21 @@ describe("/review advisors", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("never calls an advisor the org allowlist excludes", async () => {
+    const t = await setup({
+      tickets: [sampleTicket("01", { difficulty: "high" })],
+      mutate: (config) => {
+        config.proprietaryCode = true;
+        config.orgProviderAllowlist = ["anthropic"];
+      },
+    });
+    const result = await t.app.review();
+    expect(result.ok, result.text).toBe(true);
+    expect(t.calls.filter((call) => call.provider === "openai" || call.provider === "foundry")).toEqual([]);
+    expect(advisorCalls(t).map((call) => call.model)).toEqual(["claude-fable-5-1"]);
+    expect(reportOf(result).modelReview!.advisorsSkipped).toContain("openai/gpt-6-astra skipped: org_allowlist");
+  });
+
   it("a medium ticket consults one advisor from another vendor, a low ticket none", async () => {
     const medium = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
     await medium.app.review();

@@ -60,6 +60,7 @@ export function compactionPrompt(input: CompactionInput): string {
 }
 
 export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn, input: CompactionInput): Promise<CompactionSummary | undefined> {
+  if (ctx.shutdown.signal.aborted || input.signal?.aborted) return undefined;
   const state = active(ctx);
   const taskId = state?.taskId ?? SESSION_TASK_ID;
   if (budgetState(ctx, state?.taskId).status === "hard") return undefined;
@@ -79,8 +80,9 @@ export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn,
   const candidate = selection.candidate;
   if (!candidate) return undefined;
   const ledger = (usage: TokenUsage, outcome: "success" | "failure") => record(ctx, taskId, state?.phase ?? "IDLE", tier, candidate.provider, candidate.model, usage, outcome, 0, "compaction");
+  let response: Awaited<ReturnType<ChatFn>>;
   try {
-    const response = await chat(candidate, {
+    response = await chat(candidate, {
       messages: [
         { role: "system", content: SYSTEM },
         { role: "user", content: redact(compactionPrompt(input)) },
@@ -88,13 +90,18 @@ export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn,
       maxTokens: MAX_TOKENS,
       signal: input.signal,
     });
-    const summary = response.text.trim();
+  } catch {
+    // It may or may not have been billed: unknown, never zero.
+    ledger(emptyUsage(), "failure");
+    return undefined;
+  }
+  const summary = response.text.trim();
+  try {
     const entry = ledger(response.usage, summary ? "success" : "failure");
     if (!summary) return undefined;
     return { summary, usage: response.usage, provider: candidate.provider, model: candidate.model, record: entry };
   } catch {
-    // It may or may not have been billed: unknown, never zero.
-    ledger(emptyUsage(), "failure");
+    // Ledgered at most once; Pi compacts with the session model.
     return undefined;
   }
 }

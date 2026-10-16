@@ -113,6 +113,7 @@ export function advisorReviewLines(review: PlanAdvisorReview | undefined): strin
   const lines = ["## Advisor review", ""];
   if (review.note) lines.push(review.note);
   for (const opinion of review.consult?.results ?? []) lines.push(...opinionLines(opinion));
+  if (review.reconsultWaived) lines.push("", "The tickets changed after the advisors were consulted; the planning model waived a new consult (see its resolution).");
   if (review.resolution) lines.push("", `Opus resolution: ${review.resolution}`);
   lines.push("", "Advisors advise; approval is yours.", "");
   return lines;

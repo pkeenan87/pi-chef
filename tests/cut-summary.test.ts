@@ -66,3 +66,26 @@ describe("batch summaries of cut files", () => {
     expect(parseSummaries("[1]", ["a.ts"])).toBeUndefined();
   });
 });
+
+describe("batch summaries: shutdown and ledger errors", () => {
+  it("make no call and no ledger row once the session is shutting down", async () => {
+    const t = await setup();
+    t.ctx.shutdown.abort();
+    const clipped = await clipDiffSummarized(t.ctx, t.taskId, diff, 3000);
+    expect(clipped.summarized).toBe(false);
+    expect(t.calls).toHaveLength(0);
+    expect(t.ctx.store.readLedger().filter((item) => item.reason === "batch summary")).toHaveLength(0);
+  });
+
+  it("a ledger error after the call is not ledgered a second time", async () => {
+    const t = await setup();
+    let attempts = 0;
+    t.ctx.store.appendLedger = () => {
+      attempts += 1;
+      throw new Error("disk full");
+    };
+    const clipped = await clipDiffSummarized(t.ctx, t.taskId, diff, 3000);
+    expect(clipped.summarized).toBe(false);
+    expect(attempts).toBe(1);
+  });
+});

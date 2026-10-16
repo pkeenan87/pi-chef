@@ -357,6 +357,10 @@ export interface PlanConsult {
   /** Why no advisor was called (budget, no connection). */
   skipped?: string;
   at: string;
+  /** sha256 of the spec and the canonical draft tickets that were consulted on. A different hash means the draft changed. */
+  hash?: string;
+  /** Consults paid for this draft version (a changed draft may consult again, up to `advisors.maxPlanConsults`). */
+  consults?: number;
 }
 
 /** The advisor review kept on a plan: what they said, and how the planning model resolved it. */
@@ -366,6 +370,8 @@ export interface PlanAdvisorReview {
   resolution?: string;
   /** Why there was no consult (none available, budget). */
   note?: string;
+  /** The tickets changed after the consult and the planning model said why no new advice was needed. */
+  reconsultWaived?: boolean;
 }
 
 /** Where one ticket stands during /build. */

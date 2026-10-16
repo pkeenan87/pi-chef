@@ -285,6 +285,32 @@ describe("per-ticket review in /build", () => {
     expect(review.advisorsSkipped).toContain("nearly spent");
   });
 
+  it("never calls an advisor the org allowlist excludes, and says why", async () => {
+    const t = await setup({
+      tickets: [sampleTicket("01", { difficulty: "high" })],
+      mutate: (config) => {
+        config.proprietaryCode = true;
+        config.orgProviderAllowlist = ["anthropic"];
+      },
+    });
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(t.calls.filter((call) => call.provider === "openai" || call.provider === "foundry")).toEqual([]);
+    expect(t.calls.map((call) => call.model).sort()).toEqual(["claude-fable-5-1", OPUS, OPUS].sort());
+    const review = t.load().ticketRuns!["01"]!.reviews![0]!;
+    expect(review.advisors.map((item) => item.model)).toEqual(["claude-fable-5-1"]);
+    expect(review.advisorsSkipped).toContain("openai/gpt-6-astra skipped: org_allowlist");
+  });
+
+  it("skips an advisor whose circuit is open", async () => {
+    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })] });
+    for (let i = 0; i < 5; i += 1) await t.app.store.bumpMetric("general", "advisor", false, t.ctx.now(), { provider: "openai", model: "gpt-6-astra" });
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(t.calls.some((call) => call.provider === "openai")).toBe(false);
+    expect(t.load().ticketRuns!["01"]!.reviews![0]!.advisorsSkipped).toContain("openai/gpt-6-astra skipped: circuit_open");
+  });
+
   it("does not review when advisors.tickets is false or there is no model connection", async () => {
     for (const options of [{ mutate: (config: ReturnType<typeof tieredConfig>) => void (config.advisors.tickets = false) }, { chat: false }]) {
       const t = await setup(options);

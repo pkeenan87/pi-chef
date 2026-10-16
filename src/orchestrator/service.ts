@@ -1,6 +1,6 @@
 import path from "node:path";
 import { loadConfig, type WorkflowConfig } from "../config.js";
-import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type TicketTier, type TokenUsage } from "../domain.js";
+import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
@@ -186,8 +186,8 @@ export class Workflow {
   }
 
   /** What plan_tickets needs from the advisor consult (throws when it is missing), as the review to store on the plan. */
-  adviceForTickets(resolution: string | undefined) {
-    return adviceForTickets(this.ctx, resolution);
+  adviceForTickets(resolution: string | undefined, tickets: Ticket[], reconsultWaived?: boolean) {
+    return adviceForTickets(this.ctx, resolution, tickets, reconsultWaived);
   }
 
   /** The draft was sent back for changes: the revised draft may consult again. */

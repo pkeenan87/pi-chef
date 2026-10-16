@@ -88,10 +88,8 @@ routing:
   attemptOverheadUsd: 0.02
 
 # The main chat session is a normal Pi model, not a router. Compaction summaries come from a cheap model.
-session:
-  model: anthropic/claude-opus-5-5   # provider/id; set at session start unless a /build ticket model is pending
-  pin: true                          # false leaves the model you picked with /model alone
-  compactionTier: cheap              # cheap, standard or premium; on any failure Pi compacts with the session model
+# session.model / session.compactionTier are user-config-only (~/.pi/agent/cost-workflow.yaml); a project may only set
+# session.pin: false. Defaults: anthropic/claude-opus-5-5, pinned at session start, compaction on the cheap tier.
 
 workers:
   tokenBudget: 8000
@@ -108,10 +106,8 @@ workers:
 # Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed per token on
 # an API key (see the api-key pricing rows).
 advisors:
-  tickets: true         # false turns the per-ticket review (and its advisors) off
-  plan: true            # false skips plan_consult (and the advisorResolution plan_tickets would ask for)
+  # tickets / plan / summarizeCut default to true; a project can only turn them off (false), never on.
   adHocMinLines: 400    # /review on a branch with no plan: Astra only above this many changed lines
-  summarizeCut: true    # the batch tier (Luna) writes one line per file a diff clip cut, in advisor packets and review parts
   timeoutMs: 180000     # per advisor or review call
   maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
   maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)

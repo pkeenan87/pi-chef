@@ -128,6 +128,32 @@ describe("consultAdvisors", () => {
     expect(failed.some((row) => row.actualUsd === null)).toBe(true);
   });
 
+  it("one advisor's ledger error never loses another's answer", async () => {
+    const t = await setup();
+    const { chat } = fakeChat(() => OPINION);
+    t.ctx.chat = chat;
+    const real = t.ctx.store.appendLedger.bind(t.ctx.store);
+    t.ctx.store.appendLedger = (entry) => {
+      if (entry.provider === "openai") throw new Error("disk full");
+      real(entry);
+    };
+    const result = await consultAdvisors(t.ctx, { purpose: "ticket review", packet: "P", questions: ["Q"], candidates: [astra, fable], taskId: t.taskId });
+    expect(result.results[0]).toMatchObject({ provider: "openai", error: "disk full" });
+    expect(result.results[1]).toMatchObject({ provider: "anthropic", verdict: "agree" });
+  });
+
+  it("skips without a call or a ledger row once the session is shutting down", async () => {
+    const t = await setup();
+    const fake = fakeChat(() => OPINION);
+    t.ctx.chat = fake.chat;
+    const before = t.ctx.store.readLedger().length;
+    t.ctx.shutdown.abort();
+    const result = await consultAdvisors(t.ctx, { purpose: "ticket review", packet: "P", questions: ["Q"], candidates: [astra, fable], taskId: t.taskId });
+    expect(result.skipped).toContain("ending");
+    expect(fake.calls).toHaveLength(0);
+    expect(t.ctx.store.readLedger()).toHaveLength(before);
+  });
+
   it("times out a slow advisor", async () => {
     const t = await setup((config) => void (config.advisors.timeoutMs = 1000));
     const { chat } = fakeChat(
@@ -165,6 +191,18 @@ describe("consultAdvisors", () => {
 });
 
 describe("availableAdvisors", () => {
+  it("applies the org allowlist, the proprietary-code policy, open circuits and the budget, and notes each", async () => {
+    const allowlisted = await setup((config) => void (config.orgProviderAllowlist = ["anthropic"]));
+    const found = await availableAdvisors(allowlisted.ctx, allowlisted.taskId);
+    expect(found.candidates).toEqual([fable]);
+    expect(found.notes).toEqual(["openai/gpt-6-astra skipped: org_allowlist", "foundry/gpt-6-astra skipped: org_allowlist"]);
+    const proprietary = await setup((config) => void (config.proprietaryCode = true));
+    expect((await availableAdvisors(proprietary.ctx, proprietary.taskId)).notes.every((note) => note.endsWith("proprietary_code_policy"))).toBe(true);
+    const spent = await setup((config) => void (config.budgets.taskUsd = 1));
+    record(spent.ctx, spent.taskId, "IMPLEMENTING", "standard", "anthropic", "claude-sonnet-5-5", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, requests: 1 }, "success", 0, "earlier");
+    expect((await availableAdvisors(spent.ctx, spent.taskId)).notes.some((note) => note.endsWith("over_budget"))).toBe(true);
+  });
+
   it("skips advisors whose provider is not signed in and notes it", async () => {
     const t = await setup();
     t.ctx.authProbe = { inspect: async (provider) => ({ provider, status: provider === "openai" ? "missing" : "ready", method: "oauth", detail: provider === "openai" ? "not signed in" : "ready" }) };

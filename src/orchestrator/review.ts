@@ -279,13 +279,14 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
     progress(`started · ${branch} against ${ref} · ${ctx.config.setup.length} setup step(s), ${checks.length} check(s) · model ${decision.candidate ? `${decision.provider}/${decision.model}` : "off"}`);
     const diff = redact(rawDiff);
     // Which advisors this branch gets, by its plan's ticket difficulty (or its size when there is no plan).
-    const pick = ctx.config.review.model && ctx.chat && decision.candidate
+    const foundAdvisors = ctx.config.review.model && ctx.chat && decision.candidate ? await availableAdvisors(ctx, state?.taskId, classification.task_type) : undefined;
+    const pick = foundAdvisors
       ? reviewAdvisorsFor({
           maxDifficulty: planMaxDifficulty(plan),
           changedLines: changedLineCount(changedFiles(diff)),
           adHocMinLines: ctx.config.advisors.adHocMinLines,
           reviewerProvider: decision.provider,
-          candidates: (await availableAdvisors(ctx)).candidates,
+          candidates: foundAdvisors.candidates,
         })
       : undefined;
     const report = await reviewDiff({
@@ -306,7 +307,8 @@ export function review(ctx: WorkflowContext): Promise<CommandResult> {
       const advice = pick.advisors.length === 0 ? {} : reviewed
         ? await adviseReview(ctx, { taskId, taskType: classification.task_type, decision, candidates: reviewCandidates(ctx, decision), review: modelReview, plan: reviewPlan, diff: report.diff ?? diff, advisors: pick.advisors, progress })
         : { advisorsSkipped: "the model pass produced no result" };
-      report.modelReview = { ...modelReview, ...advice, advisorRule: rule };
+      const skippedNote = [(advice as { advisorsSkipped?: string }).advisorsSkipped, ...(foundAdvisors?.notes ?? [])].filter(Boolean).join("; ");
+      report.modelReview = { ...modelReview, ...advice, ...(skippedNote ? { advisorsSkipped: skippedNote } : {}), advisorRule: rule };
     } else report.modelReview = modelReview;
     report.elapsedMs = ctx.now().getTime() - started;
     const setupConfigured = ctx.config.setup.length > 0;

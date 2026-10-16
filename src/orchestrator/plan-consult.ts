@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { WorkflowError, ticketDifficulty, type PlanAdvisorReview, type PlanConsult, type Ticket } from "../domain.js";
 import { redact } from "../redact.js";
 import { advisorsFor, availableAdvisors, consultAdvisors, type AdvisorCandidate } from "../review/advisors.js";
@@ -16,11 +17,23 @@ import { checkTickets, draftVersion, requireTicketStage } from "./ticket-plan.js
 
 const label = (item: { provider: string; model: string }) => `${item.provider}/${item.model}`;
 
-/** Every advisor that can be called now, one per provider; empty when the plan consult is off or there is no model connection. */
-export async function planAdvisors(ctx: WorkflowContext): Promise<AdvisorCandidate[]> {
-  if (!ctx.config.advisors.plan || !ctx.chat) return [];
-  const found = await availableAdvisors(ctx);
-  return advisorsFor({ difficulty: "high", implementerProvider: "", candidates: found.candidates });
+/** Every advisor that can be called now, one per provider, and why the others were skipped; empty when the plan consult is off or there is no model connection. */
+export async function planAdvisors(ctx: WorkflowContext, taskId?: string): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
+  if (!ctx.config.advisors.plan || !ctx.chat) return { candidates: [], notes: [] };
+  const found = await availableAdvisors(ctx, taskId);
+  return { candidates: advisorsFor({ difficulty: "high", implementerProvider: "", candidates: found.candidates }), notes: found.notes };
+}
+
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(canonical)
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)).map(([key, item]) => [key, canonical(item)]))
+      : value;
+
+/** sha256 of the spec and the canonical ticket JSON: what the advisors were (or would be) shown. */
+export function consultHash(spec: string, tickets: Ticket[]): string {
+  return createHash("sha256").update(spec).update("\0").update(JSON.stringify(canonical(tickets))).digest("hex");
 }
 
 /** The draft tickets in a compact form: what is needed to judge the design, not every field. */
@@ -48,22 +61,45 @@ export interface ConsultOutcome {
   consult: PlanConsult;
   /** True when this draft was already consulted and the stored answers are returned without a model call. */
   repeat: boolean;
+  /** True when the draft changed but the limit of consults per draft version was reached, so the latest answers are returned. */
+  capped?: boolean;
 }
 
-/** plan_consult: validates the draft tickets, consults every available advisor once per draft, and stores the answers on the task. */
+/** One consult at a time per task: a parallel second call gets the first one's result instead of paying again. */
+const inflight = new Map<string, Promise<ConsultOutcome>>();
+
+/**
+ * plan_consult: validates the draft tickets and consults every available advisor. A repeat for the same spec and
+ * tickets returns the stored answers; a changed draft consults again (a deliberate paid call), at most
+ * `advisors.maxPlanConsults` times per draft version.
+ */
 export async function consultPlan(ctx: WorkflowContext, input: { tickets: unknown; questions: unknown }): Promise<ConsultOutcome> {
   requireTicketStage(ctx);
+  const taskId = activePlanning(ctx)!.task.taskId;
+  const running = inflight.get(taskId);
+  if (running) return running;
+  const started = runConsult(ctx, input).finally(() => inflight.delete(taskId));
+  inflight.set(taskId, started);
+  return started;
+}
+
+async function runConsult(ctx: WorkflowContext, input: { tickets: unknown; questions: unknown }): Promise<ConsultOutcome> {
   const found = activePlanning(ctx)!;
   const check = checkTickets(ctx, input.tickets);
   if (check.errors.length) throw new WorkflowError("TICKETS_INVALID", `Tickets rejected. Fix these and call plan_consult again:\n- ${check.errors.join("\n- ")}`);
   const version = draftVersion(found.task);
+  const spec = ctx.store.readText(found.task.taskId, SPEC_FILE) ?? "";
+  const hash = consultHash(spec, check.tickets);
   const stored = found.task.planning!.consult;
-  if (stored && stored.version === version) return { consult: stored, repeat: true };
+  const same = stored && stored.version === version ? stored : undefined;
+  if (same && (same.hash === undefined || same.hash === hash)) return { consult: same, repeat: true };
+  if (same && (same.consults ?? 1) >= ctx.config.advisors.maxPlanConsults) return { consult: same, repeat: true, capped: true };
   const questions = (Array.isArray(input.questions) ? input.questions : []).filter((item): item is string => typeof item === "string").map((item) => redact(item.trim()).slice(0, 400)).filter(Boolean);
   if (questions.length < 2 || questions.length > 3) throw new WorkflowError("QUESTIONS_INVALID", "Ask 2 or 3 specific questions about the riskiest parts of the plan.");
-  const spec = ctx.store.readText(found.task.taskId, SPEC_FILE) ?? "";
-  const asked = await consultAdvisors(ctx, { purpose: "plan", packet: planPacket(spec, check.tickets), questions, candidates: await planAdvisors(ctx), taskId: found.task.taskId });
-  const consult: PlanConsult = { version, questions, results: asked.results, ...(asked.skipped ? { skipped: asked.skipped } : {}), at: iso(ctx) };
+  const available = await planAdvisors(ctx, found.task.taskId);
+  const asked = await consultAdvisors(ctx, { purpose: "plan", packet: planPacket(spec, check.tickets), questions, candidates: available.candidates, taskId: found.task.taskId });
+  const skipped = asked.skipped ? [asked.skipped, ...available.notes].join("; ") : undefined;
+  const consult: PlanConsult = { version, questions, results: asked.results, ...(skipped ? { skipped } : {}), at: iso(ctx), hash, consults: (same?.consults ?? (same ? 1 : 0)) + 1 };
   await ctx.store.update(found.task.taskId, "plan consult", (task) => (task.planning ? { ...task, planning: { ...task.planning, consult } } : task));
   return { consult, repeat: false };
 }
@@ -84,18 +120,23 @@ export async function clearConsult(ctx: WorkflowContext): Promise<void> {
  * consult exists for this draft and the model has written its resolution. With none available, or when the budget
  * skipped them, nothing is required and the plan carries a note instead. Off (`advisors.plan: false`): no section.
  */
-export async function adviceForTickets(ctx: WorkflowContext, resolution: string | undefined): Promise<PlanAdvisorReview | undefined> {
+export async function adviceForTickets(ctx: WorkflowContext, resolution: string | undefined, tickets: Ticket[], reconsultWaived = false): Promise<PlanAdvisorReview | undefined> {
   if (!ctx.config.advisors.plan) return undefined;
   const found = activePlanning(ctx)!;
   const consult = found.task.planning!.consult?.version === draftVersion(found.task) ? found.task.planning!.consult : undefined;
   const text = redact((resolution ?? "").trim()).slice(0, 3000);
   if (!consult) {
-    if ((await planAdvisors(ctx)).length === 0) return { note: "Advisors were not consulted: none is available." };
+    if ((await planAdvisors(ctx, found.task.taskId)).candidates.length === 0) return { note: "Advisors were not consulted: none is available." };
     throw new WorkflowError("CONSULT_REQUIRED", "Call plan_consult first: put 2-3 specific questions about the riskiest parts of the draft to the advisors, resolve their answers, then call plan_tickets with advisorResolution.");
   }
   if (consult.skipped) return { consult, note: `Advisors were not consulted: ${consult.skipped}.`, ...(text ? { resolution: text } : {}) };
   if (!text) throw new WorkflowError("RESOLUTION_REQUIRED", "advisorResolution is required: say which advisor points you accepted, which you rejected, and why. Then call plan_tickets again.");
-  return { consult, resolution: text };
+  // The advisors judged a specific spec and ticket list; changed tickets need new advice or a stated reason they do not.
+  const changed = consult.hash !== undefined && consult.hash !== consultHash(ctx.store.readText(found.task.taskId, SPEC_FILE) ?? "", tickets);
+  if (changed && !reconsultWaived) {
+    throw new WorkflowError("RECONSULT_REQUIRED", "The tickets changed since plan_consult; call plan_consult again for this draft (or explain in advisorResolution why the change needs no new advice and set `reconsultWaived: true`).");
+  }
+  return { consult, resolution: text, ...(changed ? { reconsultWaived: true } : {}) };
 }
 
 /** The tool result for Opus: the answers and concerns, then the instruction to resolve. */
@@ -117,7 +158,7 @@ export function consultResultText(outcome: ConsultOutcome): string {
     );
   }
   return [
-    outcome.repeat ? "This draft was already consulted; these are the stored answers (no new model calls were made)." : `Advisors answered ${consult.questions.length} question(s).`,
+    outcome.capped ? "This draft was already consulted the most times allowed; these are the latest stored answers for an earlier version of the tickets (no new model calls were made). Resolve them, and if the tickets changed since, set `reconsultWaived: true` in plan_tickets and say why in advisorResolution." : outcome.repeat ? "This draft was already consulted; these are the stored answers (no new model calls were made)." : `Advisors answered ${consult.questions.length} question(s).`,
     "",
     ...body,
     "",

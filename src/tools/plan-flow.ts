@@ -79,6 +79,9 @@ export const PlanTicketsParams = Type.Object({
   advisorResolution: Type.Optional(
     Type.String({ description: "After plan_consult: what you accepted from the advisors, what you rejected, and why. Required whenever advisors were consulted." }),
   ),
+  reconsultWaived: Type.Optional(
+    Type.Boolean({ description: "Set true only when the tickets changed after plan_consult and the change needs no new advice; say why in advisorResolution." }),
+  ),
 });
 
 export const PlanConsultParams = Type.Object({
@@ -91,7 +94,7 @@ export function createPlanConsultTool(getWorkflow: () => Workflow | undefined) {
     name: "plan_consult",
     label: "Plan Consult",
     description:
-      "Put the draft tickets and 2-3 specific questions about the riskiest parts of the plan to the advisors (every available one, in parallel). Returns their answers and concerns. Call once per draft, after plan_spec and before plan_tickets. Only usable while /plan is running.",
+      "Put the draft tickets and 2-3 specific questions about the riskiest parts of the plan to the advisors (every available one, in parallel). Returns their answers and concerns. Call once per draft (a changed draft may consult again, at most twice), after plan_spec and before plan_tickets. Only usable while /plan is running.",
     promptSnippet: "plan_consult: ask the advisors about the draft tickets",
     parameters: PlanConsultParams,
     async execute(_id, params) {
@@ -125,7 +128,7 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       let check = workflow.checkTickets(params.tickets);
       if (check.errors.length) throw new Error(`Tickets rejected. Fix these and call plan_tickets again:\n- ${check.errors.join("\n- ")}`);
       // Advisors were consulted (or could not be): refuses until plan_consult ran and the resolution is written.
-      const advisorReview = await workflow.adviceForTickets(params.advisorResolution);
+      const advisorReview = await workflow.adviceForTickets(params.advisorResolution, check.tickets, params.reconsultWaived);
       let tickets: Ticket[] = check.tickets;
       let edited = false;
       let approve = false;

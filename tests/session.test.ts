@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
 import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
+import { contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string };
@@ -62,9 +62,13 @@ function writeProject(cwd: string, yaml: string): void {
 const OPUS = { provider: "anthropic", id: "claude-opus-5-5" };
 
 describe("session_start pins the session model", () => {
-  async function start(options: { model?: ModelRef; yaml?: string; setModel?: boolean | "throw"; find?: boolean; pending?: ModelRef }) {
+  async function start(options: { model?: ModelRef; yaml?: string; userYaml?: string; setModel?: boolean | "throw"; find?: boolean; pending?: ModelRef }) {
     const cwd = await tempRepo();
     if (options.yaml) writeProject(cwd, options.yaml);
+    if (options.userYaml) {
+      mkdirSync(path.join(process.env.HOME!, ".pi", "agent"), { recursive: true });
+      writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "cost-workflow.yaml"), options.userYaml);
+    }
     const pi = fakePi(options.setModel);
     const notices: string[] = [];
     const ctx = {
@@ -92,8 +96,13 @@ describe("session_start pins the session model", () => {
   });
 
   it("reads session.model from the config", async () => {
-    const { setModelCalls } = await start({ model: OPUS, yaml: "session: { model: openai/gpt-6.1-sol }\n" });
+    const { setModelCalls } = await start({ model: OPUS, userYaml: "session: { model: openai/gpt-6.1-sol }\n" });
     expect(setModelCalls).toEqual([{ provider: "openai", id: "gpt-6.1-sol" }]);
+  });
+
+  it("ignores a project session.model: only the user config picks the session model", async () => {
+    const { setModelCalls } = await start({ model: OPUS, yaml: "session: { model: openai/gpt-6.1-sol }\n" });
+    expect(setModelCalls).toEqual([]);
   });
 
   it("leaves a /build model alone: the pending slot wins", async () => {
@@ -176,9 +185,11 @@ describe("session_before_compact", () => {
   const HAIKU_ONLY = tieredYaml().replace("    - { provider: openai, model: gpt-6-luna }\n    - { provider: anthropic, model: claude-haiku-5-5 }", "    - { provider: anthropic, model: claude-haiku-5-5 }");
   const now = () => new Date("2026-10-14T12:00:00.000Z");
 
-  async function setup(options: { reply?: () => Promise<unknown>; signedIn?: boolean } = {}) {
+  async function setup(options: { reply?: () => Promise<unknown>; signedIn?: boolean; unpriced?: boolean } = {}) {
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: parseConfig(HAIKU_ONLY), now, auth: readyAuth(options.signedIn === false ? "missing" : "ready") });
+    const config = parseConfig(HAIKU_ONLY);
+    if (options.unpriced) config.pricing = config.pricing.filter((row) => row.model !== "claude-haiku-5-5");
+    const app = workflow(cwd, { config, now, auth: readyAuth(options.signedIn === false ? "missing" : "ready") });
     const pi = fakePi();
     bindWorkflow(app);
     const calls: { model: ModelRef; context: { systemPrompt?: string; messages: { content: string }[] }; options?: { maxTokens?: number } }[] = [];
@@ -260,6 +271,24 @@ describe("session_before_compact", () => {
     const entries = app.store.readLedger().filter((item) => item.reason === "compaction");
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ outcome: "failure", actualUsd: null });
+  });
+
+  it("omits usage when the price is unknown instead of reporting $0, and ledgers it once with null", async () => {
+    const { app, run } = await setup({ unpriced: true });
+    const result = await run();
+    expect(result?.compaction?.summary).toBe("Goal: fix src/a.ts. Open: tests.");
+    expect(result?.compaction).not.toHaveProperty("usage");
+    const entries = app.store.readLedger().filter((item) => item.reason === "compaction");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.actualUsd).toBeNull();
+  });
+
+  it("does not call a model or ledger anything when the workflow is shutting down", async () => {
+    const { app, calls, run } = await setup();
+    contextOf(app).shutdown.abort();
+    await expect(run()).resolves.toBeUndefined();
+    expect(calls).toHaveLength(0);
+    expect(app.store.readLedger().filter((item) => item.reason === "compaction")).toHaveLength(0);
   });
 
   it("returns undefined for an empty summary and for an aborted or malformed event, never throwing", async () => {

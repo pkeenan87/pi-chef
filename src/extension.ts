@@ -229,12 +229,15 @@ async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: Exten
     if (!result) return undefined;
     const { input, output, cacheRead, cacheWrite } = result.usage;
     const [i, o, r, w] = [input ?? 0, output ?? 0, cacheRead ?? 0, cacheWrite ?? 0];
+    const cost = result.record.actualUsd;
+    // `usage` is optional in Pi's CompactionResult, and its `cost` cannot say "unknown". Report usage only when the
+    // price is known; otherwise omit it rather than show $0. Our ledger keeps the null either way.
     return {
       compaction: {
         summary: result.summary,
         firstKeptEntryId: preparation.firstKeptEntryId,
         tokensBefore: preparation.tokensBefore,
-        usage: { input: i, output: o, cacheRead: r, cacheWrite: w, totalTokens: i + o + r + w, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: result.record.actualUsd ?? 0 } },
+        ...(cost === null ? {} : { usage: { input: i, output: o, cacheRead: r, cacheWrite: w, totalTokens: i + o + r + w, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } } }),
       },
     };
   } catch {

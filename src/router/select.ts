@@ -68,6 +68,30 @@ function label(candidate: TierCandidate): string {
   return candidate.label ?? `${candidate.provider}/${candidate.model}`;
 }
 
+/**
+ * The hard exclusions every model use shares: the org provider allowlist, the proprietary-code policy, an open
+ * per-model circuit, and the budget. Undefined when the candidate may be used. `price` is its `tierCost` (null when unpriced).
+ */
+export function hardExclusion(input: {
+  config: WorkflowConfig;
+  table: SuccessTable;
+  taskType: string;
+  tier: TierKey;
+  candidate: TierCandidate;
+  price: number | null;
+  at: Date;
+  budgetRemainingUsd?: number;
+}): string | undefined {
+  const { config, candidate, price } = input;
+  const allow = config.orgProviderAllowlist;
+  if (allow.length > 0 && !allow.includes(candidate.provider)) return "org_allowlist";
+  if (config.proprietaryCode && allow.length === 0 && candidate.provider !== "local") return "proprietary_code_policy";
+  if (circuitOpenFor(input.table, input.taskType, modelMetricKey(input.tier, candidate.provider, candidate.model), config.routing.circuitBreakerFailures, input.at)) return "circuit_open";
+  // An unpriced model has unknown cost, so only a known-zero price may pass once the budget is spent.
+  if (input.budgetRemainingUsd !== undefined && (price === null ? input.budgetRemainingUsd <= 0 : price > input.budgetRemainingUsd)) return "over_budget";
+  return undefined;
+}
+
 export function selectCandidate(options: SelectOptions): Selection {
   const { tier, taskType, config, table } = options;
   const at = options.at ?? new Date();
@@ -76,21 +100,14 @@ export function selectCandidate(options: SelectOptions): Selection {
   if (candidates.length === 0) {
     return { tier, considered: [], reason: `no candidates configured for ${tier}`, unpriced: false, blocked: { code: "no_candidates", message: `No models are configured for the ${tier} tier.` } };
   }
-  const allow = config.orgProviderAllowlist;
   const hard = new Map<TierCandidate, string>();
   const soft = new Map<TierCandidate, string>();
   const cost = new Map<TierCandidate, number | null>();
   for (const candidate of candidates) {
     const price = tierCost(config.pricing, candidate.provider, candidate.model, at, config.workers.tokenBudget);
     cost.set(candidate, price);
-    if (allow.length > 0 && !allow.includes(candidate.provider)) hard.set(candidate, "org_allowlist");
-    else if (config.proprietaryCode && allow.length === 0 && candidate.provider !== "local") hard.set(candidate, "proprietary_code_policy");
-    else if (circuitOpenFor(table, taskType, modelMetricKey(tier, candidate.provider, candidate.model), config.routing.circuitBreakerFailures, at)) {
-      hard.set(candidate, "circuit_open");
-    } else if (options.budgetRemainingUsd !== undefined && (price === null ? options.budgetRemainingUsd <= 0 : price > options.budgetRemainingUsd)) {
-      // An unpriced model has unknown cost, so only a known-zero price may pass once the budget is spent.
-      hard.set(candidate, "over_budget");
-    }
+    const excluded = hardExclusion({ config, table, taskType, tier, candidate, price, at, budgetRemainingUsd: options.budgetRemainingUsd });
+    if (excluded) hard.set(candidate, excluded);
     const view = options.availability?.[candidate.provider];
     if (!hard.has(candidate) && view && !view.ok) soft.set(candidate, `unavailable${view.detail ? `: ${view.detail}` : ""}`);
   }

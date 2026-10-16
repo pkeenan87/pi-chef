@@ -175,7 +175,7 @@ export interface WorkflowConfig {
    * than this gets one advisor in /review. `summarizeCut`: when a diff is clipped for an
    * advisor packet or a review part, the batch tier writes a one-line summary of each cut file.
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -213,7 +213,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2 },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -589,6 +589,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
     checkNumber(raw.advisors, "adHocMinLines", where, { min: 0, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxPlanConsults", where, { min: 1, integer: true }, "advisors");
   }
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
@@ -752,6 +753,46 @@ function restrictProject(name: string, user: unknown, project: unknown, warnings
 }
 
 /**
+ * Advisor settings a project may only tighten: switches can only be turned off; limits that raise cost or the data
+ * sent take the lower value (the default when the user sets none); a higher ad-hoc threshold means fewer advisor calls.
+ */
+function restrictAdvisors(user: unknown, project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const u = isRecord(user) ? user : {};
+  const out: Record<string, unknown> = { ...project };
+  const drop = (key: string, why: string) => {
+    warnings.push(`Ignored project advisors.${key}: ${why}.`);
+    delete out[key];
+  };
+  for (const key of ["tickets", "plan", "summarizeCut"] as const) {
+    if (!(key in out)) continue;
+    if (out[key] === true) drop(key, "a project can only turn advisors off");
+  }
+  const base = DEFAULTS.advisors as unknown as Record<string, number>;
+  for (const key of ["maxDiffChars", "maxOutputTokens", "timeoutMs", "maxPlanConsults"] as const) {
+    if (typeof out[key] !== "number") continue;
+    const limit = typeof u[key] === "number" ? u[key] : base[key]!;
+    if (out[key] > limit) drop(key, `a project can only lower it (limit ${limit})`);
+  }
+  if (typeof out.adHocMinLines === "number") {
+    const limit = typeof u.adHocMinLines === "number" ? u.adHocMinLines : DEFAULTS.advisors.adHocMinLines;
+    if (out.adHocMinLines < limit) drop("adHocMinLines", `a project can only raise it (limit ${limit})`);
+  }
+  return out;
+}
+
+/** The session model and compaction tier are user-config-only; a project may only unpin (`pin: false`). */
+function restrictSession(project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(project)) {
+    if (key === "pin" && value === false) out.pin = false;
+    else warnings.push(`Ignored project session.${key}: ${key === "pin" ? "a project can only set pin: false" : "session settings are read from the user config (~/.pi/agent/cost-workflow.yaml) only"}.`);
+  }
+  return out;
+}
+
+/**
  * Layers a project document over a user document. Policy fields follow "user wins / most
  * restrictive"; everything else is merged field-wise with the project overriding.
  */
@@ -765,7 +806,8 @@ export function layerConfigs(
   const merged: Record<string, unknown> = { ...user, ...project };
 
   for (const key of ["models", "tiers", "routing", "session", "workers", "advisors"]) {
-    const value = mergeSection(user[key], project[key]);
+    const projectSection = key === "advisors" ? restrictAdvisors(user.advisors, project.advisors, warnings) : key === "session" ? restrictSession(project.session, warnings) : project[key];
+    const value = mergeSection(user[key], projectSection);
     if (value) merged[key] = value;
     else delete merged[key];
   }
@@ -790,7 +832,9 @@ export function layerConfigs(
     const budgets: Record<string, unknown> = { ...ub, ...pb };
     for (const key of Object.keys(budgets)) {
       if (key === "softWarningRatio" || key === "unknownCallUsd") continue;
-      if (typeof ub[key] === "number" && typeof pb[key] === "number") budgets[key] = Math.min(ub[key], pb[key]);
+      // A project value is compared with the user's, or the default when the user sets none: it can only tighten.
+      const base = typeof ub[key] === "number" ? ub[key] : (DEFAULTS.budgets as unknown as Record<string, unknown>)[key];
+      if (typeof pb[key] === "number" && typeof base === "number") budgets[key] = Math.min(base, pb[key]);
     }
     // A lower estimate for an unknown-cost call would loosen the budget, so a project can only raise it. A project
     // value is compared with the user's, or the default when the user sets none.
@@ -798,8 +842,8 @@ export function layerConfigs(
       budgets.unknownCallUsd = Math.max(typeof ub.unknownCallUsd === "number" ? ub.unknownCallUsd : DEFAULT_UNKNOWN_CALL_USD, pb.unknownCallUsd);
     }
     // A lower ratio warns earlier, which is the more restrictive choice.
-    if (typeof ub.softWarningRatio === "number" && typeof pb.softWarningRatio === "number") {
-      budgets.softWarningRatio = Math.min(ub.softWarningRatio, pb.softWarningRatio);
+    if (typeof pb.softWarningRatio === "number") {
+      budgets.softWarningRatio = Math.min(typeof ub.softWarningRatio === "number" ? ub.softWarningRatio : DEFAULTS.budgets.softWarningRatio, pb.softWarningRatio);
     }
     merged.budgets = budgets;
   }

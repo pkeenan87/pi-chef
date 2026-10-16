@@ -1,9 +1,11 @@
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
 import { emptyUsage, type AdvisorAnswer, type AdvisorConcern, type AdvisorOpinion, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
-import { budgetState, record } from "../orchestrator/budget.js";
+import { budgetRemainingUsd, budgetState, record } from "../orchestrator/budget.js";
 import type { WorkflowContext } from "../orchestrator/context.js";
 import { availability } from "../orchestrator/routing.js";
 import { redact } from "../redact.js";
+import { hardExclusion } from "../router/select.js";
+import { tierCost } from "../router/stats.js";
 import { bracketSpans } from "./model-review.js";
 
 /**
@@ -90,14 +92,23 @@ export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLi
   return { advisors: [], reason: "only low tickets" };
 }
 
-/** The advisor tier's chat candidates that can be called now, plus a note for each one skipped. */
-export async function availableAdvisors(ctx: WorkflowContext): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
+/**
+ * The advisor tier's chat candidates that can be called now, plus a note for each one skipped: not connected, or
+ * excluded by the same hard rules as model selection (org allowlist, proprietary-code policy, an open circuit, the budget).
+ */
+export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, taskType = "general"): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
   const seen = await availability(ctx);
+  const table = ctx.store.readMetrics();
+  const left = budgetRemainingUsd(ctx, taskId);
+  const at = ctx.now();
   const candidates: AdvisorCandidate[] = [];
   const notes: string[] = [];
   for (const candidate of tierCandidates(ctx.config, "advisor")) {
+    const price = tierCost(ctx.config.pricing, candidate.provider, candidate.model, at, ctx.config.workers.tokenBudget);
+    const excluded = hardExclusion({ config: ctx.config, table, taskType, tier: "advisor", candidate, price, at, budgetRemainingUsd: left });
     const view = seen[candidate.provider];
-    if (view && !view.ok) notes.push(`${candidate.provider}/${candidate.model} skipped: ${view.detail ?? "unavailable"}`);
+    if (excluded) notes.push(`${candidate.provider}/${candidate.model} skipped: ${excluded}`);
+    else if (view && !view.ok) notes.push(`${candidate.provider}/${candidate.model} skipped: ${view.detail ?? "unavailable"}`);
     else candidates.push({ provider: candidate.provider, model: candidate.model });
   }
   return { candidates, notes };
@@ -181,6 +192,7 @@ export async function consultAdvisors(
   const skipped = (reason: string): AdvisorConsultation => ({ results: [], skipped: reason, costUsd: 0 });
   if (input.candidates.length === 0) return skipped("no advisor is available");
   if (!ctx.chat) return skipped("no model connection (only available inside a Pi session)");
+  if (ctx.shutdown.signal.aborted) return skipped("the session is ending");
   const budget = budgetState(ctx, input.taskId).status;
   if (budget !== "ok") return skipped(`the budget is ${budget === "hard" ? "exhausted" : "nearly spent"}`);
   const chat = ctx.chat;
@@ -190,7 +202,7 @@ export async function consultAdvisors(
   const questions = input.questions.map((question) => redact(question).slice(0, 400)).filter(Boolean).slice(0, 3);
   const user = [redact(input.packet), "", "# Questions", ...questions.map((question, index) => `${index + 1}. ${question}`)].join("\n");
 
-  const results = await Promise.all(
+  const settled = await Promise.allSettled(
     input.candidates.map(async (candidate): Promise<AdvisorOpinion> => {
       const timeout = AbortSignal.timeout(timeoutMs);
       const signal = AbortSignal.any([ctx.shutdown.signal, timeout]);
@@ -224,6 +236,12 @@ export async function consultAdvisors(
       };
     }),
   );
+  // One advisor's failure (a ledger error included) never loses another's answer.
+  const results = settled.map((outcome, index): AdvisorOpinion => {
+    if (outcome.status === "fulfilled") return outcome.value;
+    const candidate = input.candidates[index]!;
+    return { provider: candidate.provider, model: candidate.model, answers: [], concerns: [], error: redact((outcome.reason as Error)?.message || "unknown error").slice(0, 300), costUsd: null };
+  });
   return { results, costUsd: sumUsd(results.map((item) => item.costUsd)) };
 }
 
