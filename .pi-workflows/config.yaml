@@ -95,6 +95,17 @@ workers:
   tokenBudget: 8000
   ticketContextTokens: 150000
 
+# Second opinions during /build. After a ticket's checks pass, the review tier (Opus) reads the ticket and its own diff
+# and may put 2-3 questions to the advisor tier. Medium tickets consult one advisor from another provider than the
+# implementer; high tickets consult every advisor (one per provider) in parallel; low tickets none. Opus gives the
+# final verdict. Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed
+# per token on an API key (see the api-key pricing rows).
+advisors:
+  tickets: true         # false turns the per-ticket review (and its advisors) off
+  timeoutMs: 180000     # per advisor or review call
+  maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
+  maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)
+
 branchPrefix: cost
 
 budgets:

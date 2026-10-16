@@ -5,7 +5,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { ProviderId, Ticket } from "../src/domain.js";
+import type { ProviderId, Ticket, TokenUsage } from "../src/domain.js";
+import type { WorkflowContext } from "../src/orchestrator/context.js";
+import type { ChatFn } from "../src/providers/pi-chat.js";
 import { runBuild, type BuildDriver } from "../src/orchestrator/build.js";
 import { Workflow, type WorkflowOptions } from "../src/orchestrator/service.js";
 import type { CheckRunner } from "../src/review/review.js";
@@ -222,4 +224,50 @@ export async function ticketWorkflow(tickets: Ticket[], extras: Partial<Workflow
   await app.commitTickets(tickets);
   if (options.approve !== false && !(await app.approveDraft()).ok) throw new Error("approveDraft failed in fixture");
   return { cwd, app, taskId: app.activeTaskId()! };
+}
+
+/** The context a Workflow holds, for tests of the modules that take one. */
+export function contextOf(app: Workflow): WorkflowContext {
+  return (app as unknown as { ctx: WorkflowContext }).ctx;
+}
+
+/** The sample advisor tier of the real config (Astra on OpenAI, then Fable), priced: Astra at $0 (ChatGPT), Fable per token. */
+export function withAdvisors(config: WorkflowConfig): WorkflowConfig {
+  config.tiers.advisor = [
+    { provider: "openai", model: "gpt-6-astra", api: "chat" },
+    { provider: "anthropic", model: "claude-fable-5-1", api: "chat" },
+    { provider: "foundry", model: "gpt-6-astra", api: "chat" },
+  ];
+  config.pricing.push({ provider: "openai", model: "gpt-6-astra", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 });
+  return config;
+}
+
+export interface FakeCall {
+  provider: string;
+  model: string;
+  system: string;
+  user: string;
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+/** A chat client that records every call and answers from `answer`; a thrown error is the call failing. */
+export function fakeChat(answer: (call: FakeCall) => string | { text: string; usage?: Partial<TokenUsage> } | Promise<string | { text: string; usage?: Partial<TokenUsage> }>) {
+  const calls: FakeCall[] = [];
+  const chat: ChatFn = async (candidate, request) => {
+    const call: FakeCall = {
+      provider: candidate.provider,
+      model: candidate.model,
+      system: request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n"),
+      user: request.messages.filter((message) => message.role === "user").map((message) => message.content).join("\n"),
+      maxTokens: request.maxTokens,
+      signal: request.signal,
+    };
+    calls.push(call);
+    const reply = await answer(call);
+    const text = typeof reply === "string" ? reply : reply.text;
+    const usage = { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, requests: 1, ...(typeof reply === "string" ? {} : reply.usage) };
+    return { text, usage, provider: candidate.provider, model: candidate.model };
+  };
+  return { chat, calls };
 }

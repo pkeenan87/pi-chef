@@ -86,7 +86,7 @@ export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars
 }
 
 /** Balanced `[...]` and `{...}` spans of the text in order of their start, skipping brackets inside JSON strings. */
-function bracketSpans(text: string): string[] {
+export function bracketSpans(text: string): string[] {
   const spans: string[] = [];
   for (let start = 0; start < text.length; start++) {
     const open = text[start];

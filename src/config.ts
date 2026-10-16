@@ -155,6 +155,11 @@ export interface WorkflowConfig {
   setup: CheckConfig[];
   /** The model pass of /review: a review-tier model reads the branch diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
+  /**
+   * Second opinions during /build: after a ticket's checks pass, the review tier reads its diff and, by difficulty,
+   * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off.
+   */
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -194,6 +199,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -491,6 +497,13 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(raw.review, "maxChunks", where, { min: 1, integer: true }, "review");
     checkNumber(raw.review, "timeoutMs", where, { min: 1000, integer: true }, "review");
   }
+  if (raw.advisors !== undefined) {
+    if (!isRecord(raw.advisors)) invalid(where, "advisors", "must be a mapping");
+    if (raw.advisors.tickets !== undefined && typeof raw.advisors.tickets !== "boolean") invalid(where, "advisors.tickets", "must be a boolean");
+    checkNumber(raw.advisors, "timeoutMs", where, { min: 1000, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
+  }
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
     for (const id of list) if (!isProviderId(id)) invalid(where, "orgProviderAllowlist", `contains unknown provider ${id}`);
@@ -557,6 +570,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
       : DEFAULTS.checks,
     setup: Array.isArray(norm.setup) ? (norm.setup as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] })) : DEFAULTS.setup,
     review: { ...DEFAULTS.review, ...obj("review") } as WorkflowConfig["review"],
+    advisors: { ...DEFAULTS.advisors, ...obj("advisors") } as WorkflowConfig["advisors"],
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,
     pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
@@ -662,7 +676,7 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers"]) {
+  for (const key of ["models", "tiers", "routing", "workers", "advisors"]) {
     const value = mergeSection(user[key], project[key]);
     if (value) merged[key] = value;
     else delete merged[key];
