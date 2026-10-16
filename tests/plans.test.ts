@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { TaskState } from "../src/domain.js";
 import type { PlanReviewRequest } from "../src/orchestrator/service.js";
+import { activeTask } from "../src/orchestrator/tasks.js";
 import { addTask, contextOf, sampleSpec, sampleTicket, SpyGit, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const exec = promisify(execFile);
@@ -21,6 +22,7 @@ async function setup(extras: Parameters<typeof workflow>[1] = {}) {
   const b = await addTask(app, "beta", { phase: "PLANNING", at: "2026-10-14T11:00:00.000Z" });
   const c = await addTask(app, "gamma", { phase: "COMPLETE", at: "2026-10-10T11:00:00.000Z" });
   contextOf(app).store.setActive(b.taskId);
+  await activeTask(contextOf(app));
   return { cwd, app, spy, reports, main, a, b, c, ctx: contextOf(app) };
 }
 

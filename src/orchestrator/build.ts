@@ -154,6 +154,7 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
           return fail("DIRTY_TREE", `This build is on branch ${target}, but you are on ${current} with uncommitted changes. Commit or stash them; /build then switches to ${target} itself.`);
         }
         await ctx.git.switchTo(target);
+        ctx.store.setActive(state.taskId, target);
         ctx.progress?.(`Switched from ${current} to ${target} to resume ${displayName(state)}.`);
       }
       build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined };

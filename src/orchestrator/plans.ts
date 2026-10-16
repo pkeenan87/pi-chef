@@ -93,6 +93,12 @@ async function switchPlan(ctx: WorkflowContext, ref: string): Promise<CommandRes
   if (isClosed(task)) return fail("CLOSED", `${name} is closed. Its files stay on disk; /plan <request> starts a new task.`);
   ctx.store.setActive(task.taskId);
   const note = await followBranch(ctx, task);
+  // Record the branch as it is now (switched or not), so only a later checkout moves the active task.
+  try {
+    ctx.store.setActive(task.taskId, await ctx.git.currentBranch());
+  } catch {
+    /* not a repository: the pointer alone is enough */
+  }
   const line = `Switched to ${name} (${taskState(task, task.review).line}).${note ? ` ${note}` : ""}`;
   if (!task.plan) return done(`${line} It has no plan yet.`, { taskId: task.taskId });
   const shown = await showTaskPlan(ctx, task);

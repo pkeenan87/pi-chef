@@ -9,7 +9,7 @@ import { acceptanceCriteria, applyOverlap, assertGraph, parseGroups, PLAN_FILE, 
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
 import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
 import { taskState } from "./state-label.js";
-import { activeTask, closeTask, displayName, isFinished, lastSeenBranch, nameForNewTask, requireActiveTask } from "./tasks.js";
+import { activeTask, closeTask, displayName, isFinished, nameForNewTask, requireActiveTask } from "./tasks.js";
 
 export function blank(taskId: string, request: string, at: string, name?: string): TaskState {
   return {
@@ -55,9 +55,7 @@ export async function retireCurrent(ctx: WorkflowContext, task: TaskState | unde
 export function announceParked(ctx: WorkflowContext, parked: TaskState | undefined): void {
   if (!parked) return;
   const name = displayName(parked);
-  // The active task follows the checked-out branch, so a task parked while you sit on its branch comes back on the next command.
-  const onIt = parked.build?.branch !== undefined && parked.build.branch === lastSeenBranch(ctx);
-  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.${onIt ? ` You are on its branch ${parked.build!.branch}, so it becomes active again on the next command; switch branches first to work on the new task.` : ""}`);
+  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.`);
 }
 
 /** Starts a new task for a literal ```tasks request and drafts its plan. The old active task is closed if finished, else parked. */

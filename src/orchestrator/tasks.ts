@@ -116,18 +116,13 @@ export function findTask(tasks: TaskState[], ref: string): TaskLookup {
   return { error: `No task matches "${ref}". /plans lists them (--all includes closed ones).` };
 }
 
-/** The branch the last `activeTask` call saw per context (undefined: detached HEAD, or git failed). */
-const seenBranch = new WeakMap<WorkflowContext, string | undefined>();
-
-export function lastSeenBranch(ctx: WorkflowContext): string | undefined {
-  return seenBranch.get(ctx);
-}
-
 /**
- * The active task. When the checked-out branch is some open task's build branch, that task is active and
- * active-task.json is updated so every reader agrees. Otherwise (default branch, a branch no task owns, detached HEAD,
- * or git failing) the stored task is used: the last one created or switched to. One git call per command; hot paths
- * such as usage ledgering read the stored task with `active` and never call git.
+ * The active task. It reacts to a branch change, not to the branch state: `active-task.json` records the branch seen at
+ * the last resolution, and only when the checked-out branch differs from it is the branch looked up. If it is an open
+ * task's build branch, that task becomes active (and the file says so); otherwise the stored task stays, the last one
+ * created or switched to. An older file with no recorded branch keeps its stored task and starts recording. Detached
+ * HEAD and a failing git leave the stored task alone. One git call per command; hot paths such as usage ledgering read
+ * the stored task with `active` and never call git.
  */
 export async function activeTask(ctx: WorkflowContext): Promise<TaskState | undefined> {
   const stored = active(ctx);
@@ -135,15 +130,21 @@ export async function activeTask(ctx: WorkflowContext): Promise<TaskState | unde
   try {
     branch = await ctx.git.currentBranch();
   } catch {
-    branch = undefined;
+    return stored;
   }
-  seenBranch.set(ctx, branch);
-  if (!branch || branch === "HEAD") return stored;
-  if (stored && !isClosed(stored) && stored.build?.branch === branch) return stored;
-  const owner = listTasks(ctx).find((task) => !isClosed(task) && task.build?.branch === branch);
-  if (!owner) return stored;
-  if (owner.taskId !== stored?.taskId) ctx.store.setActive(owner.taskId);
-  return owner;
+  const seen = ctx.store.readActiveFile().seenBranch;
+  if (stored && branch === seen) return stored;
+  if (stored && seen === undefined) {
+    ctx.store.setActive(stored.taskId, branch);
+    return stored;
+  }
+  const owner = branch === "HEAD" ? undefined : listTasks(ctx).find((task) => !isClosed(task) && task.build?.branch === branch);
+  if (owner) {
+    ctx.store.setActive(owner.taskId, branch);
+    return owner;
+  }
+  if (stored) ctx.store.setActive(stored.taskId, branch);
+  return stored;
 }
 
 export async function requireActiveTask(ctx: WorkflowContext): Promise<TaskState> {
