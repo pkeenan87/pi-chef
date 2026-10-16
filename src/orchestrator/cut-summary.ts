@@ -6,7 +6,7 @@ import { shortModel } from "../review/review-resolution.js";
 import { selectCandidate } from "../router/select.js";
 import { budgetRemainingUsd, budgetState, quotaState, record } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
-import { availability } from "./routing.js";
+import { availability, candidateCheck } from "./routing.js";
 
 /**
  * One-line summaries of the files a diff clip cut, written by the batch tier (a standalone job: no conversation).
@@ -62,6 +62,7 @@ export async function summarizeCutFiles(ctx: WorkflowContext, taskId: string, fi
     config: ctx.config,
     table: ctx.store.readMetrics(),
     availability: await availability(ctx),
+    candidateCheck: candidateCheck(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, taskId),
     quota: quotaState(ctx),
     rng: ctx.rng,

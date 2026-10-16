@@ -1,25 +1,44 @@
 import { modelLabel, tierCandidates } from "../config.js";
 import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { decideRoute } from "../router/policy.js";
-import type { Availability } from "../router/select.js";
+import type { Availability, CandidateCheck } from "../router/select.js";
+import { authProblem, configProblem, registryProblem, userConfigPath } from "../providers/usable.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, quotaState } from "./budget.js";
 import { iso, type WorkflowContext } from "./context.js";
 
-/** Which providers can be called right now. Providers absent from the config are left out (treated as available). */
+/**
+ * Which providers can be called right now, every one of them. A provider that is not configured (Foundry, Vercel, local
+ * without a block in the user config) is unavailable, and an account provider is checked against Pi's login even when the
+ * config never names it: leaving a provider out used to make routing treat it as signed in. `detail` is the reason.
+ */
 export async function availability(ctx: WorkflowContext): Promise<Availability> {
   const out: Availability = {};
+  const userPath = userConfigPath(ctx.cwd);
   await Promise.all(
-    PROVIDERS.filter((provider) => ctx.config.providers[provider]).map(async (provider) => {
+    PROVIDERS.map(async (provider) => {
+      const missing = configProblem(ctx.config, provider, userPath);
+      if (missing) {
+        out[provider] = { ok: false, detail: missing };
+        return;
+      }
       try {
         const view = await ctx.authProbe.inspect(provider);
-        out[provider] = { ok: view.status === "ready", detail: view.status === "ready" ? undefined : `${view.status}: ${view.detail}` };
+        const problem = authProblem(view);
+        out[provider] = problem ? { ok: false, detail: problem } : { ok: true };
       } catch (error) {
-        out[provider] = { ok: false, detail: redact((error as Error).message) };
+        out[provider] = { ok: false, detail: `provider ${provider} could not be checked: ${redact((error as Error).message)}` };
       }
     }),
   );
   return out;
+}
+
+/** The /build preflight's test for one candidate, applied to routing whenever a Pi model registry is bound. */
+export function candidateCheck(ctx: WorkflowContext): CandidateCheck | undefined {
+  const registry = ctx.registry;
+  if (!registry) return undefined;
+  return (candidate) => registryProblem(ctx.config, registry, candidate.provider, candidate.model);
 }
 
 /** decideRoute with live availability, remaining budget, and learned per-model metrics. Does not announce. */
@@ -37,6 +56,7 @@ export async function decide(
     ticketTier: extra.ticketTier,
     strictAvailability: extra.strictAvailability,
     availability: await availability(ctx),
+    candidateCheck: candidateCheck(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, extra.taskId),
     quota: quotaState(ctx),
     rng: ctx.rng,

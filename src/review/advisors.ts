@@ -2,7 +2,7 @@ import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
 import { emptyUsage, type AdvisorAnswer, type AdvisorConcern, type AdvisorOpinion, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
 import { budgetRemainingUsd, budgetState, record } from "../orchestrator/budget.js";
 import type { WorkflowContext } from "../orchestrator/context.js";
-import { availability } from "../orchestrator/routing.js";
+import { availability, candidateCheck } from "../orchestrator/routing.js";
 import { redact } from "../redact.js";
 import { hardExclusion } from "../router/select.js";
 import { tierCost } from "../router/stats.js";
@@ -111,6 +111,7 @@ export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLi
  */
 export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, taskType = "general"): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
   const seen = await availability(ctx);
+  const check = candidateCheck(ctx);
   const table = ctx.store.readMetrics();
   const left = budgetRemainingUsd(ctx, taskId);
   const at = ctx.now();
@@ -122,6 +123,7 @@ export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, t
     const view = seen[candidate.provider];
     if (excluded) notes.push(`${candidate.provider}/${candidate.model} skipped: ${excluded}`);
     else if (view && !view.ok) notes.push(`${candidate.provider}/${candidate.model} skipped: ${view.detail ?? "unavailable"}`);
+    else if (check?.(candidate)) notes.push(`${candidate.provider}/${candidate.model} skipped: ${check(candidate)}`);
     else candidates.push({ provider: candidate.provider, model: candidate.model });
   }
   return { candidates, notes };

@@ -85,6 +85,7 @@ export class Workflow {
   bind(binding: WorkflowBinding): void {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
+    ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
     ctx.startTurn = binding.startTurn ?? ctx.startTurn;
@@ -110,7 +111,7 @@ export class Workflow {
     return this.store.readActive();
   }
 
-  /** Which providers can be called right now. Providers absent from the config are left out (treated as available). */
+  /** Which providers can be called right now, each with the reason when it cannot. */
   availability(): Promise<Availability> {
     return availability(this.ctx);
   }
@@ -129,7 +130,7 @@ export class Workflow {
   decide(
     classification: AcceptedClassification,
     purpose: "plan" | "implement" | "review" | "preview",
-    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier } = {},
+    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
   ): Promise<RoutingDecision> {
     return decide(this.ctx, classification, purpose, extra);
   }

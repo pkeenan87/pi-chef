@@ -2,12 +2,13 @@ import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, Sess
 import { convertToLlm, isToolCallEventType, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
-import { configPaths, DEFAULT_SESSION, loadConfig, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
+import { configPaths, DEFAULT_SESSION, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
+import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
 import { reviewPlan } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
@@ -109,6 +110,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
     const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
     active.bind({
+      registry: registry as unknown as UsableRegistry | undefined,
       chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
       status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef", text) : undefined,
       planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef-plan", text) : undefined,
@@ -342,18 +344,18 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   const driver: BuildDriver = {
     async fresh(model, run, ticketId) {
       // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
-      const known = model.id ? live.modelRegistry?.find(model.provider, model.id) : undefined;
-      const registry = live.modelRegistry as { hasConfiguredAuth?: (model: never) => boolean } | undefined;
-      let signedIn = !!known;
-      if (known && typeof registry?.hasConfiguredAuth === "function") {
-        try {
-          signedIn = registry.hasConfiguredAuth(known as never);
-        } catch {
-          signedIn = false;
-        }
+      // Routing applies the same test (registryProblem) to every candidate, so this only trips when Pi changed since.
+      let preflight: string | undefined;
+      try {
+        const config = getWorkflow().config;
+        const name = model.provider === "foundry" ? foundryModelOf(config, model.id) : model.id;
+        preflight = live.modelRegistry ? registryProblem(config, live.modelRegistry as unknown as UsableRegistry, model.provider, name) : `model ${model.id} cannot be checked: this Pi session has no model registry`;
+        if (preflight) preflight = `${modelLabel(config, model.provider, name)}: ${preflight}`;
+      } catch (error) {
+        preflight = `${model.provider}/${model.id} could not be checked: ${redact(error instanceof Error ? error.message : String(error))}`;
       }
-      if (!known || !signedIn) {
-        return { stopped: `Ticket ${ticketId} is routed to ${model.provider}/${model.id}, which Pi does not know or is not signed in. Fix the tier config or sign in, then /build again.` };
+      if (preflight) {
+        return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the tier config or sign in, then /build again.` };
       }
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
       let opened = false;

@@ -194,12 +194,43 @@ describe("pi extension surface", () => {
         compact() {},
       });
       expect(opened).toBe(0);
-      expect(notices.join("\n")).toMatch(/Ticket 01 is routed to anthropic\/claude-sonnet-5-5, which Pi does not know or is not signed in\. Fix the tier config or sign in, then \/build again\./);
+      // Routing applies the preflight's test to every candidate, so nothing usable means a stop that names each one and why.
+      const text = notices.join("\n");
+      expect(text).toContain("No ticketMedium model is usable: anthropic/claude-sonnet-5-5");
+      expect(text).toContain(registry.hasConfiguredAuth ? "provider anthropic has no login (run /login anthropic)" : "model claude-sonnet-5-5 is not among the anthropic provider's registered models");
       const state = app.store.load(app.activeTaskId()!)!;
       expect(state.ticketRuns?.["01"]).toBeUndefined();
       expect(state.build!.currentTicket).toBeUndefined();
       bindWorkflow(undefined);
     }
+  });
+
+  it("the preflight uses the same test and names the reason when Pi changes after routing chose the model", async () => {
+    // Pass 1 counts the registry lookups routing and the preflight make before a session opens; pass 2 loses the model at the last one.
+    let lookups = 0;
+    let loseAt = Number.POSITIVE_INFINITY;
+    const notices: string[] = [];
+    for (const pass of [1, 2]) {
+      const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+      const { commands } = fakePi();
+      bindWorkflow(app);
+      lookups = 0;
+      let seen = 0;
+      const registry = { find: (provider: string, id: string) => (++lookups >= loseAt ? undefined : { provider, id }), hasConfiguredAuth: () => true };
+      await commands.get("build")!.handler("", {
+        cwd,
+        hasUI: true,
+        model: { provider: "openai", id: "gpt-user" },
+        modelRegistry: registry,
+        ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+        newSession: async () => ((seen = lookups), { cancelled: true }),
+        compact() {},
+      });
+      if (pass === 1) loseAt = seen;
+      bindWorkflow(undefined);
+    }
+    expect(Number.isFinite(loseAt)).toBe(true);
+    expect(notices.join("\n")).toContain("Ticket 01 cannot start on anthropic/claude-sonnet-5-5: model claude-sonnet-5-5 is not among the anthropic provider's registered models. Fix the tier config or sign in, then /build again.");
   });
 
   it("never prints an empty model id when the model to restore is empty or unknown", async () => {

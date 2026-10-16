@@ -4,7 +4,7 @@ import { redact } from "../redact.js";
 import { selectCandidate } from "../router/select.js";
 import { active, type WorkflowContext } from "./context.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, SESSION_TASK_ID } from "./budget.js";
-import { availability } from "./routing.js";
+import { availability, candidateCheck } from "./routing.js";
 
 /**
  * Compaction summaries on a cheap tier. Pi calls `session_before_compact` before it compacts with the session model;
@@ -71,6 +71,7 @@ export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn,
     config: ctx.config,
     table: ctx.store.readMetrics(),
     availability: await availability(ctx),
+    candidateCheck: candidateCheck(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, state?.taskId),
     quota: quotaState(ctx),
     rng: ctx.rng,
