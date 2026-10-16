@@ -191,7 +191,7 @@ function planningOrThrow(ctx: WorkflowContext, stage: "interview" | "tickets"): 
   const found = activePlanning(ctx);
   if (!found) throw new WorkflowError("NO_INTERVIEW", "No /plan is running. Start one with /plan <request>.");
   if (found.task.planning!.stage !== stage) {
-    throw new WorkflowError("WRONG_STAGE", stage === "interview" ? "The interview is over: the spec is saved. Call plan_tickets." : "Write the spec first with plan_spec, then call plan_tickets.");
+    throw new WorkflowError("WRONG_STAGE", stage === "interview" ? "The interview is over: the spec is saved. Call plan_consult, then plan_tickets." : "Write the spec first with plan_spec, then call plan_tickets.");
   }
   return found;
 }
@@ -384,7 +384,7 @@ export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promis
   const file = ctx.store.writeText(task.taskId, SPEC_FILE, redact(renderSpec(spec)));
   await ctx.store.update(task.taskId, "spec saved", (current) => ({
     ...current,
-    planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}) },
+    planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}), ...(current.planning?.stage === "tickets" && current.planning.consult ? { consult: current.planning.consult } : {}) },
     updatedAt: iso(ctx),
   }));
   showStatus(ctx);

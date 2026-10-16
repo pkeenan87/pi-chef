@@ -35,6 +35,7 @@ describe("parseConfig validation", () => {
     ["advisors:\n  maxDiffChars: 1.5\n", /advisors\.maxDiffChars/],
     ["advisors:\n  maxOutputTokens: 0\n", /advisors\.maxOutputTokens/],
     ["advisors:\n  tickets: yes please\n", /advisors\.tickets/],
+    ["advisors:\n  plan: sure\n", /advisors\.plan/],
     ["advisors: 3\n", /advisors/],
     ["routing:\n  sessionTier: ticketLow\n", /routing\.sessionTier/],
     ["routing:\n  directTier: huge\n", /routing\.directTier/],

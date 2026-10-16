@@ -12,6 +12,7 @@ import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassi
 import type { WorkflowContext } from "./context.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
+import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
 import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
 import { review } from "./review.js";
@@ -182,17 +183,32 @@ export class Workflow {
     requireTicketStage(this.ctx);
   }
 
+  /** plan_consult: both advisors on the draft tickets, once per draft. */
+  consultPlan(input: Parameters<typeof consultPlan>[1]) {
+    return consultPlan(this.ctx, input);
+  }
+
+  /** What plan_tickets needs from the advisor consult (throws when it is missing), as the review to store on the plan. */
+  adviceForTickets(resolution: string | undefined) {
+    return adviceForTickets(this.ctx, resolution);
+  }
+
+  /** The draft was sent back for changes: the revised draft may consult again. */
+  clearConsult() {
+    return clearConsult(this.ctx);
+  }
+
   checkTickets(input: unknown) {
     return checkTickets(this.ctx, input);
   }
 
-  commitTickets(tickets: Parameters<typeof commitTickets>[1]) {
-    return commitTickets(this.ctx, tickets);
+  commitTickets(tickets: Parameters<typeof commitTickets>[1], advisorReview?: Parameters<typeof commitTickets>[2]) {
+    return commitTickets(this.ctx, tickets, advisorReview);
   }
 
   /** The full plan these tickets would produce, for review before they are saved. */
-  previewPlan(tickets: Parameters<typeof previewPlan>[1]): string {
-    return previewPlan(this.ctx, tickets);
+  previewPlan(tickets: Parameters<typeof previewPlan>[1], advisorReview?: Parameters<typeof previewPlan>[2]): string {
+    return previewPlan(this.ctx, tickets, advisorReview);
   }
 
   /** Approves the active draft: freezes plan.vN.approved.json. The choice was made on a review screen. */

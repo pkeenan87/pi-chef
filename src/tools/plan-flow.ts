@@ -4,6 +4,7 @@ import type { Workflow } from "../orchestrator/service.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown } from "../orchestrator/tickets.js";
 import { DIFFICULTIES, TIERS, type Ticket } from "../domain.js";
 import type { PlanReviewAction } from "../orchestrator/types.js";
+import { consultResultText } from "../orchestrator/plan-consult.js";
 import { reviewPlan } from "./plan-review.js";
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
@@ -44,7 +45,7 @@ export function createPlanSpecTool(getWorkflow: () => Workflow | undefined) {
       const workflow = getWorkflow();
       if (!workflow) throw new Error("The cost workflow is not available.");
       const saved = await workflow.savePlanSpec(params);
-      return text(`Spec saved to ${saved.file}. Now call plan_tickets.`, { file: saved.file });
+      return text(`Spec saved to ${saved.file}. Now draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the answers, then call plan_tickets.`, { file: saved.file });
     },
   });
 }
@@ -68,7 +69,32 @@ export const PlanTicketsParams = Type.Object({
       checks: Type.Optional(Type.Array(Type.String(), { description: "Shell command lines the parent runs after the ticket, one command per entry (for example \"npm test\"); destructive commands are refused. Not prose: verification steps that are not a command go in implementation." })),
     }),
   ),
+  advisorResolution: Type.Optional(
+    Type.String({ description: "After plan_consult: what you accepted from the advisors, what you rejected, and why. Required whenever advisors were consulted." }),
+  ),
 });
+
+export const PlanConsultParams = Type.Object({
+  tickets: PlanTicketsParams.properties.tickets,
+  questions: Type.Array(Type.String(), { description: "2-3 specific questions about the riskiest parts of the draft, for the advisors" }),
+});
+
+export function createPlanConsultTool(getWorkflow: () => Workflow | undefined) {
+  return defineTool({
+    name: "plan_consult",
+    label: "Plan Consult",
+    description:
+      "Put the draft tickets and 2-3 specific questions about the riskiest parts of the plan to the advisors (every available one, in parallel). Returns their answers and concerns. Call once per draft, after plan_spec and before plan_tickets. Only usable while /plan is running.",
+    promptSnippet: "plan_consult: ask the advisors about the draft tickets",
+    parameters: PlanConsultParams,
+    async execute(_id, params) {
+      const workflow = getWorkflow();
+      if (!workflow) throw new Error("The cost workflow is not available.");
+      const outcome = await workflow.consultPlan(params);
+      return text(consultResultText(outcome), { version: outcome.consult.version, repeat: outcome.repeat, advisors: outcome.consult.results.map((item) => ({ provider: item.provider, model: item.model, verdict: item.verdict, error: item.error })) });
+    },
+  });
+}
 
 const REVIEW_ACTIONS: PlanReviewAction[] = [
   { value: "approve", label: "Approve plan" },
@@ -91,13 +117,15 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       workflow.requireTicketStage();
       let check = workflow.checkTickets(params.tickets);
       if (check.errors.length) throw new Error(`Tickets rejected. Fix these and call plan_tickets again:\n- ${check.errors.join("\n- ")}`);
+      // Advisors were consulted (or could not be): refuses until plan_consult ran and the resolution is written.
+      const advisorReview = await workflow.adviceForTickets(params.advisorResolution);
       let tickets: Ticket[] = check.tickets;
       let edited = false;
       let approve = false;
       if (ctx.hasUI) {
         // The person sees the whole plan (spec and tickets) before anything is saved.
         for (;;) {
-          const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets), actions: REVIEW_ACTIONS });
+          const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets, advisorReview), actions: REVIEW_ACTIONS });
           // Closing the review (Esc) keeps the work: it saves the draft like "Save as draft".
           if (!choice || choice.value === "save") break;
           if (choice.value === "approve") {
@@ -105,8 +133,10 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
             break;
           }
           if (choice.value === "revise") {
+            // The revised draft is a new draft: it may consult the advisors again.
+            await workflow.clearConsult();
             return text(
-              `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_tickets with the full revised ticket list.`,
+              `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_consult again for the revised draft and plan_tickets with the full revised ticket list and your advisorResolution.`,
             );
           }
           const changed = await ctx.ui.editor("Edit the tickets (titles, implementation, criteria, Blocked by)", renderTicketsMarkdown(tickets));
@@ -120,7 +150,7 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
           edited = true;
         }
       }
-      const { plan, files, markdown } = await workflow.commitTickets(tickets);
+      const { plan, files, markdown } = await workflow.commitTickets(tickets, advisorReview);
       // Also kept in the transcript (posted when this turn ends), so the plan stays visible.
       workflow.showMarkdown(markdown);
       const editNote = edited ? " The user edited the tickets before saving." : "";

@@ -307,7 +307,7 @@ describe("web tools", () => {
     const registered = new Map<string, unknown>();
     const pi = { registerCommand() {}, on() { return () => undefined; }, appendEntry() {}, registerVirtualModel() {}, registerTool: (tool: { name: string }) => void registered.set(tool.name, tool) };
     extension(pi as unknown as ExtensionAPI);
-    expect([...registered.keys()].sort()).toEqual(["plan_questions", "plan_spec", "plan_tickets", "web_fetch", "web_search"]);
+    expect([...registered.keys()].sort()).toEqual(["plan_consult", "plan_questions", "plan_spec", "plan_tickets", "web_fetch", "web_search"]);
   });
 
   it("ledgers search usage without the query text and shows the route status", async () => {

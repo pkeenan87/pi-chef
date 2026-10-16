@@ -157,9 +157,10 @@ export interface WorkflowConfig {
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
   /**
    * Second opinions during /build: after a ticket's checks pass, the review tier reads its diff and, by difficulty,
-   * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off.
+   * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off; `plan: false` skips the
+   * advisor consult on every plan (plan_consult).
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -199,7 +200,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -500,6 +501,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   if (raw.advisors !== undefined) {
     if (!isRecord(raw.advisors)) invalid(where, "advisors", "must be a mapping");
     if (raw.advisors.tickets !== undefined && typeof raw.advisors.tickets !== "boolean") invalid(where, "advisors.tickets", "must be a boolean");
+    if (raw.advisors.plan !== undefined && typeof raw.advisors.plan !== "boolean") invalid(where, "advisors.plan", "must be a boolean");
     checkNumber(raw.advisors, "timeoutMs", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");

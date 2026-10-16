@@ -147,6 +147,8 @@ export interface PlanDocument {
   securitySensitive: boolean;
   /** Present when the plan came from the interview and ticket flow; each ticket is one group. */
   tickets?: Ticket[];
+  /** The advisors' review of the draft and the planning model's resolution. Advisory; approval stays with the user. */
+  advisorReview?: PlanAdvisorReview;
 }
 
 export interface RoutingDecision {
@@ -303,6 +305,28 @@ export interface PlanningProgress {
   noQuestions: boolean;
   /** The person's requested changes when a drafted plan was sent back from the plan review. */
   revision?: string;
+  /** The advisors' answers on the current draft (plan_consult). Cleared when the draft is sent back for changes. */
+  consult?: PlanConsult;
+}
+
+/** What the advisors said about a draft plan. One per draft; the packet was the spec, the draft tickets and the questions. */
+export interface PlanConsult {
+  /** The plan version of the draft consulted on. */
+  version: number;
+  questions: string[];
+  results: AdvisorOpinion[];
+  /** Why no advisor was called (budget, no connection). */
+  skipped?: string;
+  at: string;
+}
+
+/** The advisor review kept on a plan: what they said, and how the planning model resolved it. */
+export interface PlanAdvisorReview {
+  consult?: PlanConsult;
+  /** The planning model's account of what it accepted and rejected, and why. */
+  resolution?: string;
+  /** Why there was no consult (none available, budget). */
+  note?: string;
 }
 
 /** Where one ticket stands during /build. */
