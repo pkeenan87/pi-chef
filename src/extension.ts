@@ -11,7 +11,7 @@ import { createRuntime, registerChatProviders, type ProviderRuntime } from "./pr
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
-import { reviewPlan } from "./tools/plan-review.js";
+import { presentForDecision } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
 import { WorkflowError, type CommandResult, type TokenUsage } from "./domain.js";
@@ -150,7 +150,8 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       report: (markdown) => showPlanMessage(ctx, markdown, "chef-report"),
       // The live ctx's widget slot above the editor; a replaced session's ctx is swapped out by the next bind.
       indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("chef-progress", line === undefined ? undefined : [line]) } : undefined,
-      review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
+      // Commands run while Pi is idle, so sendMessage shows the plan at once; there is no popup.
+      review: ctx.hasUI && typeof ctx.ui.select === "function" ? (input) => presentForDecision(ctx, input, (markdown) => showPlanMessage(ctx, markdown, "chef-report")) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });
   }

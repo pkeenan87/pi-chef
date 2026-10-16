@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { ReviewReport } from "../src/domain.js";
 import { runBuild } from "../src/orchestrator/build.js";
+import { presentForDecision } from "../src/tools/plan-review.js";
 import type { PlanReviewRequest } from "../src/orchestrator/types.js";
 import type { Workflow } from "../src/orchestrator/service.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
@@ -178,6 +179,22 @@ describe("/review findings dialog", () => {
     write(t.cwd, "src/run.ts", "export const run = (s: string) => eval(s);\n");
     return t;
   }
+
+  it("posts the report once, then picks inline: Fix all sends the kept findings; Close and Esc send nothing", async () => {
+    for (const [label, sends] of [["Fix all", true], ["Close", false], [undefined, false]] as const) {
+      const t = await failing({ value: "close" });
+      const picks: { title: string; labels: string[] }[] = [];
+      const extra: string[] = [];
+      const ui = { select: async (title: string, labels: string[]) => (picks.push({ title, labels }), label), editor: async () => undefined, custom: () => { throw new Error("no popups"); } };
+      t.app.bind({ review: (request) => presentForDecision({ ui } as never, request, (text) => void extra.push(text)) });
+      await t.app.review();
+      expect(t.reports.filter((report) => report.startsWith("## Review"))).toHaveLength(1);
+      expect(extra).toEqual([]);
+      expect(picks).toEqual([{ title: "Review · 3 finding(s)", labels: ["Fix all", "Fix…", "Close"] }]);
+      expect(t.turns).toHaveLength(sends ? 1 : 0);
+      if (sends) expect(t.turns[0]).toContain("Fix all 3 finding(s)");
+    }
+  });
 
   it("shows every finding numbered, static first, then checks, then model, with three actions", async () => {
     const t = await failing({ value: "close" });

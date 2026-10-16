@@ -6,7 +6,7 @@ import { DIFFICULTIES, TIERS, type Ticket } from "../domain.js";
 import type { PlanReviewAction } from "../orchestrator/types.js";
 import { consultResultText } from "../orchestrator/plan-consult.js";
 import { isSecuritySensitive } from "../router/classify.js";
-import { reviewPlan } from "./plan-review.js";
+import { presentForDecision } from "./plan-review.js";
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
 
@@ -132,10 +132,15 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       let tickets: Ticket[] = check.tickets;
       let edited = false;
       let approve = false;
-      if (ctx.hasUI) {
-        // The person sees the whole plan (spec and tickets) before anything is saved.
+      const inline = ctx.hasUI && typeof ctx.ui.select === "function";
+      if (inline) {
+        // The person reads the whole plan (spec and tickets) inline before anything is saved, then picks an action.
+        let shown: string | undefined;
         for (;;) {
-          const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets, advisorReview), actions: REVIEW_ACTIONS });
+          const markdown = workflow.previewPlan(tickets, advisorReview);
+          // Back from an empty editor or a cancelled edit the plan is unchanged: pick again without posting it twice.
+          const choice = await presentForDecision(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown, actions: REVIEW_ACTIONS, alreadyShown: markdown === shown }, (text) => ctx.ui.notify(text, "info"));
+          shown = markdown;
           // Closing the review (Esc) keeps the work: it saves the draft like "Save as draft".
           if (!choice || choice.value === "save") break;
           if (choice.value === "approve") {
@@ -161,8 +166,8 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
         }
       }
       const { plan, files, markdown, table } = await workflow.commitTickets(tickets, advisorReview);
-      // Also kept in the transcript (posted when this turn ends), so the plan stays visible.
-      workflow.showMarkdown(markdown);
+      // With a UI the plan was already posted before the choice; without one it is posted here (when this turn ends).
+      if (!inline) workflow.showMarkdown(markdown);
       const editNote = edited ? " The user edited the tickets before saving." : "";
       const ending = "End your turn with a two-line summary; do not repeat the plan and do not implement anything.";
       if (approve) {

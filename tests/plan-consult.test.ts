@@ -27,21 +27,15 @@ async function setup(options: { answer?: (call: FakeCall) => string; advisors?: 
   return { app, calls: fake.calls, consult: createPlanConsultTool(() => app), tickets: createPlanTicketsTool(() => app) };
 }
 
-const fakeTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
-
-/** A UI whose plan dialog renders the markdown it was given and answers from `script`. */
-function dialog(script: unknown[]) {
+/** A UI whose inline picker answers from `script` (labels) and records the plan posted before it. */
+function dialog(script: (string | undefined)[], edits: (string | undefined)[] = []) {
   const rendered: string[] = [];
   const ctx = {
     hasUI: true,
     ui: {
-      custom: async (factory: (...args: never[]) => { render(width: number): string[] }) => {
-        const component = (factory as unknown as (...args: unknown[]) => { render(width: number): string[] })({ terminal: { rows: 400 }, requestRender() {} }, fakeTheme, {}, () => undefined);
-        rendered.push(component.render(160).join("\n"));
-        return script.shift();
-      },
-      notify: () => undefined,
-      editor: async () => undefined,
+      notify: (message: string) => void rendered.push(message),
+      select: async () => script.shift(),
+      editor: async () => edits.shift(),
     },
   };
   return { ctx, rendered };
@@ -170,11 +164,11 @@ describe("plan_tickets with advisors", () => {
     expect(readFileSync(path.join(planDir(app), "plan.md"), "utf8")).toContain("Advisors were not consulted");
   });
 
-  it("shows the advisor review and the resolution at the top of the dialog and in plan.md", async () => {
+  it("shows the advisor review and the resolution at the top of the inline plan and in plan.md", async () => {
     const { app, consult, tickets } = await setup();
     await call(consult, { tickets: [ticket("01")], questions }, headless);
     const resolution = "Accepted the duplicate-events point (added an idempotency check); rejected nothing else.";
-    const ui = dialog([{ value: "save" }]);
+    const ui = dialog(["Save as draft"]);
     const done = await call(tickets, { tickets: [ticket("01")], advisorResolution: resolution }, ui.ctx);
     expect(textOf(done)).toContain("1 tickets written");
     const shown = ui.rendered[0]!;
@@ -203,7 +197,7 @@ describe("plan_tickets with advisors", () => {
   it("a revision after Request changes is a new draft and may consult again", async () => {
     const { app, calls, consult, tickets } = await setup();
     await call(consult, { tickets: [ticket("01")], questions }, headless);
-    const ui = dialog([{ value: "revise", text: "split it" }]);
+    const ui = dialog(["Request changes"], ["split it"]);
     const sent = await call(tickets, { tickets: [ticket("01")], advisorResolution: "kept as is" }, ui.ctx);
     expect(textOf(sent)).toContain("split it");
     expect(textOf(sent)).toContain("plan_consult again");

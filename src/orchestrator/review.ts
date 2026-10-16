@@ -304,6 +304,8 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
   const choice = await ctx.review({
     title: `Review · ${items.length} finding(s)`,
     markdown: [...(header ? [header, ""] : []), `## ${items.length} finding(s)`, "", ...findingsTable(report), ...(notes.length ? ["", "Rows numbered – are listed only; Fix all does not send them."] : [])].join("\n"),
+    // The report above already holds this table; only the choice is shown.
+    alreadyShown: !!ctx.report,
     actions: [
       { value: "fix-all", label: "Fix all" },
       { value: "fix-some", label: "Fix…", input: "What should be fixed? (finding numbers like 1, 3, and/or your own instructions)" },

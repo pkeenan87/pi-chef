@@ -33,9 +33,9 @@ function ticket(id: string, extra: Record<string, unknown> = {}) {
   return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: "Users can retry a failed ingest end to end.", acceptanceCriteria: ["retry works"], blockedBy: [] as string[], estimatedContextTokens: 40000, ...extra };
 }
 
-/** A fake ctx whose dialog returns scripted results; `custom` records each call. */
+/** A fake ctx whose picker returns scripted labels. `custom` (a popup) must never be used; `selects` records each picker. */
 function fakeCtx(script: { custom?: unknown[]; select?: (string | undefined)[]; editor?: (string | undefined)[] } = {}) {
-  const log = { custom: 0, notices: [] as string[] };
+  const log = { custom: 0, notices: [] as string[], selects: [] as { title: string; labels: string[] }[] };
   return {
     log,
     ctx: {
@@ -45,7 +45,7 @@ function fakeCtx(script: { custom?: unknown[]; select?: (string | undefined)[]; 
           log.custom += 1;
           return script.custom?.shift();
         },
-        select: async () => script.select?.shift(),
+        select: async (title: string, labels: string[]) => (log.selects.push({ title, labels }), script.select?.shift()),
         editor: async () => script.editor?.shift(),
         notify: (message: string) => void log.notices.push(message),
       },
@@ -433,21 +433,26 @@ describe("plan_tickets", () => {
       const { tickets, app } = await atTicketStage();
       const shown: string[] = [];
       app.bind({ show: (markdown) => void shown.push(markdown) });
-      const { ctx, log } = fakeCtx({ custom: ["save"] });
+      const { ctx, log } = fakeCtx({ select: ["Save as draft"] });
       const result = await call(tickets, { tickets: [ticket("01", { implementation: "Add retryParse() to src/ingest.ts." })] }, ctx);
-      expect(log.custom).toBe(1);
+      // No popup: the plan is posted once, inline, and the picker offers the four actions.
+      expect(log.custom).toBe(0);
+      expect(log.selects).toEqual([{ title: "Review the plan · 1 tickets", labels: ["Approve plan", "Request changes", "Edit tickets", "Save as draft"] }]);
       expect(textOf(result)).toContain("shown to the user in full");
       expect(app.store.load(app.activeTaskId()!)!.plan?.tickets).toHaveLength(1);
-      expect(shown).toHaveLength(1);
-      expect(shown[0]).toContain("## Approach");
-      expect(shown[0]).toContain("`src/ingest.ts`: add retryParse(input, attempts)");
-      expect(shown[0]).toContain("**Implementation**\n\nAdd retryParse() to src/ingest.ts.");
-      expect(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")).toBe(shown[0]);
+      // The inline post is the only copy: the later chat message is skipped.
+      expect(shown).toHaveLength(0);
+      expect(log.notices).toHaveLength(1);
+      const plan = log.notices[0]!;
+      expect(plan).toContain("## Approach");
+      expect(plan).toContain("`src/ingest.ts`: add retryParse(input, attempts)");
+      expect(plan).toContain("**Implementation**\n\nAdd retryParse() to src/ingest.ts.");
+      expect(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")).toBe(plan);
     });
 
     it("sends requested changes back to the model without saving", async () => {
       const { tickets, app } = await atTicketStage();
-      const { ctx } = fakeCtx({ custom: [{ value: "revise", text: "Merge 01 and 02" }] });
+      const { ctx } = fakeCtx({ select: ["Request changes"], editor: ["Merge 01 and 02"] });
       const result = await call(tickets, { tickets: [ticket("01"), ticket("02")] }, ctx);
       expect(textOf(result)).toContain("Merge 01 and 02");
       expect(textOf(result)).toContain("Nothing was saved");
@@ -456,9 +461,12 @@ describe("plan_tickets", () => {
 
     it("asks for the change text in the editor and returns to the plan when it is left empty", async () => {
       const { tickets } = await atTicketStage();
-      const { ctx, log } = fakeCtx({ custom: ["revise", "revise"], editor: ["", "Split 01"] });
+      const { ctx, log } = fakeCtx({ select: ["Request changes", "Request changes"], editor: ["", "Split 01"] });
       const result = await call(tickets, { tickets: [ticket("01")] }, ctx);
-      expect(log.custom).toBe(2);
+      expect(log.selects).toHaveLength(2);
+      expect(log.custom).toBe(0);
+      // Coming back from the empty editor does not post the unchanged plan again.
+      expect(log.notices).toHaveLength(1);
       expect(textOf(result)).toContain("Split 01");
     });
 
@@ -474,17 +482,17 @@ describe("plan_tickets", () => {
       const original = [ticket("01"), ticket("02")];
       const edited = renderTicketsMarkdown([ticket("01"), ticket("02", { blockedBy: ["01"] })].map((item) => ({ ...item, suggestedTier: undefined })) as never);
       const broken = edited.replace("- 01", "- 99");
-      const { ctx, log } = fakeCtx({ custom: ["edit", "edit", "save"], editor: [broken, edited] });
+      const { ctx, log } = fakeCtx({ select: ["Edit tickets", "Edit tickets", "Save as draft"], editor: [broken, edited] });
       const result = await call(tickets, { tickets: original }, ctx);
       expect(textOf(result)).toContain("edited the tickets");
-      expect(log.notices[0]).toContain("blockedBy 99 does not exist");
+      expect(log.notices.join("\n")).toContain("blockedBy 99 does not exist");
       const plan = app.store.load(app.activeTaskId()!)!.plan!;
       expect(plan.groups[1]!.dependsOn).toEqual(["01-t01"]);
     });
 
     it("saves a draft when the review is closed with Esc", async () => {
       const { tickets, app } = await atTicketStage();
-      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: [undefined] }).ctx);
+      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ select: [undefined] }).ctx);
       expect(textOf(result)).toContain("Draft saved");
       const task = app.store.load(app.activeTaskId()!)!;
       expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
@@ -493,7 +501,7 @@ describe("plan_tickets", () => {
 
     it("approves inside plan_tickets and freezes the plan", async () => {
       const { tickets, app } = await atTicketStage();
-      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: ["approve"] }).ctx);
+      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ select: ["Approve plan"] }).ctx);
       expect(textOf(result)).toContain("/build");
       const task = app.store.load(app.activeTaskId()!)!;
       expect(task.approvedVersion).toBe(1);
