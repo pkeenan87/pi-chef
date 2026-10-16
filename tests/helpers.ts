@@ -39,9 +39,11 @@ providers:
     type: azure-foundry
     auth: azure-cli
     endpointEnv: AZURE_AI_ENDPOINT
-    deployments: { classifier: classifier, reasoning: reasoning, cheap: classifier }
   local: { type: openai-compatible, baseUrl: http://127.0.0.1:11434/v1, model: local-coder }
-models: { cheap: foundry, standard: anthropic, premium: openai }
+tiers:
+  cheap: [{ provider: foundry, model: classifier }]
+  standard: [{ provider: anthropic, model: claude-sonnet }]
+  premium: [{ provider: openai, model: gpt-5.4 }]
 routing: { maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
 workers: { tokenBudget: 8000 }
 budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 }

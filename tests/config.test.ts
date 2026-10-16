@@ -62,9 +62,8 @@ describe("parseConfig validation", () => {
     expect(() => parseConfig(`pricing:\n${row}${row}`)).toThrow(/duplicates/);
   });
 
-  it("rejects a tier whose provider is missing or has no model name", () => {
-    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
-    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
+  it("rejects a tier candidate whose provider is not defined", () => {
+    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\ntiers:\n  cheap: [{ provider: foundry, model: m }]\n")).toThrow(/tiers\.cheap\[0\]\.provider/);
   });
 
   it("accepts valid boundaries and normalizes dates", () => {
@@ -275,12 +274,12 @@ describe("loadConfig layering", () => {
 
   it("validates the layered result", () => {
     writeUser(base);
-    writeProject("models: { cheap: openai }\nproviders: { openai: { type: openai, auth: account-login } }\n");
+    writeProject("tiers: { cheap: [{ provider: openai, model: x }] }\nproviders: { openai: { type: openai, auth: account-login } }\n");
     // project overlay merges field-wise, so the user's model name survives
     expect(loadConfig(project).providers.openai?.model).toBe("gpt-5.4");
     writeUser("routing: { maxEscalations: 1 }\n");
-    writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\nmodels: { cheap: foundry }\n");
-    expect(() => loadConfig(project)).toThrow(/models\./);
+    writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\ntiers: { cheap: [{ provider: foundry, model: x }] }\n");
+    expect(() => loadConfig(project)).toThrow(/tiers\.cheap\[0\]\.provider/);
   });
 
   it("treats a user entry with no type as an adjustment, not a provider", () => {

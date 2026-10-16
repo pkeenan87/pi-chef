@@ -14,7 +14,6 @@ describe("tiers config", () => {
     expect(Object.keys(config.tiers)).not.toContain("classifier");
     expect(config.providers.vercel).not.toHaveProperty("decisionsPath");
     expect(config.routing).not.toHaveProperty("minConfidence");
-    expect(config.models).not.toHaveProperty("classifier");
     expect(config.warnings).toEqual([
       "providers.vercel.decisionsPath is no longer used; the Decisions classifier is gone.",
       "models.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).",
@@ -26,8 +25,9 @@ describe("tiers config", () => {
 
   it("drops a tier whose only candidates were Decisions models", () => {
     const config = parseConfig(`providers:\n  anthropic: { type: anthropic, auth: account-login, model: m }\n  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://x.services.ai.azure.com" }\nmodels: { cheap: anthropic, standard: anthropic, premium: anthropic }\ntiers:\n  cheap:\n    - { provider: foundry, model: d1, api: decisions }\n`);
-    expect(config.tiers.cheap).toBeUndefined();
-    expect(config.warnings).toHaveLength(1);
+    // models: anthropic gives cheap a one-candidate tier once the dropped Decisions list is gone.
+    expect(config.tiers.cheap).toEqual([{ provider: "anthropic", model: "m" }]);
+    expect(config.warnings).toHaveLength(2);
   });
 
   it("parses candidate lists, including advisor models", () => {
@@ -46,7 +46,11 @@ describe("tiers config", () => {
     expect(() => parseConfig("routing:\n  maxTier: batch\n")).toThrow(/routing\.maxTier/);
   });
 
-  it("turns the legacy models map into single-candidate tiers", () => {
+  it("turns the deprecated models map into single-candidate tiers, and drops what it cannot name", () => {
+    const legacy = parseConfig("providers:\n  anthropic: { type: anthropic, auth: account-login, model: m }\n  foundry: { type: azure-foundry, auth: azure-cli }\nmodels: { cheap: foundry, standard: anthropic }\n");
+    expect(legacy.tiers).toEqual({ standard: [{ provider: "anthropic", model: "m" }] });
+    expect(legacy.warnings?.join("\n")).toMatch(/models: is deprecated/);
+    expect(legacy.warnings?.join("\n")).toMatch(/models\.cheap: foundry is dropped/);
     const config = testConfig();
     expect(tierCandidates(config, "standard")).toEqual([{ provider: "anthropic", model: "claude-sonnet" }]);
     expect(tierCandidates(config, "cheap")).toEqual([{ provider: "foundry", model: "classifier" }]);

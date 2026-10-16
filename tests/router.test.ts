@@ -66,11 +66,10 @@ describe("classification and policy", () => {
 
   it("skips escalation tiers that resolve to the same provider and model", () => {
     const config = testConfig();
-    config.models.standard = "foundry";
-    config.providers.foundry!.deployments = { classifier: "classifier", cheap: "classifier", reasoning: "classifier" };
+    config.tiers.standard = [{ provider: "foundry", model: "classifier" }];
     const next = decideRoute(base, config, {}, { purpose: "implement", failedTier: "cheap", at });
     expect(next.tier).toBe("premium");
-    config.models.premium = "foundry";
+    config.tiers.premium = [{ provider: "foundry", model: "classifier" }];
     expect(decideRoute(base, config, {}, { purpose: "implement", failedTier: "cheap", at }).tier).toBe("cheap");
   });
 

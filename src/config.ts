@@ -120,9 +120,7 @@ export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
   providers: Partial<Record<ProviderId, ProviderConfig>>;
-  /** Legacy one-provider-per-tier map. Used for any tier that `tiers` does not list. */
-  models: Record<"cheap" | "standard" | "premium", ProviderId>;
-  /** Candidate models per tier, in preference order for ties. Overrides `models` for the tiers it lists. */
+  /** Candidate models per tier, in preference order for ties. A tier it does not list uses DEFAULT_TIERS. */
   tiers: Partial<Record<TierKey, TierCandidate[]>>;
   routing: {
     maxEscalations: number;
@@ -228,7 +226,6 @@ const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
   workspaceDir: ".pi-workflows",
   providers: {},
-  models: { cheap: "foundry", standard: "anthropic", premium: "openai" },
   tiers: {},
   routing: {
     maxEscalations: 3,
@@ -646,8 +643,8 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
 const MODEL_KEYS = ["cheap", "standard", "premium"] as const;
 
 /**
- * Cross-checks a resolved config: tier models must reference configured providers, and each
- * referenced provider must name a model so pricing and calls never use an empty id.
+ * Cross-checks a resolved config: tier candidates must reference configured providers. Only what the file wrote is
+ * checked; the built-in tiers are never validated against the file's providers.
  */
 export function validateResolvedConfig(config: WorkflowConfig, where = "config"): void {
   for (const [key, list] of Object.entries(config.tiers)) {
@@ -657,19 +654,24 @@ export function validateResolvedConfig(config: WorkflowConfig, where = "config")
       }
     });
   }
-  // With no provider configured nothing routes, as with no config file at all.
-  if (Object.keys(config.providers).length === 0) return;
-  for (const key of MODEL_KEYS) {
-    if (config.tiers[key]) continue;
-    const provider = config.models[key];
-    if (!config.providers[provider]) {
-      invalid(where, `models.${key}`, `references provider "${provider}" which is not defined under providers`);
+}
+
+/**
+ * The deprecated `models: { cheap: <provider> }` map becomes a one-candidate tier when `providers.<provider>.model` names
+ * the model and `tiers` does not list that tier. Otherwise (Foundry, or no model) the entry is dropped with a warning.
+ */
+function applyLegacyModels(norm: Record<string, unknown>, config: WorkflowConfig, warnings: string[]): void {
+  if (!isRecord(norm.models) || Object.keys(norm.models).length === 0) return;
+  warnOnce(warnings, "models: is deprecated; list candidates under tiers: instead (a models entry becomes a one-model tier).");
+  for (const [key, provider] of Object.entries(norm.models)) {
+    if (!(MODEL_KEYS as readonly string[]).includes(key) || typeof provider !== "string" || !isProviderId(provider)) continue;
+    if (config.tiers[key as TierKey]) continue;
+    const model = config.providers[provider]?.model;
+    if (provider === "foundry" || !model) {
+      warnOnce(warnings, `models.${key}: ${provider} is dropped (${provider === "foundry" ? "name the Foundry model under tiers" : `set providers.${provider}.model`}); the built-in ${key} tier applies.`);
+      continue;
     }
-    const tier: Tier = key;
-    if (!modelNameFor(config, provider, tier)) {
-      const hint = provider === "foundry" ? "providers.foundry.deployments" : `providers.${provider}.model`;
-      invalid(where, hint, `must name a model because models.${key} uses ${provider}`);
-    }
+    config.tiers[key as TierKey] = [{ provider, model }];
   }
 }
 
@@ -678,7 +680,6 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
   return {
     ...DEFAULTS,
     providers: { ...DEFAULTS.providers, ...obj("providers") } as WorkflowConfig["providers"],
-    models: { ...DEFAULTS.models, ...obj("models") } as WorkflowConfig["models"],
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
     session: { ...DEFAULTS.session, ...obj("session") } as WorkflowConfig["session"],
@@ -733,7 +734,8 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
 function mergeConfig(raw: unknown, where: string, warnings: string[] = []): WorkflowConfig {
   const norm = normalizeRaw(raw, where, warnings);
   const config = build(norm);
-  // A standalone document that spells out both providers and models must be self-consistent.
+  applyLegacyModels(norm, config, warnings);
+  // A standalone document that spells out both providers and tiers must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
   if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
     validateResolvedConfig(config, where);
@@ -1012,7 +1014,7 @@ export function loadConfig(cwd: string): WorkflowConfig {
   const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
   const where = projectRaw ? projectPath : userPath;
-  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
+  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where, warnings);
   validateResolvedConfig(config, where);
   const unpriced = unpricedTierModels(config);
   if (unpriced.length > 0) {
@@ -1117,26 +1119,13 @@ export function estimateUsd(
 }
 
 /**
- * Candidates for a tier: the config's `tiers` list; else, for cheap/standard/premium, the legacy `models` entry when it
- * names a model; else the built-in list. Never returns an empty model id.
+ * Candidates for a tier: the config's `tiers` list, else the built-in list. Never returns an empty model id.
  * `deterministic` and `advisor` are empty when nothing applies.
  */
 export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
   const explicit = config.tiers[tier];
   if (explicit) return explicit.filter((candidate) => candidate.model !== "");
-  const builtIn = () => DEFAULT_TIERS[tier];
-  if (tier === "cheap" || tier === "standard" || tier === "premium") {
-    // The legacy `models` entry, when its provider names a model; else the built-in list.
-    const provider = config.models[tier];
-    const model = modelNameFor(config, provider, tier);
-    return model ? [{ provider, model }] : builtIn();
-  }
-  const defined = builtIn();
-  if (defined.length > 0 || tier === "deterministic" || tier === "advisor") return defined;
-  // Standalone jobs run on the direct tier's models when nothing else applies.
-  if (tier === "batch") return tierCandidates(config, "cheap");
-  // Ticket tiers with nothing usable run on the general tier of the same strength.
-  return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+  return DEFAULT_TIERS[tier];
 }
 
 /**
@@ -1175,16 +1164,4 @@ export function unpricedTierModels(config: WorkflowConfig): string[] {
     }
   }
   return [...out];
-}
-
-/** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */
-export function modelNameFor(config: WorkflowConfig, provider: ProviderId, tier: Tier): string {
-  if (provider === "foundry") {
-    const deployments = config.providers.foundry?.deployments;
-    if (tier === "cheap" || tier === "deterministic") {
-      return deployments?.cheap ?? deployments?.classifier ?? "";
-    }
-    return deployments?.reasoning ?? "";
-  }
-  return config.providers[provider]?.model ?? "";
 }

@@ -69,7 +69,7 @@ function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean
 /** Registers Foundry, Vercel, and local chat models with Pi, once per distinct provider/tier configuration. */
 function syncProviders(config: WorkflowConfig): void {
   if (!piRef || typeof piRef.registerProvider !== "function") return;
-  const signature = JSON.stringify([config.providers, config.tiers, config.models]);
+  const signature = JSON.stringify([config.providers, config.tiers]);
   if (signature === registeredSignature) return;
   registeredSignature = signature;
   registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel });
