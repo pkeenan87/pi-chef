@@ -5,7 +5,7 @@ import type { PlanDocument, ReviewReport, RoutingDecision } from "../src/domain.
 import type { WorkflowContext } from "../src/orchestrator/context.js";
 import { reviewCandidates } from "../src/orchestrator/ship.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
-import { modelReviewLines, runModelReview, type ModelReviewCall } from "../src/review/model-review.js";
+import { modelReviewLines, parseModelFindings, runModelReview, type ModelReviewCall } from "../src/review/model-review.js";
 import { emptyPr, MemoryGitHub, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
@@ -67,16 +67,52 @@ describe("model review retries", () => {
     expect(lines.at(-1)).toBe("- note: part(s) 2 of 3 were not reviewed");
   });
 
-  it("does not retry an answer that is not a findings list, and stops when told to", async () => {
+  it("retries an answer that is not a findings list on the next candidate, and stops when told to", async () => {
     let n = 0;
     const chat: ChatFn = async (candidate) => ({ text: n++ === 0 ? "I could not review this." : "[]", usage, provider: candidate.provider, model: candidate.model });
     const review = await runModelReview(chat, [grok, sonnet], { plan, diff, maxDiffChars: 700, stop: () => (n >= 2 ? "the task or daily budget is exhausted" : undefined) });
     expect(n).toBe(2);
     expect(review.parts!.map((part) => [part.reviewedBy, part.failures])).toEqual([
-      [undefined, ["xai/grok-4.7: the answer was not a JSON list of findings: I could not review this."]],
-      ["anthropic/claude-sonnet-5-5", []],
+      ["anthropic/claude-sonnet-5-5", ["xai/grok-4.7: the answer was not a JSON list of findings: I could not review this."]],
+      [undefined, ["not attempted: the task or daily budget is exhausted"]],
       [undefined, ["not attempted: the task or daily budget is exhausted"]],
     ]);
+  });
+
+  it("reviews a part on the next candidate after garbage, names both, ledgers the garbage call as a failure, and redacts the excerpt", async () => {
+    const answers = new Map([["xai", "Sorry, token=abcdef123456 is all I can say."], ["anthropic", JSON.stringify([{ severity: "low", category: "tests", message: "from anthropic" }])]]);
+    const chat: ChatFn = async (candidate) => ({ text: answers.get(candidate.provider)!, usage, provider: candidate.provider, model: candidate.model });
+    const recorded: ModelReviewCall[] = [];
+    const review = await runModelReview(chat, [grok, sonnet], { plan, diff: diff.slice(0, 600), maxDiffChars: 700, onCall: (call) => void recorded.push(call) });
+    expect(recorded.map((call) => [call.candidate.provider, call.retry, call.outcome])).toEqual([["xai", 0, "failure"], ["anthropic", 1, "success"]]);
+    expect(review.error).toBeUndefined();
+    expect(review.findings).toHaveLength(1);
+    expect(review.parts![0]).toMatchObject({ reviewedBy: "anthropic/claude-sonnet-5-5" });
+    const failure = review.parts![0]!.failures[0]!;
+    expect(failure).toContain("xai/grok-4.7: the answer was not a JSON list of findings");
+    expect(failure).toContain("[REDACTED]");
+    expect(failure).not.toContain("abcdef123456");
+    const line = modelReviewLines(review).find((item) => item.startsWith("- part 1"))!;
+    expect(line).toContain("anthropic/claude-sonnet-5-5");
+    expect(line).toContain("after xai/grok-4.7");
+  });
+
+  it("marks the part not reviewed when every candidate answers with garbage", async () => {
+    const chat: ChatFn = async (candidate) => ({ text: "no list here", usage, provider: candidate.provider, model: candidate.model });
+    const review = await runModelReview(chat, [grok, sonnet], { plan, diff: diff.slice(0, 600), maxDiffChars: 700 });
+    expect(review.parts![0]!.failures).toHaveLength(2);
+    expect(review.error).toContain("the call failed");
+  });
+
+  it("parses fenced JSON, a list inside prose, and an object with findings", () => {
+    const one = '[{"severity":"high","message":"bad"}]';
+    expect(parseModelFindings("```json\n" + one + "\n```")).toHaveLength(1);
+    expect(parseModelFindings("Here is my review (see [1] below):\n" + one + "\nHope that helps.")).toEqual([{ severity: "high", category: "general", message: "bad" }]);
+    expect(parseModelFindings('{"findings": ' + one + "}")).toHaveLength(1);
+    expect(parseModelFindings('Result: {"findings": ' + one + "} done")).toHaveLength(1);
+    expect(parseModelFindings('[{"message":"has ] and [ inside"}] trailing')).toEqual([{ severity: "medium", category: "general", message: "has ] and [ inside" }]);
+    expect(parseModelFindings("see [1] and [2]")).toBeUndefined();
+    expect(parseModelFindings("no list")).toBeUndefined();
   });
 
   it("orders the review tier: routed candidate, then another provider, then by score; excluded ones are left out", () => {

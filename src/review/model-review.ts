@@ -85,18 +85,55 @@ export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars
   return { text: `${head}${body}`, truncated };
 }
 
-/** Reads the model's answer leniently: the first JSON array in the text, entries with a usable message. Undefined when there is none. */
-export function parseModelFindings(text: string): ModelFinding[] | undefined {
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start < 0 || end <= start) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
+/** Balanced `[...]` and `{...}` spans of the text in order of their start, skipping brackets inside JSON strings. */
+function bracketSpans(text: string): string[] {
+  const spans: string[] = [];
+  for (let start = 0; start < text.length; start++) {
+    const open = text[start];
+    if (open !== "[" && open !== "{") continue;
+    const stack: string[] = [];
+    let inString = false;
+    for (let i = start; i < text.length; i++) {
+      const char = text[i]!;
+      if (inString) {
+        if (char === "\\") i++;
+        else if (char === '"') inString = false;
+      } else if (char === '"') inString = true;
+      else if (char === "[" || char === "{") stack.push(char === "[" ? "]" : "}");
+      else if (char === "]" || char === "}") {
+        if (stack.pop() !== char) break;
+        if (stack.length === 0) {
+          spans.push(text.slice(start, i + 1));
+          break;
+        }
+      }
+    }
   }
-  if (!Array.isArray(parsed)) return undefined;
+  return spans;
+}
+
+/** A parsed value that is a findings list: an array holding objects (or empty), or `{"findings": [...]}`. */
+function asFindingList(value: unknown): unknown[] | undefined {
+  const list = Array.isArray(value) ? value : value && typeof value === "object" && Array.isArray((value as { findings?: unknown }).findings) ? (value as { findings: unknown[] }).findings : undefined;
+  return list && (list.length === 0 || list.some((item) => item && typeof item === "object" && !Array.isArray(item))) ? list : undefined;
+}
+
+/**
+ * Reads the model's answer leniently: the whole text, a ```json fence, or the first `[ ... ]` (or `{"findings": [...]}`)
+ * inside prose that parses as a list of objects; entries with a usable message are kept. Undefined when there is none.
+ */
+export function parseModelFindings(text: string): ModelFinding[] | undefined {
+  const fenced = [...text.matchAll(/```[a-z]*\s*\n?([\s\S]*?)```/gi)].map((match) => match[1]!);
+  let parsed: unknown[] | undefined;
+  for (const candidate of [text.trim(), ...fenced.map((item) => item.trim()), ...bracketSpans(text)]) {
+    try {
+      parsed = asFindingList(JSON.parse(candidate));
+    } catch {
+      continue;
+    }
+    if (parsed) break;
+  }
+  if (!parsed) return undefined;
   const findings: ModelFinding[] = [];
   for (const item of parsed) {
     if (!item || typeof item !== "object") continue;
@@ -137,7 +174,8 @@ const label = (candidate: Candidate) => `${candidate.provider}/${candidate.model
  * rest is reported as not reviewed), each under `timeoutMs`. `candidates` is the review tier in preference order. A
  * part whose call throws (transport, stream end, timeout) is retried once on the next candidate, and later parts
  * start on the candidate that has failed least in this pass, so one bad provider cannot sink the whole pass. An answer
- * that is not a JSON list is a failed part, not retried. Never throws for a failed call; `onCall` gets every call as
+ * that is not a JSON list of findings counts as that candidate's failure and is retried the same way, with a short
+ * redacted excerpt kept in the report. Never throws for a failed call; `onCall` gets every call as
  * it finishes so the caller can ledger it and count it against that candidate only. `stop` is asked before each call
  * and ends the pass with its reason (for example an exhausted budget).
  */
@@ -220,7 +258,8 @@ export async function runModelReview(
       if (parsed === undefined) {
         failed.set(label(candidate), (failed.get(label(candidate)) ?? 0) + 1);
         result.failures.push(`${label(candidate)}: the answer was not a JSON list of findings: ${redact(response.text).trim().slice(0, 200)}`);
-        break;
+        input.onProgress?.(`part ${index + 1}: ${label(candidate)} did not answer with a findings list`);
+        continue;
       }
       findings.push(...parsed.map((finding) => ({ ...finding, message: redact(finding.message), ...(finding.evidence ? { evidence: redact(finding.evidence) } : {}) })));
       result.reviewedBy = label(candidate);
