@@ -27,7 +27,7 @@ describe("pi extension surface", () => {
     for (const spec of COMMANDS) {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
-    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "review", "route", "advisor", "cost", "status", "auth"]);
+    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "plans", "build", "review", "route", "advisor", "cost", "status", "auth"]);
     expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "chef"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");

@@ -41,3 +41,6 @@ export function cell(text: string, max?: number): string {
 export function formatUsdShort(usd: number): string {
   return usd > 0 && usd < 0.005 ? "<$0.01" : `$${usd.toFixed(2)}`;
 }
+
+/** A markdown table: pass cells through `cell` so a `|` cannot split a row. */
+export const mdTable = (head: string[], rows: string[][]): string[] => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];

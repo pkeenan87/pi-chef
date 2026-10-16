@@ -94,7 +94,7 @@ function orderedTickets(tickets: Ticket[]): Ticket[] {
 }
 
 /** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
-async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
+export async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
   const workspace = workspaceName(ctx);
   return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
 }

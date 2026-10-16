@@ -37,7 +37,7 @@ describe("/status tables", () => {
   it("shows a task mid-build", async () => {
     const t = await built();
     const text = (await t.app.status()).text;
-    expect(text.startsWith("## Status · Building · ticket 02 of 2\n\n| | |\n| --- | --- |\n| Task | " + t.taskId + " (IMPLEMENTING) |")).toBe(true);
+    expect(text.startsWith("## Status · Building · ticket 02 of 2\n\n| | |\n| --- | --- |\n| Task | " + "retry-ingest-parser (" + t.taskId + ") |")).toBe(true);
     expect(text).toMatch(/\| Plan \| v1 approved \d\d:\d\d \|/);
     expect(text).toContain("| Branch | chef/task-test (base ");
     expect(text).toContain(") · 1 commit ahead |");
