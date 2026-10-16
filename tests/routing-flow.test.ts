@@ -118,8 +118,6 @@ describe("advisor", () => {
     expect((await app.advisor("  ")).code).toBe("USAGE");
     const noChat = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith() });
     expect((await noChat.advisor("q")).code).toBe("NO_CHAT");
-    const none = workflow(await tempRepo(), { auth: authWith(), chat });
-    expect((await none.advisor("q")).code).toBe("NO_ADVISOR");
   });
 
   it("records a failed advisor call as a failure and stays in the same phase", async () => {

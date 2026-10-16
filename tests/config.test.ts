@@ -146,7 +146,7 @@ describe("loadConfig layering", () => {
 
   const base = `${PROVIDERS_BLOCK}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`;
 
-  it("old configs without ticket tiers use cheap, standard and premium for low, medium and high, with a warning", () => {
+  it("configs without ticket tiers use the built-in ticket tiers", () => {
     writeProject(`${base}tiers:
   cheap:
     - { provider: local, model: m }
@@ -157,16 +157,18 @@ describe("loadConfig layering", () => {
 `);
     const config = loadConfig(project);
     const models = (tier: "ticketLow" | "ticketMedium" | "ticketHigh") => tierCandidates(config, tier).map((item) => item.model);
-    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["m"], ["claude-sonnet"], ["gpt-5.4"]]);
-    expect(config.warnings?.join("\n")).toMatch(/ticketLow\/ticketMedium\/ticketHigh not set: \/build uses cheap, standard and premium/);
-    // With all three set, there is nothing to warn about.
+    // No ticket lists: the built-in ticket tiers apply, whether or not the config defines their providers.
+    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["grok-4.7"], ["claude-sonnet-5-5"], ["gpt-6.1-sol"]]);
+    // With all three set, the config's models are used.
     writeProject(`${base}tiers:
   cheap: [{ provider: local, model: m }]
   ticketLow: [{ provider: local, model: m }]
   ticketMedium: [{ provider: anthropic, model: claude-sonnet }]
   ticketHigh: [{ provider: openai, model: gpt-5.4 }]
 `);
-    expect(loadConfig(project).warnings ?? []).toEqual([]);
+    const set = loadConfig(project);
+    expect(["ticketLow", "ticketMedium", "ticketHigh"].map((tier) => tierCandidates(set, tier as "ticketLow").map((item) => item.model))).toEqual([["m"], ["claude-sonnet"], ["gpt-5.4"]]);
+    expect(set.warnings?.join("\n")).not.toMatch(/not set/);
   });
 
   it("an old commandAllowlist key loads with a warning, from either file", () => {
@@ -309,7 +311,7 @@ models: { cheap: local, standard: local, premium: local }
     writeProject("routing: { maxEscalations: 1 }\n");
     const config = loadConfig(project);
     expect(config.providers.local?.apiKeyEnv).toBe("LOCAL_KEY");
-    expect(config.warnings).toBeUndefined();
+    expect(config.warnings?.join("\n") ?? "").not.toMatch(/providers\./);
   });
 
   it("S1/S2: rejects non-https endpoints, a non-loopback http local baseUrl, bad audience, and bad apiKeyEnv names", () => {

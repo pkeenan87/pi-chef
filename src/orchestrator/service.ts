@@ -1,6 +1,6 @@
 import path from "node:path";
 import { loadConfig, type WorkflowConfig } from "../config.js";
-import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketTier, type TokenUsage } from "../domain.js";
+import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
@@ -8,7 +8,7 @@ import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { advisor } from "./advisor.js";
 import type { QuotaUsage } from "../cost/quota.js";
-import { buildReport, finishChunk, nextChunk, startBuild } from "./build.js";
+import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
 import { budgetRemainingUsd, budgetState, checkBudget, quotaState, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import type { WorkflowContext } from "./context.js";
@@ -235,6 +235,11 @@ export class Workflow {
   /** Checks, commit, and bookkeeping for the chunk that just ran. */
   finishChunk(ticketId: string, result: { lastText: string; aborted: boolean }, options: { final?: boolean } = {}): ReturnType<typeof finishChunk> {
     return finishChunk(this.ctx, ticketId, result, options);
+  }
+
+  /** Rolls a ticket back to not started when its session never took its first turn. */
+  unstartChunk(ticketId: string, previous?: TicketRun): Promise<void> {
+    return unstartChunk(this.ctx, ticketId, previous);
   }
 
   /** The build's ticket table and next step, as markdown. */

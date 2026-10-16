@@ -41,7 +41,8 @@ describe("tiers config", () => {
     const withBatch = parseConfig(`${tieredYaml().replace("  standard:", "  batch:\n    - { provider: openai, model: gpt-6-luna }\n  standard:").replace("    - { provider: openai, model: gpt-6-luna }\n    - { provider: anthropic, model: claude-haiku-5-5 }\n  batch", "    - { provider: anthropic, model: claude-haiku-5-5 }\n  batch")}`);
     expect(tierCandidates(withBatch, "cheap").map((item) => item.model)).toEqual(["claude-haiku-5-5"]);
     expect(tierCandidates(withBatch, "batch").map((item) => item.model)).toEqual(["gpt-6-luna"]);
-    expect(tierCandidates(tieredConfig(), "batch").map((item) => item.model)).toEqual(["gpt-6-luna", "claude-haiku-5-5"]);
+    // No batch list: the built-in batch tier applies (openai is defined here).
+    expect(tierCandidates(tieredConfig(), "batch").map((item) => item.model)).toEqual(["gpt-6-luna"]);
     expect(() => parseConfig("routing:\n  maxTier: batch\n")).toThrow(/routing\.maxTier/);
   });
 
@@ -49,8 +50,9 @@ describe("tiers config", () => {
     const config = testConfig();
     expect(tierCandidates(config, "standard")).toEqual([{ provider: "anthropic", model: "claude-sonnet" }]);
     expect(tierCandidates(config, "cheap")).toEqual([{ provider: "foundry", model: "classifier" }]);
-    expect(tierCandidates(config, "advisor")).toEqual([]);
-    expect(tierCandidates(config, "deterministic")).toEqual([]);
+    // No list: the built-in tiers apply, limited to the providers this config defines.
+    expect(tierCandidates(config, "advisor").map((item) => `${item.provider}/${item.model}`)).toEqual(["openai/gpt-6-astra", "anthropic/claude-fable-5-1", "foundry/gpt-6-astra"]);
+    expect(tierCandidates(config, "deterministic")).toEqual([{ provider: "local", model: "qwen2.5-coder:7b" }]);
   });
 
   it("mixes: an explicit tier overrides models for that tier only", () => {

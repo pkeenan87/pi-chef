@@ -160,7 +160,7 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
           edited = true;
         }
       }
-      const { plan, files, markdown } = await workflow.commitTickets(tickets, advisorReview);
+      const { plan, files, markdown, table } = await workflow.commitTickets(tickets, advisorReview);
       // Also kept in the transcript (posted when this turn ends), so the plan stays visible.
       workflow.showMarkdown(markdown);
       const editNote = edited ? " The user edited the tickets before saving." : "";
@@ -168,9 +168,9 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       if (approve) {
         const approved = await workflow.approveDraft();
         if (!approved.ok) throw new Error(`The tickets were saved but approval failed: ${approved.text}`);
-        return text(`${tickets.length} tickets written (${files.length} files). The user approved plan v${plan.version}; they run /build next.${editNote} ${ending}`, { tickets, files, version: plan.version, approved: true });
+        return text(`${tickets.length} tickets written (${files.length} files). The user approved plan v${plan.version}; they run /build next.${editNote}\n\n${table}\n\n${ending}`, { tickets, files, version: plan.version, approved: true });
       }
-      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and was shown to the user in full. Draft saved; the user can /show-plan to approve it later.${editNote} ${ending}`;
+      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and was shown to the user in full. Draft saved; the user can /show-plan to approve it later.${editNote}\n\n${table}\n\nMention in your summary how many tickets are low, medium and high and who builds them. ${ending}`;
       return text(summary, { tickets, files, version: plan.version, approved: false });
     },
   });

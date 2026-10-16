@@ -1,5 +1,7 @@
+import { tierCandidates, type WorkflowConfig } from "../config.js";
+import { advisorsFor } from "../review/advisors.js";
 import { containsSecret } from "../redact.js";
-import { WorkflowError, type AdvisorOpinion, type PlanAdvisorReview, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
+import { DIFFICULTY_TIER, ticketDifficulty, WorkflowError, type AdvisorOpinion, type PlanAdvisorReview, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
 
 /** The human-readable plan in the task folder: the document shown for review and approval. */
 export const PLAN_FILE = "plan.md";
@@ -119,11 +121,34 @@ export function advisorReviewLines(review: PlanAdvisorReview | undefined): strin
   return lines;
 }
 
+/** Who builds a ticket and who advises on it, from the effective config: the first candidate of its difficulty tier. */
+export function ticketRouteView(config: WorkflowConfig, ticket: Ticket): { implementer: string; advisors: string } {
+  const difficulty = ticketDifficulty(ticket);
+  const first = tierCandidates(config, DIFFICULTY_TIER[difficulty])[0];
+  const candidates = tierCandidates(config, "advisor").map((item) => ({ provider: item.provider, model: item.model }));
+  const picked = advisorsFor({ difficulty, implementerProvider: first?.provider ?? "", candidates });
+  const advisors = picked.length === 0 ? "—" : picked.length === 1 ? `${picked[0]!.provider}/${picked[0]!.model}` : picked.length === 2 ? "both" : `all ${picked.length}`;
+  return { implementer: first ? `${first.provider}/${first.model}` : "(none)", advisors };
+}
+
+/** The "Tickets" summary table: number, title, difficulty, implementer, advisors, and what blocks it. */
+export function ticketsTableLines(tickets: Ticket[], config: WorkflowConfig): string[] {
+  const cell = (text: string) => text.replace(/\|/g, "/").replace(/\s+/g, " ").trim();
+  return [
+    "| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ...tickets.map((ticket) => {
+      const view = ticketRouteView(config, ticket);
+      return `| ${cell(ticket.id)} | ${cell(ticket.title)} | ${ticketDifficulty(ticket)} | ${view.implementer} | ${view.advisors} | ${ticket.blockedBy.join(", ") || "none"} |`;
+    }),
+  ];
+}
+
 /**
  * The full plan a person reviews before approval: the technical spec, then every ticket with its implementation
  * notes, acceptance criteria, and dependencies, then the execution order. Plans without tickets use `renderPlan`.
  */
-export function renderPlanReview(plan: PlanDocument, spec: string | undefined): string {
+export function renderPlanReview(plan: PlanDocument, spec: string | undefined, config?: WorkflowConfig): string {
   const tickets = plan.tickets ?? [];
   if (tickets.length === 0) return renderPlan(plan);
   const order = waves(plan.groups).map((wave, index) => `${index + 1}. ${wave.map((group) => group.id.split("-")[0]).join(", ")}`);
@@ -137,13 +162,10 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined): 
   // The spec's own title is replaced by the plan title; its sections follow as they are.
   const body = (spec ?? "").replace(/^# Spec\s*\n/, "").trim();
   lines.push(body ? `## Summary\n\n${body}` : `## Summary\n\n${plan.summary}`, "", "## Tickets");
+  if (config) lines.push("", ...ticketsTableLines(tickets, config));
   for (const ticket of tickets) {
-    const meta = [
-      `Blocked by: ${ticket.blockedBy.join(", ") || "none"}`,
-      ...(ticket.difficulty ? [`difficulty: ${ticket.difficulty}`] : ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
-      `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`,
-    ];
-    lines.push("", `### ${ticket.id}: ${ticket.title}`, "", meta.join(" · "));
+    const meta = [`Blocked by: ${ticket.blockedBy.join(", ") || "none"}`, `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`];
+    lines.push("", `### ${ticket.id} · ${ticketDifficulty(ticket)} · ${ticket.title}`, "", meta.join(" · "));
     if (ticket.files?.length) lines.push(`Files: ${ticket.files.map((file) => `\`${file}\``).join(", ")}`);
     lines.push("", "**What to build**", "", ticket.whatToBuild);
     if (ticket.implementation) lines.push("", "**Implementation**", "", ticket.implementation);

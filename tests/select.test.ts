@@ -4,7 +4,7 @@ import { budgetStatusFor, buildCostRecord, summarize } from "../src/cost/ledger.
 import { quotaLines, quotaUsage } from "../src/cost/quota.js";
 import { modelMetricKey, type CostRecord } from "../src/domain.js";
 import { decideRoute } from "../src/router/policy.js";
-import { sampleBeta, selectCandidate } from "../src/router/select.js";
+import { hardExclusion, sampleBeta, selectCandidate } from "../src/router/select.js";
 import { reviewMetricType, type SuccessTable } from "../src/router/stats.js";
 import { seededRng, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
@@ -139,9 +139,13 @@ describe("selector ranking", () => {
     }
   });
 
-  it("returns blocked no_candidates for a tier with nothing configured", () => {
-    const result = selectCandidate({ tier: "advisor", taskType: "general", config: pair(), table: {}, at });
-    expect(result.blocked?.code).toBe("no_candidates");
+  it("returns blocked no_candidates for a tier with nothing usable, and never picks an empty model id", () => {
+    const config = pair();
+    config.tiers.cheap = [{ provider: "anthropic", model: "" }];
+    const result = selectCandidate({ tier: "cheap", taskType: "general", config, table: {}, at });
+    expect(result.blocked).toMatchObject({ code: "no_candidates", message: "No model configured for tier cheap; add tiers.cheap to your config." });
+    const direct = hardExclusion({ config, table: {}, taskType: "general", tier: "cheap", candidate: { provider: "anthropic", model: "" }, price: 0, at });
+    expect(direct).toBe("no model id");
   });
 
   it("sampleBeta stays in (0, 1) and tracks the mean", () => {

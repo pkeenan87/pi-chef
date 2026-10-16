@@ -38,11 +38,11 @@ describe("ticket tiers in decideRoute", () => {
     expect(nextTier("ticketHigh", "standard")).toBeUndefined();
   });
 
-  it("starts security-sensitive work at ticketHigh at least", () => {
+  it("does not raise security-sensitive work above its ticket's difficulty tier, but still asks for approval", () => {
     const config = opusOnly();
     const decision = decideRoute(classification({ required_capabilities: ["auth"] }), config, {}, { purpose: "implement", ticketTier: "ticketLow", rng, strictAvailability: true });
-    expect(decision).toMatchObject({ tier: "ticketHigh", model: "gpt-6.1-sol" });
-    expect(decision.reason).toContain("ticket_sensitive_floor");
+    expect(decision).toMatchObject({ tier: "ticketLow", model: "grok-4.7", requireHumanApproval: true });
+    expect(decision.reason).not.toContain("ticket_sensitive_floor");
   });
 
   it("does not let a proven lower tier route a ticket below its difficulty", () => {
@@ -82,7 +82,7 @@ describe("/status and /route show who does what", () => {
   it("/status lists the session, compaction, review and ticket models", async () => {
     const app = workflow(await tempRepo(), { config: opusOnly() });
     const text = (await app.status()).text;
-    expect(text).toContain("Routing: session anthropic/claude-opus-5-5 · compaction cheap: openai/gpt-6-luna, anthropic/claude-haiku-5-5 · batch: openai/gpt-6-luna, anthropic/claude-haiku-5-5 · review premium: anthropic/claude-opus-5-5");
+    expect(text).toContain("Routing: session anthropic/claude-opus-5-5 · compaction cheap: openai/gpt-6-luna, anthropic/claude-haiku-5-5 · batch: openai/gpt-6-luna · review premium: anthropic/claude-opus-5-5");
     expect(text).toContain("Ticket models: low xai/grok-4.7 · medium anthropic/claude-sonnet-5-5 · high openai/gpt-6.1-sol · then anthropic/claude-opus-5-5 (up to 3 escalation(s))");
   });
 

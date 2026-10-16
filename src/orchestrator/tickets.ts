@@ -1,6 +1,6 @@
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
-import { DIFFICULTIES, isDifficulty, isTier, type PlanGroup, type Ticket } from "../domain.js";
+import { DIFFICULTIES, isDifficulty, isTier, ticketDifficulty, type PlanGroup, type Ticket } from "../domain.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { assertGraph } from "./plan.js";
 
@@ -208,6 +208,8 @@ export function renderTicket(ticket: Ticket): string {
     ...meta,
     "",
     `# ${ticket.id}: ${ticket.title}`,
+    "",
+    `**Difficulty: ${ticketDifficulty(ticket)}**`,
     "",
     "## What to build",
     "",

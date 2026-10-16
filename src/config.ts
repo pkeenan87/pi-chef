@@ -188,6 +188,29 @@ export interface WorkflowConfig {
 /** Default for `budgets.unknownCallUsd`. */
 export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
 
+/**
+ * Built-in tiers: the same model lists as the sample .pi-workflows/config.yaml. A config's `tiers` replaces a tier's list.
+ * No prices live here: a model without a `pricing` row has an unknown cost (see the config warning).
+ */
+export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
+  deterministic: [{ provider: "local", model: "qwen2.5-coder:7b" }],
+  cheap: [{ provider: "anthropic", model: "claude-haiku-5-5" }],
+  batch: [{ provider: "openai", model: "gpt-6-luna" }],
+  standard: [
+    { provider: "anthropic", model: "claude-sonnet-5-5" },
+    { provider: "openai", model: "gpt-6.1-sol" },
+  ],
+  premium: [{ provider: "anthropic", model: "claude-opus-5-5" }],
+  ticketLow: [{ provider: "xai", model: "grok-4.7", label: "Grok 4.7 (SuperGrok)" }],
+  ticketMedium: [{ provider: "anthropic", model: "claude-sonnet-5-5" }],
+  ticketHigh: [{ provider: "openai", model: "gpt-6.1-sol" }],
+  advisor: [
+    { provider: "openai", model: "gpt-6-astra" },
+    { provider: "anthropic", model: "claude-fable-5-1" },
+    { provider: "foundry", model: "gpt-6-astra", label: "GPT Astra (Foundry deployment)" },
+  ],
+};
+
 const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
   workspaceDir: ".pi-workflows",
@@ -938,12 +961,9 @@ export function loadConfig(cwd: string): WorkflowConfig {
   const where = projectRaw ? projectPath : userPath;
   const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
   validateResolvedConfig(config, where);
-  // An old config lists tiers but no ticket tiers: /build then runs low, medium and high tickets on cheap, standard and premium.
-  if (Object.keys(config.tiers).length > 0) {
-    const missing = TICKET_TIERS.filter((tier) => !config.tiers[tier]);
-    if (missing.length > 0) {
-      warnings.push(`tiers.${missing.join("/")} not set: /build uses cheap, standard and premium for low, medium and high tickets. Add ticketLow, ticketMedium and ticketHigh under tiers to pick the models.`);
-    }
+  const unpriced = unpricedTierModels(config);
+  if (unpriced.length > 0) {
+    warnings.push(`No pricing rows for ${unpriced.join(", ")}: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.`);
   }
   if (warnings.length > 0) config.warnings = warnings;
   if (config.proprietaryCode && config.orgProviderAllowlist.length === 0) {
@@ -1043,21 +1063,39 @@ export function estimateUsd(
 }
 
 /**
- * Candidates for a tier: the explicit `tiers` list when present, else the legacy `models` entry as a
- * single candidate. `deterministic` and `advisor` have no legacy entry, so they are empty unless listed.
+ * Candidates for a tier: the config's `tiers` list; else, for cheap/standard/premium, the legacy `models` entry when it
+ * names a model; else the built-in list. Never returns an empty model id.
+ * `deterministic` and `advisor` are empty when nothing applies.
  */
 export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
   const explicit = config.tiers[tier];
-  if (explicit) return explicit;
-  if (tier === "deterministic" || tier === "advisor") return [];
-  // Standalone jobs run on the direct tier's models when the config has no batch list.
-  if (tier === "batch") return tierCandidates(config, "cheap");
-  // Ticket tiers missing from an older config run on the general tier of the same strength.
-  if (tier === "ticketLow" || tier === "ticketMedium" || tier === "ticketHigh") {
-    return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+  if (explicit) return explicit.filter((candidate) => candidate.model !== "");
+  const builtIn = () => DEFAULT_TIERS[tier];
+  if (tier === "cheap" || tier === "standard" || tier === "premium") {
+    // The legacy `models` entry, when its provider names a model; else the built-in list.
+    const provider = config.models[tier];
+    const model = modelNameFor(config, provider, tier);
+    return model ? [{ provider, model }] : builtIn();
   }
-  const provider = config.models[tier];
-  return [{ provider, model: modelNameFor(config, provider, tier) }];
+  const defined = builtIn();
+  if (defined.length > 0 || tier === "deterministic" || tier === "advisor") return defined;
+  // Standalone jobs run on the direct tier's models when nothing else applies.
+  if (tier === "batch") return tierCandidates(config, "cheap");
+  // Ticket tiers with nothing usable run on the general tier of the same strength.
+  return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+}
+
+/** `provider/model` of every tier candidate that has no pricing row at all (any date, any billing). */
+export function unpricedTierModels(config: WorkflowConfig): string[] {
+  const priced = new Set(config.pricing.map((row) => `${row.provider}/${row.model}`));
+  const out = new Set<string>();
+  for (const tier of Object.keys(DEFAULT_TIERS) as TierKey[]) {
+    for (const candidate of tierCandidates(config, tier)) {
+      const name = `${candidate.provider}/${candidate.model}`;
+      if (!priced.has(name)) out.add(name);
+    }
+  }
+  return [...out];
 }
 
 /** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */

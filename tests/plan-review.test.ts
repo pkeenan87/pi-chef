@@ -117,7 +117,7 @@ describe("/show-plan on a draft", () => {
     expect(closed.text).toContain("/show-plan to approve later");
     expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBeUndefined();
     expect(seen[0]!.markdown).toContain("## Approach");
-    expect(seen[0]!.markdown).toContain("### 02: Ticket 02");
+    expect(seen[0]!.markdown).toContain("### 02 · medium · Ticket 02");
     expect(seen[0]!.markdown).toContain("## Execution order\n\n1. 01\n2. 02");
     expect(seen[0]!.actions.map((action) => action.value)).toEqual(["approve", "revise", "close"]);
     app.bind({ review: async () => ({ value: "approve" }) });

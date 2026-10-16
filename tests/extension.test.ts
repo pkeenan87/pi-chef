@@ -167,13 +167,88 @@ describe("pi extension surface", () => {
       cwd,
       hasUI: true,
       model: { provider: "openai", id: "gpt-user" },
-      modelRegistry: { find: () => undefined },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
       ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
       newSession: async () => ({ cancelled: true }),
       compact() {},
     });
     expect(notices.join("\n")).toContain("did not open a new session");
     expect(app.store.load(app.activeTaskId()!)!.build!.currentTicket).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("does not open a session when Pi does not know the routed model or has no login for it", async () => {
+    for (const registry of [{ find: () => undefined }, { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => false }]) {
+      const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+      const { commands } = fakePi();
+      bindWorkflow(app);
+      const notices: string[] = [];
+      let opened = 0;
+      await commands.get("build")!.handler("", {
+        cwd,
+        hasUI: true,
+        model: { provider: "openai", id: "gpt-user" },
+        modelRegistry: registry,
+        ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+        newSession: async () => (opened++, { cancelled: false }),
+        compact() {},
+      });
+      expect(opened).toBe(0);
+      expect(notices.join("\n")).toMatch(/Ticket 01 is routed to anthropic\/claude-sonnet-5-5, which Pi does not know or is not signed in\. Fix the tier config or sign in, then \/build again\./);
+      const state = app.store.load(app.activeTaskId()!)!;
+      expect(state.ticketRuns?.["01"]).toBeUndefined();
+      expect(state.build!.currentTicket).toBeUndefined();
+      bindWorkflow(undefined);
+    }
+  });
+
+  it("never prints an empty model id when the model to restore is empty or unknown", async () => {
+    const { handlers } = fakePi();
+    const slot = Symbol.for("pi-cost-router.restore-model");
+    for (const id of ["", "ghost"]) {
+      const notices: string[] = [];
+      (globalThis as Record<symbol, unknown>)[slot] = { provider: "openai", id };
+      handlers.get("session_start")!({}, { cwd: "/", hasUI: true, model: { provider: "default", id: "model" }, modelRegistry: { find: () => undefined, getAvailable: () => [] }, ui: { notify: (message: string) => notices.push(message), setStatus() {} } });
+      const text = notices.join("\n");
+      expect(text).toContain("Pi does not know");
+      expect(text).not.toMatch(/\/model openai\/(\s|\.|$)/);
+      expect(text).toContain(id ? "openai/ghost" : "(no model id)");
+    }
+    delete (globalThis as Record<symbol, unknown>)[slot];
+  });
+
+  it("never throws inside withSession: a model mismatch becomes a failed result after newSession returns", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+    const { commands } = fakePi();
+    bindWorkflow(app);
+    const notices: string[] = [];
+    let threwInside = false;
+    // Like Pi: an error from withSession would escape newSession and kill the app.
+    const make = (): Record<string, unknown> => ({
+      cwd,
+      hasUI: true,
+      model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      async sendMessage() {},
+      async sendUserMessage() {},
+      async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
+        try {
+          await options?.withSession?.(make());
+        } catch {
+          threwInside = true;
+          throw new Error("Failed to create session");
+        }
+        return { cancelled: false };
+      },
+      compact() {},
+    });
+    await expect(commands.get("build")!.handler("", { ...make(), model: undefined })).resolves.toBeUndefined();
+    expect(threwInside).toBe(false);
+    expect(notices.join("\n")).toContain("so the ticket was not started");
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(state.ticketRuns?.["01"]).toBeUndefined();
+    expect(state.build!.currentTicket).toBeUndefined();
     bindWorkflow(undefined);
   });
 
@@ -185,7 +260,7 @@ describe("pi extension surface", () => {
       cwd,
       hasUI: true,
       model: { provider: "anthropic", id: "claude-sonnet-5-5" },
-      modelRegistry: { find: () => undefined },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
       ui: { notify() {}, setStatus() {}, confirm: async () => true },
       async sendMessage() {},
       async sendUserMessage() {},

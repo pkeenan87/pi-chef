@@ -41,7 +41,6 @@ export interface RouteOptions {
   budgetRemainingUsd?: number;
   /** Subscription quota use for shadow-price ranking. Never affects budgets. */
   quota?: QuotaUsage;
-  /** The ticket's difficulty tier (implement purpose): where its first attempt starts. Sensitive work starts at ticketHigh at least. Ignored after a failure. */
   /** The tier to implement on: a ticket's difficulty tier, or the tier an interrupted attempt was on. */
   ticketTier?: Tier;
   /** Uniform [0, 1) for exploration. Defaults to Math.random. */
@@ -98,10 +97,10 @@ export function decideRoute(
   } else if (purpose === "plan") {
     tier = classification.complexity === "high" || sensitive ? "premium" : classification.recommended_tier;
   } else if (purpose === "implement" && options.ticketTier) {
-    // Deterministic: the difficulty tier, raised to ticketHigh for security-sensitive work. Unavailable or blocked tiers
-    // move up the same ladder below. The proven-tier shortcut does not apply: it could only pick another tier.
-    tier = sensitive && TICKET_LADDER.includes(options.ticketTier) && TICKET_LADDER.indexOf(options.ticketTier) < TICKET_LADDER.indexOf("ticketHigh") ? "ticketHigh" : options.ticketTier;
-    if (sensitive && tier !== options.ticketTier) reasons.push("ticket_sensitive_floor");
+    // Deterministic: the ticket's own difficulty tier, whatever the plan's security flag says (the planner rates
+    // security-heavy tickets high). Unavailable or blocked tiers move up the same ladder below. The proven-tier
+    // shortcut does not apply: it could only pick another tier.
+    tier = options.ticketTier;
     if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
       const escalated = escalateImplementation(tier, cap, config);
       if (escalated !== tier) reasons.push(`circuit_escalated_from_${tier}`);
@@ -132,7 +131,7 @@ export function decideRoute(
   if (capRank(tier) > capRank(cap)) tier = cap;
   let selection = probe(tier);
   // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
-  const movable = (code: string) => code === "excluded" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
+  const movable = (code: string) => code === "excluded" || code === "no_candidates" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
   while (selection.blocked && tier !== "deterministic" && movable(selection.blocked.code)) {
     const escalated = escalateImplementation(tier, cap, config);
     if (escalated === tier) break;
