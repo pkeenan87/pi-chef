@@ -35,7 +35,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "route", run: (w, args) => w.route(args), description: "Preview provider, tier, and cost for a task without changing state.", complete: () => [] },
   { name: "advisor", run: (w, args) => w.advisor(args), description: "Ask the advisor tier (Claude Fable or GPT Astra) one question about the active task. Costs money, runs only when you ask, never changes the phase.", complete: () => [] },
   { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by phase, provider, model, and task against budgets.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
-  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, build branch and ticket progress, PR, auth, and budget.", complete: () => [] },
+  { name: "status", run: (w) => w.status(), description: "Show phase, approvals, build branch and ticket progress, auth, and budget.", complete: () => [] },
   {
     name: "auth", run: (w, args) => w.auth(args),
     description: "Show account-login status, or explain /login for a provider. API keys are not accepted.",

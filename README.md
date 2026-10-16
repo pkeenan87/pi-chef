@@ -2,7 +2,7 @@
 
 Local Pi extension and TypeScript modules that keep a coding task cheap without dropping the review. A deterministic policy picks the provider, the budget, and the next phase. Models only advise. State stays in the workspace under `.pi-workflows/`. There is no hosted coordinator and no database.
 
-The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, build, ship. You plan and approve once, each ticket is built in its own fresh session on a routed model, and one pull request goes out for you to merge. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
+The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, build, review. You plan and approve once, each ticket is built in its own fresh session on a routed model, and `/review` checks the result and fixes what it finds. You push and open the pull request yourself. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
 
 ## Supported Pi version
 
@@ -193,7 +193,7 @@ npm run typecheck
 |---|---|
 | `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
 | `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
-| `approvals` | Plan approval stays required, merge stays `manual`, and publish is `auto` only if the user config says so |
+| `approvals` | Plan approval stays required and merge stays `manual`. `approvals.publish` from an older file is accepted, ignored, and warned about: nothing pushes |
 | `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier) |
 
 The YAML must not contain secrets, API keys, or tokens.
@@ -202,11 +202,11 @@ The YAML must not contain secrets, API keys, or tokens.
 
 | Key | Meaning |
 |---|---|
-| `branchPrefix` (default `cost`) | `/build` and `/ship` name the branch `<branchPrefix>/<task-id>` when they start from the default branch |
-| `checks` | Commands `/build` (when a ticket has none of its own) and `/ship` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
-| `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/ship` |
+| `branchPrefix` (default `cost`) | `/build` names the branch `<branchPrefix>/<task-id>` when they start from the default branch |
+| `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
+| `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
 | `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
-| `review` | The advisory model pass of `/ship`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
+| `review` | The advisory model pass of `/review`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
 
 Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, and `budgets.autopilotPrUsd`. An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
 
@@ -365,7 +365,7 @@ quota:
 
 ### Showing the chosen model
 
-Every routing decision (`/plan`, each `/build` ticket and escalation, `/ship`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
+Every routing decision (`/plan`, each `/build` ticket and escalation, `/review`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
 
 Chat turns on `cost-opt/auto` set no status line of their own: Pi's footer already shows `auto • level → model`. While a task is active they still add a `route` event to its log.
 
@@ -404,7 +404,7 @@ The classifier tier sends one Decisions request with five questions (`task_type`
 
 OpenAI, Anthropic, Foundry, Vercel, and local chat models are called through Pi's model registry, which owns authentication. OpenAI and Anthropic calls are refused unless the registry is using an account login. Foundry, Vercel, and local models are registered with `pi.registerProvider` at session start, with credentials from `!command` values (the Azure CLI token, or a read of the pulled Vercel env file), so no token is held in config.
 
-`/build` does not call a model itself. It picks the model for each ticket, switches a fresh Pi session to it, and the session's normal turn does the work, so Pi's tools and your login apply. `/ship` calls the review-tier model once (in parts for a large diff) through the registry for the advisory pass.
+`/build` does not call a model itself. It picks the model for each ticket, switches a fresh Pi session to it, and the session's normal turn does the work, so Pi's tools and your login apply. `/review` calls the review-tier model once (in parts for a large diff) through the registry for the advisory pass.
 
 ## Local inference
 
@@ -420,7 +420,7 @@ Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This p
 
 ## Sample workflow
 
-Configure at least one check before you expect `/ship` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass. With `checks: []`, `/ship` falls back to the distinct `checks` of the plan's tickets (validated at plan time); with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
+Configure at least one check before you expect `/review` to pass. The sample config ships `checks: []` on purpose: a review with no tool evidence cannot claim a pass. With `checks: []`, `/review` falls back to the distinct `checks` of the plan's tickets (validated at plan time); with neither, it fails and says so ("no checks ran, so there is no evidence of a test pass") rather than reporting zero findings.
 
 ```yaml
 setup:
@@ -438,14 +438,17 @@ Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, 
 ```text
 /plan Harden Neo ingest: reject empty events. AC: empty input throws
 /build
-/ship
+/review
+# then push and open the PR yourself:
+git push -u origin HEAD
+origin pr create   # or: gh pr create
 ```
 
 Three commands. `/show-plan` re-reads the plan, and approves a draft you saved earlier.
 
 ### /plan
 
-`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus three plan tools. It edits nothing. If the active task is `PUBLISHED`, a new `/plan` closes it first: a merged pull request closes it with a chat line, an unmerged one asks you to confirm.
+`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus three plan tools. It edits nothing. If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), a new `/plan` closes it first with a `Closed <task>.` chat line. A task with unfinished tickets is revised instead.
 
 1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
 2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps). Code rejects a spec without an approach, file changes, or verification.
@@ -472,24 +475,23 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 A check that cannot run (no such command, a denied command, or a failing `setup`) stops the ticket as `failed` with the reason. It does not count against the model, because a stronger model cannot fix a plan.
 
-**Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (normally `cost-opt/auto`) and `/build` points you at `/ship`.
+**Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (normally `cost-opt/auto`) and `/build` points you at `/review`.
 
 **Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, it is committed without a model turn. Otherwise it goes to a model again, one tier up. A hard budget starts no new ticket and says so.
 
-### /ship
+### /review
 
-`/ship` reviews whatever is on the current branch and, on a pass, publishes it. It works after `/build`, after ad-hoc fixes made in the chat, with uncommitted edits, and with no task at all (an ad-hoc branch; the report goes under `.pi-workflows/reports/` and spend under task `session`).
+`/review` reviews what differs from the base branch, lists the findings, and offers to fix them in the current session. It never commits, pushes, switches branches, or opens a pull request: you do that with git and the `origin` CLI (or `gh`). It works after `/build`, after ad-hoc fixes made in the chat, with uncommitted edits, and with no task at all (the report goes under `.pi-workflows/reports/` and spend under task `session`).
 
-- **Branch and base.** The base is the build's recorded base, else the default branch. On the base branch with only uncommitted changes, it creates `<branchPrefix>/ship-<timestamp>` (or the task id) and carries them over. On the base branch with local commits it does not have on `origin`, it refuses and says how to move them to a branch. With nothing changed it stops.
-- **Review**, in the repo root against the merge-base with the base, so built commits, ad-hoc commits, and uncommitted edits are all in the diff: `setup`, then the checks (`config.checks`, else the plan's ticket checks), then a static scan (secrets, auth bypass, `eval`, TODO/FIXME), then an advisory model pass.
+- **Base and diff.** The base is the build's recorded base, else the default branch. The diff is the commits ahead of the merge-base plus uncommitted and untracked changes. On the base branch itself it is the uncommitted changes plus any commits ahead of `origin/<base>` (just the uncommitted changes when that ref does not exist). With nothing changed it says "Nothing to review" and stops.
+- **Review**, in the repo root: `setup`, then the checks (`config.checks`, else the plan's ticket checks), then a static scan (secrets, auth bypass, `eval`, TODO/FIXME), then an advisory model pass.
 - **Verdict.** `passed` is true only when at least one check ran, every check exited 0, and the scan found nothing blocking. The model pass (the review-tier model, same choice `/route` shows for review) reads the plan and the diff and returns findings for a person to judge. Lockfiles are sent as one placeholder line each, and text redacted for secrets shows as `[REDACTED]`. A diff over `review.maxDiffChars` (120,000) is split at file boundaries into up to `review.maxChunks` (6) calls, each stopping at `review.timeoutMs` (5 minutes). A part whose call fails (a dropped stream, a transport error, a timeout, or an answer that is not a JSON list of findings) is retried once on the next review-tier candidate, another provider first, and the pass goes on with the remaining parts; the report says which model reviewed each part and lists any part that still failed. Every call is ledgered with reason `model review` and counted against its own model's metrics; a failed call's cost is unknown, so the pass's cost is too. The pass is budget-gated before each call and never changes `passed`. `review.model: false` turns the pass off.
-- **Chat trail.** A line per stage with elapsed time, then one block (also saved as `reports/ship.md` under the task): verdict, checks with durations and failure tails, static findings, model findings by severity, and what to do next. A check that failed for want of a tool gets a hint to list the install under `setup:`.
-- **On a pass**, `/ship` asks you to confirm (`approvals.publish` stays `required` unless your user config says `auto`), commits any uncommitted changes, pushes the branch, and opens or updates one pull request against the recorded base. The body holds the plan summary, the tickets with their status, the checks, and the finding counts. The task becomes `PUBLISHED`. It does not merge.
-- **On a fail**, it reports and pushes nothing. Fix in chat, then `/ship` again. Run `/ship` again after more changes to update the same pull request.
+- **Chat trail.** A line per stage with elapsed time, then one block (also saved as `reports/review.md` under the task): verdict, checks with durations and failure tails, static findings, model findings by severity, and what to do next. A check that failed for want of a tool gets a hint to list the install under `setup:`. The report is stored as `state.review`; the phase does not change.
+- **Findings and fixes.** With a UI and at least one finding, a scrollable dialog titled `Review · N finding(s)` lists every finding, numbered: static findings (blocking first), failed checks with their command, then model findings. Choose **Fix all** to send them all to the model in this session, **Fix…** to type which to fix (numbers like `1, 3` and/or your own instructions; the full list goes along for reference), or **Close**. The message tells the model to keep changes scoped, run the checks, not commit, push, or switch branches, and report one line per finding. Run `/review` again when it is done. With no UI you get the report only. With no findings and a pass, there is no dialog.
 
 ### Other commands
 
-`/route <task>` previews tier, provider, and expected cost and writes nothing. `/status` shows phase, approval, the build branch and ticket progress, the PR, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
+`/route <task>` previews tier, provider, and expected cost and writes nothing. `/status` shows phase, approval, the build branch and ticket progress, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
 
 ## Cost
 
@@ -518,7 +520,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 
 - **Esc during `/build`.** The build stops after the current turn. The ticket stays in progress and nothing is committed. Run `/build` to continue.
 - **A failed ticket.** `/build` stops and says why. Fix it in the chat (the working tree keeps the failed attempt), then run `/build`: the checks run again, and if they pass your fix is committed and the build goes on. If you change nothing, the ticket goes to a model one tier up. A new plan version keeps the runs of tickets whose text is unchanged and builds the rest again.
-- **A failed `/ship`.** Fix the failing check or finding in the chat, then run `/ship` again. Nothing was committed or pushed by the failed run.
+- **A failed `/review`.** Choose Fix all (or Fix…) in the findings dialog, or fix by hand, then run `/review` again. `/review` commits and pushes nothing.
 - **A crash or closed Pi.** Commits already made stay on the branch. `/build` resumes from the first ticket that is not done. It needs you on the recorded branch, and says which `git switch` to run if you are not.
 - **An expired login** pauses the task. Rate-limit and outage errors from the Foundry and local clients surface as provider errors and do not rewrite policy.
 - **Old task files** that still have worktree, integration, or autopilot fields, or a retired phase, still load; those fields are ignored.
@@ -530,31 +532,30 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits |
 | `/show-plan` | Show the full plan. A draft opens the review so you can approve it |
 | `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then a commit, on one branch. Run again to resume |
-| `/ship` | Review the branch (setup, checks, static scan, advisory model pass). On a pass and your confirm: commit leftovers, push, open or update the PR |
+| `/review` | Review the changes against the base branch (setup, checks, static scan, advisory model pass), list the findings, and offer to fix them in this session. Never commits or pushes |
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
-| `/status` | Phase, build progress, PR, auth, budget |
+| `/status` | Phase, build progress, auth, budget |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
 | `/cost-help` | List the commands |
 
 `help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, and `/plan`.
 
-Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → PUBLISHED → COMPLETE`. `/build` on a `PUBLISHED` task (more tickets for the same PR) returns it to `IMPLEMENTING`, and `/ship` returns it to `PUBLISHED`. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
+Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a finished task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
 
 ## Layout
 
 ```text
 src/extension.ts          Pi commands, the virtual model cost-opt/auto, and the /build session driver
 src/commands.ts           the command table
-src/orchestrator/         state machine, plans, workflow; build.ts (/build), ship.ts (/ship)
+src/orchestrator/         state machine, plans, workflow; build.ts (/build), review.ts (/review)
 src/providers/            account-login gate, Foundry, Vercel, Decisions client, Pi registry chat
 src/router/               classifier schema, policy, and per-tier candidate selector
 src/review/               static scan, checks, and the advisory model pass
-src/github/               gh client
 src/cost/                 ledger, budgets, quota, baseline compare
 src/storage/              lock, journal, snapshots
-src/git/workspace.ts      branch, diff, commit, and push helpers for the checkout
+src/git/workspace.ts      branch, diff, and commit helpers for the checkout
 src/tools/                web_search, web_fetch, and the plan tools
 bin/init.mjs              npx setup: pi install, sample config, .gitignore
 tests/                    unit and integration, mocks only
@@ -583,5 +584,5 @@ Artifacts for a task:
 - Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked unless the user config sets `apiKeyFallback` for that provider.
 - Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). Other commands are not restricted, because that would break the host agent. Checks and setup run any non-destructive command. While `/plan` runs, bash is limited to a read-only allowlist.
 - `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands.
-- The `gh` client is argument-array `gh` with no shell. Tests use an in-memory GitHub client. A live `gh auth status` is still required before `/ship` against GitHub. Merge is always manual; the client has no merge method.
+- Nothing here pushes, opens a pull request, or merges. Do that yourself with git and the `origin` CLI (or `gh`).
 - A plan made only of literal edits (a ```` ```tasks ```` block) has no tickets, so `/build` cannot run it.

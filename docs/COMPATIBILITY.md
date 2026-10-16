@@ -89,7 +89,7 @@ From `dist/core/extensions/types.d.ts` and `docs/extensions.md` in coding-agent 
 | Wait for the run | `waitForIdle()` on the replacement ctx | After each `sendUserMessage`. The order against `agent_settled`, and Esc while a command awaits, are **unverified live** |
 | Run finished | `pi.on("agent_settled")` | Records `aborted` so Esc stops the build after that turn. `message_end` keeps the last assistant text for the criteria checklist |
 | Runtime model switch | `pi.setModel(model): Promise<boolean>` | False when the provider has no auth. `/build` sets each ticket's model through the `session_start` slot (the replacement ctx has no `setModel`), then puts the user's model back with the newest instance's `setModel`; **unverified live**. Also `pi.registerVirtualModel` (`docs/virtual-models.md`) under provider id `cost-opt`, which is always listed because it is not a physical provider |
-| Nested model calls (advisor, classifier, `/ship` model pass) | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
+| Nested model calls (advisor, classifier, `/review` model pass) | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
 | Observe usage | `pi.on("message_end")` | Record token metadata. Message text is not copied |
 | Block a tool | `pi.on("tool_call")` returning `{ block: true, reason }` | Destructive shell commands, non-read-only bash while `/plan` runs, and `git push` and branch switches while a `/build` ticket runs. `user_bash` is the documented hook for commands typed by the user |
 | Durable session notes | `pi.appendEntry` | Pointer to the active task id. Task truth lives in `.pi-workflows`, not in the transcript |
@@ -104,7 +104,7 @@ Events we deliberately do not subscribe to: `before_provider_headers` (would be 
 |---|---|
 | Programmatic `/login` from an extension | Not on `ExtensionAPI`. `/auth login` prints the exact `/login` command and re-reads status |
 | Unregister a tool | Docs: tools cannot be unregistered; re-register with `exposure: "hidden"` if needed. We do not hide Pi's tools |
-| Auto-merge | Not implemented. `approvals.merge` is `manual`. The GitHub client has no merge method |
+| Auto-merge | Not implemented. `approvals.merge` is `manual`. Nothing in the extension pushes, opens a PR, or merges |
 | Reset that deletes the transcript in place | `newSession` starts a new session file. `compact` summarizes. Neither deletes `.pi-workflows` artifacts |
 | A hook that swaps providers per tool call inside one assistant turn | `registerVirtualModel` routes **per request**. Advisor, classifier, and review calls use isolated clients so they do not change `pi.setModel` under the user and so Foundry's Azure CLI token never becomes a Pi `apiKey` |
 | Forking Pi | Not required. Stop condition in the spec is not hit |
@@ -135,7 +135,7 @@ These are labeled assumptions. Unit tests cover the code around them; they do no
 3. `isUsingOAuth(model)` matches the credential Pi will actually send. We also read `auth.json` `type` ourselves when outside a session.
 4. `message_end` usage objects are the provider's counts. Missing fields stay unknown in our ledger. Pi's own `Usage.cost` type requires numbers, so a Pi transcript is not our ledger. Our ledger uses `null` for unknown charge.
 5. `az account get-access-token` output shape (`accessToken`, `expiresOn`) matches current Azure CLI. The parser accepts that JSON and fails closed otherwise.
-6. `gh` is installed and already authenticated for publish. Tests use an in-memory GitHub client. The real client shells `gh` with an argument array and never prints the environment.
+6. Pushing and opening the pull request are yours: `git push`, then the `origin` CLI or `gh`. The extension has no forge client.
 7. Anthropic extra-usage billing and ChatGPT token-sharing entitlement can change without a Pi release. Re-read Pi's provider docs before relying on a subscription.
 
 ## Implementation plan
@@ -147,8 +147,8 @@ Shipped as library modules plus `src/extension.ts`. No hosted coordinator, datab
 | M1 | Config, redaction, locked journal, auth gate for the four providers, `/status`, `/cost`, `/auth`. Compatibility test asserts Pi's oauth objects exist and Azure's does not |
 | M2 | `/plan`, `/route`, classifier schema, deterministic fallback, approval freeze, versioned plans |
 | M3 | `/build` refuses without approval. Tickets in dependency order, each in a fresh session on a routed model, checks, one commit per ticket on one branch, resume, restart-safe state |
-| M4 | `/ship` with tool evidence (setup, checks, static scan, advisory model pass), security and failing-check fixtures, push and PR gated on confirm and checks. Works for ad-hoc branches |
-| M5 | Plan review screen with approval, `/show-plan`, a new `/plan` closes a published task. No merge: `approvals.merge` stays `manual` |
+| M4 | `/review` with tool evidence (setup, checks, static scan, advisory model pass), numbered findings with Fix all / Fix… in the current session, security and failing-check fixtures. Works for ad-hoc branches; never commits or pushes |
+| M5 | Plan review screen with approval, `/show-plan`, a new `/plan` closes a finished task. No merge: `approvals.merge` stays `manual` |
 | M6 | Expected cost-to-success, escalation cap, circuit breaker, budget hard stop, CSV/JSON export, baseline comparison fields |
 
 Context boundaries: `/build` starts every ticket in a fresh session (`newSession`), so the ticket prompt carries the spec, the blockers' summaries, and the repo rules. State lives in `.pi-workflows`, not in the transcript. A reset never deletes artifacts.
