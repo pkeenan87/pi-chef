@@ -17,6 +17,7 @@ import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
+import { presentPendingPlan } from "./present-plan.js";
 import { approveDraft, plan, route, showPlan } from "./planning.js";
 import { ProgressIndicator } from "./progress.js";
 import { review } from "./review.js";
@@ -96,6 +97,7 @@ export class Workflow {
     ctx.progress = binding.progress ?? ctx.progress;
     ctx.report = binding.report ?? ctx.report;
     ctx.review = binding.review;
+    ctx.edit = binding.edit;
     // The sink is the live ctx's UI; it is replaced on every bind so a stopped line never draws on a dead session.
     this.progressLine?.attach(binding.indicatorSink);
     ctx.show = binding.show ?? ctx.show;
@@ -212,8 +214,19 @@ export class Workflow {
     return checkTickets(this.ctx, input);
   }
 
-  commitTickets(tickets: Parameters<typeof commitTickets>[1], advisorReview?: Parameters<typeof commitTickets>[2]) {
-    return commitTickets(this.ctx, tickets, advisorReview);
+  commitTickets(tickets: Parameters<typeof commitTickets>[1], advisorReview?: Parameters<typeof commitTickets>[2], options?: Parameters<typeof commitTickets>[3]) {
+    return commitTickets(this.ctx, tickets, advisorReview, options);
+  }
+
+  /** True when plan_tickets saved a draft that has not been shown yet. */
+  hasPendingPlan(): boolean {
+    const task = this.activeTaskId() ? this.store.load(this.activeTaskId()!) : undefined;
+    return !!task?.presentPlan && task.presentPlan.version === task.plan?.version;
+  }
+
+  /** When the planning turn has settled: posts a just-saved plan and asks what to do with it. Needs a bound UI. */
+  presentPendingPlan(): Promise<void> {
+    return presentPendingPlan(this.ctx);
   }
 
   /** The full plan these tickets would produce, for review before they are saved. */

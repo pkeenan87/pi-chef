@@ -49,6 +49,8 @@ export interface WorkflowContext {
   startTurn?: (text: string) => void;
   /** Full-plan review dialog. Absent without a UI; approval then proceeds as before. */
   review?: PlanReviewFn;
+  /** Opens Pi's editor with this prompt and text; undefined when cancelled. Absent without a UI. */
+  edit?: (title: string, prefill: string) => Promise<string | undefined>;
   /** Posts a plan as a displayed chat message. */
   show?: (markdown: string) => void;
 }

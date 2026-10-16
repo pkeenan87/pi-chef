@@ -27,25 +27,8 @@ async function setup(options: { answer?: (call: FakeCall) => string; advisors?: 
   return { app, calls: fake.calls, consult: createPlanConsultTool(() => app), tickets: createPlanTicketsTool(() => app) };
 }
 
-const fakeTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
-
-/** A UI whose plan dialog renders the markdown it was given and answers from `script`. */
-function dialog(script: unknown[]) {
-  const rendered: string[] = [];
-  const ctx = {
-    hasUI: true,
-    ui: {
-      custom: async (factory: (...args: never[]) => { render(width: number): string[] }) => {
-        const component = (factory as unknown as (...args: unknown[]) => { render(width: number): string[] })({ terminal: { rows: 400 }, requestRender() {} }, fakeTheme, {}, () => undefined);
-        rendered.push(component.render(160).join("\n"));
-        return script.shift();
-      },
-      notify: () => undefined,
-      editor: async () => undefined,
-    },
-  };
-  return { ctx, rendered };
-}
+/** A UI ctx whose picker must never be asked: plan_tickets saves the draft and the plan is presented when the turn settles. */
+const ui = { hasUI: true, ui: { select: async () => { throw new Error("plan_tickets must not ask"); }, notify: () => undefined, editor: async () => undefined } };
 
 const planDir = (app: { store: { taskDir(id: string): string }; activeTaskId(): string | undefined }) => app.store.taskDir(app.activeTaskId()!);
 
@@ -170,14 +153,13 @@ describe("plan_tickets with advisors", () => {
     expect(readFileSync(path.join(planDir(app), "plan.md"), "utf8")).toContain("Advisors were not consulted");
   });
 
-  it("shows the advisor review and the resolution at the top of the dialog and in plan.md", async () => {
+  it("shows the advisor review and the resolution at the top of the inline plan and in plan.md", async () => {
     const { app, consult, tickets } = await setup();
     await call(consult, { tickets: [ticket("01")], questions }, headless);
     const resolution = "Accepted the duplicate-events point (added an idempotency check); rejected nothing else.";
-    const ui = dialog([{ value: "save" }]);
-    const done = await call(tickets, { tickets: [ticket("01")], advisorResolution: resolution }, ui.ctx);
+    const done = await call(tickets, { tickets: [ticket("01")], advisorResolution: resolution }, ui);
     expect(textOf(done)).toContain("1 tickets written");
-    const shown = ui.rendered[0]!;
+    const shown = readFileSync(path.join(planDir(app), "plan.md"), "utf8");
     expect(shown).toContain("Advisor review");
     expect(shown).toContain("openai/gpt-6-astra: disagree");
     expect(shown).toContain(`Opus resolution: ${resolution}`);
@@ -203,11 +185,13 @@ describe("plan_tickets with advisors", () => {
   it("a revision after Request changes is a new draft and may consult again", async () => {
     const { app, calls, consult, tickets } = await setup();
     await call(consult, { tickets: [ticket("01")], questions }, headless);
-    const ui = dialog([{ value: "revise", text: "split it" }]);
-    const sent = await call(tickets, { tickets: [ticket("01")], advisorResolution: "kept as is" }, ui.ctx);
-    expect(textOf(sent)).toContain("split it");
-    expect(textOf(sent)).toContain("plan_consult again");
+    await call(tickets, { tickets: [ticket("01")], advisorResolution: "kept as is" }, ui);
+    app.bind({ startTurn: () => undefined, review: async () => ({ value: "revise", text: "split it" }) });
+    const sent = await app.showPlan();
+    expect(sent.ok, sent.text).toBe(true);
     expect(app.store.load(app.activeTaskId()!)!.planning!.consult).toBeUndefined();
+    // The revision starts from the spec again; the revised draft has to consult again before it is submitted.
+    await call(createPlanSpecTool(() => app), specParams, headless);
     await expect(call(tickets, { tickets: [ticket("01"), ticket("02")], advisorResolution: "x" }, headless)).rejects.toThrow(/Call plan_consult first/);
     const before = calls.length;
     await call(consult, { tickets: [ticket("01"), ticket("02")], questions }, headless);

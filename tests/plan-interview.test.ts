@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { COMMANDS } from "../src/commands.js";
 import { parseConfig } from "../src/config.js";
-import extension, { bindWorkflow } from "../src/extension.js";
+import extension, { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import type { InterviewAnswer, InterviewQuestion } from "../src/orchestrator/interview.js";
 import { readInterview } from "../src/orchestrator/interview.js";
 import { parseTicketsMarkdown, renderTicket, renderTicketsMarkdown } from "../src/orchestrator/tickets.js";
@@ -33,9 +33,9 @@ function ticket(id: string, extra: Record<string, unknown> = {}) {
   return { id, slug: `t${id}`, title: `Ticket ${id}`, whatToBuild: "Users can retry a failed ingest end to end.", acceptanceCriteria: ["retry works"], blockedBy: [] as string[], estimatedContextTokens: 40000, ...extra };
 }
 
-/** A fake ctx whose dialog returns scripted results; `custom` records each call. */
+/** A fake ctx whose picker returns scripted labels. `custom` (a popup) must never be used; `selects` records each picker. */
 function fakeCtx(script: { custom?: unknown[]; select?: (string | undefined)[]; editor?: (string | undefined)[] } = {}) {
-  const log = { custom: 0, notices: [] as string[] };
+  const log = { custom: 0, notices: [] as string[], selects: [] as { title: string; labels: string[] }[] };
   return {
     log,
     ctx: {
@@ -45,7 +45,7 @@ function fakeCtx(script: { custom?: unknown[]; select?: (string | undefined)[]; 
           log.custom += 1;
           return script.custom?.shift();
         },
-        select: async () => script.select?.shift(),
+        select: async (title: string, labels: string[]) => (log.selects.push({ title, labels }), script.select?.shift()),
         editor: async () => script.editor?.shift(),
         notify: (message: string) => void log.notices.push(message),
       },
@@ -428,76 +428,124 @@ describe("plan_tickets", () => {
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
   });
 
-  describe("plan review before saving", () => {
-    it("shows the full technical plan and saves on approval", async () => {
-      const { tickets, app } = await atTicketStage();
-      const shown: string[] = [];
-      app.bind({ show: (markdown) => void shown.push(markdown) });
-      const { ctx, log } = fakeCtx({ custom: ["save"] });
-      const result = await call(tickets, { tickets: [ticket("01", { implementation: "Add retryParse() to src/ingest.ts." })] }, ctx);
-      expect(log.custom).toBe(1);
-      expect(textOf(result)).toContain("shown to the user in full");
-      expect(app.store.load(app.activeTaskId()!)!.plan?.tickets).toHaveLength(1);
-      expect(shown).toHaveLength(1);
-      expect(shown[0]).toContain("## Approach");
-      expect(shown[0]).toContain("`src/ingest.ts`: add retryParse(input, attempts)");
-      expect(shown[0]).toContain("**Implementation**\n\nAdd retryParse() to src/ingest.ts.");
-      expect(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")).toBe(shown[0]);
-    });
+  describe("plan shown when the planning turn settles", () => {
+    /** A fake pi whose agent_settled handler is driven by hand, and a live ctx with a scripted picker. */
+    function settled(app: { cwd: string }, script: { select?: (string | undefined)[]; editor?: (string | undefined)[] } = {}) {
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+      const pi = { registerCommand() {}, on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => (handlers.set(event, handler), () => undefined), appendEntry() {}, setModel: async () => false };
+      registerWorkflow(pi as unknown as ExtensionAPI);
+      bindWorkflow(app as never);
+      const log = { messages: [] as { customType: string; content: string; display: boolean }[], selects: [] as { title: string; labels: string[] }[], notes: [] as string[], users: [] as string[], order: [] as string[] };
+      const ctx = {
+        cwd: app.cwd,
+        hasUI: true,
+        sendMessage: (message: { customType: string; content: string; display: boolean }) => void (log.messages.push(message), log.order.push("post")),
+        sendUserMessage: (text: string) => void log.users.push(text),
+        ui: {
+          custom: () => {
+            throw new Error("no popups");
+          },
+          select: async (title: string, labels: string[]) => (log.selects.push({ title, labels }), log.order.push("select"), script.select?.shift()),
+          editor: async () => script.editor?.shift(),
+          notify: (message: string) => void log.notes.push(message),
+          setStatus() {},
+          confirm: async () => false,
+        },
+      };
+      return { log, run: (aborted = false) => handlers.get("agent_settled")!({ type: "agent_settled", aborted }, ctx) as Promise<void> };
+    }
+    const uiCtx = { hasUI: true, ui: { select: async () => { throw new Error("plan_tickets must not ask"); }, notify() {}, editor: async () => undefined } };
 
-    it("sends requested changes back to the model without saving", async () => {
-      const { tickets, app } = await atTicketStage();
-      const { ctx } = fakeCtx({ custom: [{ value: "revise", text: "Merge 01 and 02" }] });
-      const result = await call(tickets, { tickets: [ticket("01"), ticket("02")] }, ctx);
-      expect(textOf(result)).toContain("Merge 01 and 02");
-      expect(textOf(result)).toContain("Nothing was saved");
-      expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
-    });
+    async function drafted() {
+      const base = await atTicketStage();
+      const result = await call(base.tickets, { tickets: [ticket("01", { implementation: "Add retryParse() to src/ingest.ts." }), ticket("02", { blockedBy: ["01"] })] }, uiCtx);
+      return { ...base, result };
+    }
 
-    it("asks for the change text in the editor and returns to the plan when it is left empty", async () => {
-      const { tickets } = await atTicketStage();
-      const { ctx, log } = fakeCtx({ custom: ["revise", "revise"], editor: ["", "Split 01"] });
-      const result = await call(tickets, { tickets: [ticket("01")] }, ctx);
-      expect(log.custom).toBe(2);
-      expect(textOf(result)).toContain("Split 01");
-    });
-
-    it("lets the spec be revised during ticket review", async () => {
-      const { spec, app } = await atTicketStage();
-      await call(spec, { ...specParams, approach: "Use a queue instead." }, headless);
-      expect(app.store.readText(app.activeTaskId()!, "spec.md")).toContain("Use a queue instead.");
-      expect(app.planningStage()).toBe("tickets");
-    });
-
-    it("re-validates edited tickets and keeps the previous version when the edit is invalid", async () => {
-      const { tickets, app } = await atTicketStage();
-      const original = [ticket("01"), ticket("02")];
-      const edited = renderTicketsMarkdown([ticket("01"), ticket("02", { blockedBy: ["01"] })].map((item) => ({ ...item, suggestedTier: undefined })) as never);
-      const broken = edited.replace("- 01", "- 99");
-      const { ctx, log } = fakeCtx({ custom: ["edit", "edit", "save"], editor: [broken, edited] });
-      const result = await call(tickets, { tickets: original }, ctx);
-      expect(textOf(result)).toContain("edited the tickets");
-      expect(log.notices[0]).toContain("blockedBy 99 does not exist");
-      const plan = app.store.load(app.activeTaskId()!)!.plan!;
-      expect(plan.groups[1]!.dependsOn).toEqual(["01-t01"]);
-    });
-
-    it("saves a draft when the review is closed with Esc", async () => {
-      const { tickets, app } = await atTicketStage();
-      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: [undefined] }).ctx);
-      expect(textOf(result)).toContain("Draft saved");
+    it("plan_tickets with a UI saves the draft, sets the flag, tells the model, and asks nothing", async () => {
+      const { app, result } = await drafted();
+      expect(textOf(result)).toContain("will be shown to the user for approval when this turn ends. End your turn now with a one-line summary; do not repeat the plan.");
       const task = app.store.load(app.activeTaskId()!)!;
       expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
+      expect(task.presentPlan).toEqual({ version: 1 });
       expect(task.approvedVersion).toBeUndefined();
     });
 
-    it("approves inside plan_tickets and freezes the plan", async () => {
-      const { tickets, app } = await atTicketStage();
-      const result = await call(tickets, { tickets: [ticket("01")] }, fakeCtx({ custom: ["approve"] }).ctx);
-      expect(textOf(result)).toContain("/build");
+    it("posts the plan once as markdown, then picks among the four actions; Esc keeps the draft", async () => {
+      const { app } = await drafted();
+      const { log, run } = settled(app, { select: [undefined] });
+      await run();
+      expect(log.messages).toHaveLength(1);
+      expect(log.messages[0]).toMatchObject({ customType: "chef-report", display: true });
+      expect(log.messages[0]!.content).toContain("## Approach");
+      expect(log.messages[0]!.content).toContain("**Implementation**\n\nAdd retryParse() to src/ingest.ts.");
+      expect(log.order).toEqual(["post", "select"]);
+      expect(log.selects).toEqual([{ title: "Review the plan · 2 tickets", labels: ["Approve plan", "Request changes", "Edit tickets", "Save as draft"] }]);
+      expect(log.notes.join("\n")).toContain("/show-plan to approve later");
+      const task = app.store.load(app.activeTaskId()!)!;
+      expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
+      expect(task.approvedVersion).toBeUndefined();
+      expect(task.presentPlan).toBeUndefined();
+      // The plan is presented once: a second settle does nothing.
+      await run();
+      expect(log.messages).toHaveLength(1);
+      expect(readFileSync(path.join(app.store.taskDir(task.taskId), "plan.md"), "utf8")).toBe(log.messages[0]!.content);
+    });
+
+    it("Approve plan approves and freezes the plan", async () => {
+      const { app } = await drafted();
+      const { log, run } = settled(app, { select: ["Approve plan"] });
+      await run();
       const task = app.store.load(app.activeTaskId()!)!;
       expect(task.approvedVersion).toBe(1);
       expect(existsSync(path.join(app.store.taskDir(task.taskId), "plan.v1.approved.json"))).toBe(true);
+      expect(log.notes.join("\n")).toContain("Approved plan v1. Run /build.");
+    });
+
+    it("Request changes asks for text and starts the revision turn", async () => {
+      const { app } = await drafted();
+      const { log, run } = settled(app, { select: ["Request changes", "Request changes"], editor: ["  ", "Merge 01 and 02"] });
+      await run();
+      // An empty editor returns to the picker without posting the plan again.
+      expect(log.selects).toHaveLength(2);
+      expect(log.messages).toHaveLength(1);
+      expect(log.users).toHaveLength(1);
+      expect(log.users[0]).toContain("Merge 01 and 02");
+      expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
+    });
+
+    it("Edit tickets re-validates, saves, posts the updated plan, and asks again", async () => {
+      const { app } = await drafted();
+      const plan = app.store.load(app.activeTaskId()!)!.plan!;
+      const edited = renderTicketsMarkdown(plan.tickets!).replace("# 01: Ticket 01", "# 01: Edited ticket");
+      const broken = renderTicketsMarkdown(plan.tickets!).replace("- 01", "- 99");
+      const { log, run } = settled(app, { select: ["Edit tickets", "Edit tickets", "Save as draft"], editor: [broken, edited] });
+      await run();
+      expect(log.notes.join("\n")).toContain("blockedBy 99 does not exist");
+      expect(log.selects).toHaveLength(3);
+      expect(log.messages).toHaveLength(2);
+      expect(log.messages[1]!.content).toContain("Edited ticket");
+      expect(log.order).toEqual(["post", "select", "select", "post", "select"]);
+      expect(app.store.load(app.activeTaskId()!)!.plan!.tickets![0]!.title).toBe("Edited ticket");
+      expect(readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "tickets", "01-t01.md"), "utf8")).toContain("Edited ticket");
+    });
+
+    it("keeps the flag after an aborted turn, and /show-plan still offers the draft", async () => {
+      const { app } = await drafted();
+      const { log, run } = settled(app, { select: ["Save as draft"] });
+      await run(true);
+      expect(log.messages).toEqual([]);
+      expect(log.selects).toEqual([]);
+      expect(app.store.load(app.activeTaskId()!)!.presentPlan).toEqual({ version: 1 });
+      await run(false);
+      expect(log.selects).toHaveLength(1);
+    });
+
+    it("does nothing without a UI", async () => {
+      const { tickets, app } = await atTicketStage();
+      const result = await call(tickets, { tickets: [ticket("01")] }, headless);
+      expect(textOf(result)).toContain("/show-plan");
+      expect(app.store.load(app.activeTaskId()!)!.presentPlan).toBeUndefined();
     });
   });
 

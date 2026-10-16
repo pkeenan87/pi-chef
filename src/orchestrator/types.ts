@@ -27,7 +27,9 @@ export interface WorkflowBinding {
   report?: (markdown: string) => void;
   /** The live Pi UI for the progress line; undefined without a UI. Set on every bind, from the live ctx. */
   indicatorSink?: IndicatorSink;
-  /** Shows a full plan in a scrollable dialog and returns the chosen action. Absent without a UI. */
+  /** Opens Pi's editor with a prompt and prefill (Edit tickets). Absent without a UI. */
+  edit?: (title: string, prefill: string) => Promise<string | undefined>;
+  /** Shows a plan or review inline and returns the action chosen in a compact picker. Absent without a UI. */
   review?: PlanReviewFn;
   /** Posts a plan as a displayed message in the chat transcript. */
   show?: (markdown: string) => void;
@@ -44,9 +46,11 @@ export interface PlanReviewRequest {
   title: string;
   markdown: string;
   actions: PlanReviewAction[];
+  /** The markdown is already in the transcript (a /review report); only the choice is shown. */
+  alreadyShown?: boolean;
 }
 
-/** Resolves with the chosen action (and typed text for an `input` action), or undefined when dismissed. */
+/** Posts the markdown inline, then offers the actions in a compact picker. Resolves with the chosen action (and typed text for an `input` action), or undefined when dismissed. */
 export type PlanReviewFn = (request: PlanReviewRequest) => Promise<{ value: string; text?: string } | undefined>;
 
 export interface WorkflowOptions {

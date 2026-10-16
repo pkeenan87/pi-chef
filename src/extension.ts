@@ -11,7 +11,7 @@ import { createRuntime, registerChatProviders, type ProviderRuntime } from "./pr
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
-import { reviewPlan } from "./tools/plan-review.js";
+import { presentForDecision } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
 import { WorkflowError, type CommandResult, type TokenUsage } from "./domain.js";
@@ -150,7 +150,9 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       report: (markdown) => showPlanMessage(ctx, markdown, "chef-report"),
       // The live ctx's widget slot above the editor; a replaced session's ctx is swapped out by the next bind.
       indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("chef-progress", line === undefined ? undefined : [line]) } : undefined,
-      review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
+      // Commands run while Pi is idle, so sendMessage shows the plan at once; there is no popup.
+      review: ctx.hasUI && typeof ctx.ui.select === "function" ? (input) => presentForDecision(ctx, input, (markdown) => showPlanMessage(ctx, markdown, "chef-report")) : undefined,
+      edit: ctx.hasUI && typeof ctx.ui.editor === "function" ? (title, prefill) => ctx.ui.editor(title, prefill) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });
   }
@@ -586,8 +588,17 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     }
     return undefined;
   });
-  pi.on("agent_settled", (event) => {
+  pi.on("agent_settled", async (event, ctx) => {
     if (event.aborted && restoreSlot[TURN]) restoreSlot[TURN].aborted = true;
+    // plan_tickets saved a draft during this turn: post it as markdown now that Pi is idle, then ask. An aborted turn keeps
+    // the flag, and /show-plan still offers the draft. Only this handler's live ctx is used; any failure is shown, never thrown.
+    if (event.aborted || !ctx.hasUI || !active?.hasPendingPlan()) return;
+    try {
+      const workflow = workflowFor(ctx.cwd, ctx as CommandContext);
+      await workflow.presentPendingPlan();
+    } catch (error) {
+      tell(ctx as CommandContext, problemNotice(error));
+    }
   });
   pi.on("message_end", (event) => {
     const message = event.message;

@@ -8,7 +8,7 @@ import type { PlanReviewRequest } from "../src/orchestrator/types.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown, validateTickets } from "../src/orchestrator/tickets.js";
 import { createPlanQuestionsTool } from "../src/tools/plan-questions.js";
 import { createPlanSpecTool, createPlanTicketsTool } from "../src/tools/plan-flow.js";
-import { planReviewDialog, reviewPlan } from "../src/tools/plan-review.js";
+import { presentForDecision } from "../src/tools/plan-review.js";
 import { tempRepo, workflow } from "./helpers.js";
 
 type Exec = (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: never) => Promise<{ content: { type: string; text: string }[] }>;
@@ -42,8 +42,6 @@ async function drafted(extras: Parameters<typeof workflow>[1] = {}) {
   await call(createPlanTicketsTool(() => app), { tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] }, headless);
   return { cwd, app, turns };
 }
-
-const fakeTheme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
 
 describe("technical spec", () => {
   it("requires an approach, file changes, and verification", async () => {
@@ -129,6 +127,22 @@ describe("/show-plan on a draft", () => {
     expect(existsSync(path.join(app.store.taskDir(task.taskId), "plan.v1.approved.json"))).toBe(true);
   });
 
+  it("posts the draft once inline, then picks: Approve approves, Esc leaves the draft", async () => {
+    const { app } = await drafted();
+    for (const [label, approved] of [[undefined, false], ["Approve plan v1", true]] as const) {
+      const posted: string[] = [];
+      const picks: string[][] = [];
+      const ui = { select: async (_title: string, labels: string[]) => (picks.push(labels), label), editor: async () => undefined, custom: () => { throw new Error("no popups"); } };
+      app.bind({ review: (request) => presentForDecision({ ui } as never, request, (text) => void posted.push(text)) });
+      const result = await app.showPlan();
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toContain("## Approach");
+      expect(picks).toEqual([["Approve plan v1", "Request changes", "Close"]]);
+      expect(result.text).toContain(approved ? "Approved plan v1" : "still a draft");
+      expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBe(approved ? 1 : undefined);
+    }
+  });
+
   it("does not open the review for an approved plan", async () => {
     const { app } = await drafted();
     expect((await app.approveDraft()).ok).toBe(true);
@@ -175,36 +189,41 @@ describe("/show-plan on a draft", () => {
   });
 });
 
-describe("plan review dialog", () => {
+describe("presentForDecision", () => {
   const request: PlanReviewRequest = {
     title: "Approve plan v1?",
-    markdown: Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n"),
-    actions: [{ value: "approve", label: "Approve" }, { value: "cancel", label: "Not yet" }],
+    markdown: "# Plan v1\n\nline",
+    actions: [{ value: "approve", label: "Approve" }, { value: "revise", label: "Request changes", input: "What?" }, { value: "cancel", label: "Not yet" }],
+  };
+  const ui = (labels: (string | undefined)[], edits: (string | undefined)[] = []) => {
+    const seen: { title: string; options: string[] }[] = [];
+    return { seen, ctx: { ui: { select: async (title: string, options: string[]) => (seen.push({ title, options }), labels.shift()), editor: async () => edits.shift() } } };
   };
 
-  it("scrolls the plan and picks an action", () => {
-    let result: string | undefined = "unset";
-    const tui = { requestRender() {}, terminal: { rows: 30 } };
-    const dialog = planReviewDialog(request, tui, fakeTheme, (value) => void (result = value));
-    let lines = dialog.render(60);
-    expect(lines.join("\n")).toContain("line 1");
-    expect(lines.join("\n")).not.toContain("line 40");
-    expect(lines.join("\n")).toContain("↓ more below");
-    dialog.handleInput("\x1b[6~"); // PgDn
-    lines = dialog.render(60);
-    expect(lines.join("\n")).not.toContain(" line 1\n");
-    expect(lines.join("\n")).toContain("line 30");
-    dialog.handleInput("\x1b[C"); // right
-    dialog.handleInput("\r");
-    expect(result).toBe("cancel");
+  it("posts the markdown once, then offers the action labels and maps the label back", async () => {
+    const { ctx, seen } = ui(["Not yet"]);
+    const posted: string[] = [];
+    expect(await presentForDecision(ctx as never, request, (text) => void posted.push(text))).toEqual({ value: "cancel" });
+    expect(posted).toEqual([request.markdown]);
+    expect(seen).toEqual([{ title: "Approve plan v1?", options: ["Approve", "Request changes", "Not yet"] }]);
   });
 
-  it("asks for text for an input action and returns to the plan when it is empty", async () => {
-    const results: unknown[] = ["revise", "revise"];
-    const edits = ["  ", "Split 02"];
-    const ctx = { ui: { custom: async () => results.shift(), editor: async () => edits.shift() } };
-    const choice = await reviewPlan(ctx as never, { ...request, actions: [{ value: "revise", label: "Request changes", input: "What?" }] });
-    expect(choice).toEqual({ value: "revise", text: "Split 02" });
+  it("does not post markdown that is already in the transcript", async () => {
+    const posted: string[] = [];
+    await presentForDecision(ui(["Approve"]).ctx as never, { ...request, alreadyShown: true }, (text) => void posted.push(text));
+    expect(posted).toEqual([]);
+  });
+
+  it("resolves undefined on Esc", async () => {
+    expect(await presentForDecision(ui([undefined]).ctx as never, request, () => undefined)).toBeUndefined();
+  });
+
+  it("asks for text for an input action and returns to the choice when it is empty", async () => {
+    const { ctx, seen } = ui(["Request changes", "Request changes"], ["  ", "Split 02"]);
+    const posted: string[] = [];
+    expect(await presentForDecision(ctx as never, request, (text) => void posted.push(text))).toEqual({ value: "revise", text: "Split 02" });
+    expect(seen).toHaveLength(2);
+    expect(posted).toHaveLength(1);
   });
 });
 
