@@ -583,15 +583,17 @@ A check that cannot run (no such command, a denied command, or a failing `setup`
 | Advisors | openai/gpt-6-astra, anthropic/claude-fable-5-1 (branch has a high ticket) | 40.0s | $0.05 |
 
 ### Findings
-| # | Severity | Where | Finding | Raised by | Opus |
+| # | Severity | Where | Finding | Raised by | Decision |
 | --- | --- | --- | --- | --- | --- |
-| 1 | HIGH | package.json | tsx is not in devDependencies | Opus | Astra agrees |
-| 2 | MEDIUM | tests/evidence.test.ts | SSRF tests cover 127.0.0.1 only | Fable | accepts |
-| – | LOW | tsconfig.json | tests/ not type-checked | Astra | rejects: tests run under tsx |
+| 1 | HIGH | package.json | tsx is not in devDependencies | Opus | kept · Astra agrees |
+| 2 | MEDIUM | tests/evidence.test.ts | SSRF tests cover 127.0.0.1 only | Fable | kept (Fable's finding) |
+| – | LOW | tsconfig.json | tests/ not type-checked | Astra | dropped: tests run under tsx |
+
+Decision = the reviewer's call after the advisors; dropped findings are not sent by Fix all.
 ```
 
 - **Live progress line.** While `/review` works, one line above the editor shows what is running and for how long, for example `⠹ Review · model review part 2/3 · anthropic/claude-opus-5-5 · 1m12s` (Pi's own spinner only shows while a model streams). It follows setup, each check, the static scan, each model-review part and retry, the advisors, the resolve step and the cut-file summaries, and goes away when the report is posted. `/build` shows the same line between a ticket's turns (`Build · ticket 02 · checks`, `· Opus review`, `· advisors · Astra`, `· resolving`, `· committing`) and hides it while the ticket's own session streams. Without a UI there is no line.
-- **Findings and fixes.** With a UI and at least one finding, a scrollable dialog titled `Review · N finding(s)` shows the same Findings table with the same numbers: static blocking findings, failed checks (Where is the command), static suggestions, then the model findings. The accepted model findings are the numbered ones, with who raised each and what Opus or the advisors said (`Astra agrees`, `accepts`). Findings Opus rejected, and advisor concerns it could not weigh, are rows numbered `–` (`rejects: <reason>`); **Fix…** can still refer to them by text. Choose **Fix all** to send the numbered findings to the model in this session, **Fix…** to type which to fix (numbers like `1, 3` and/or your own instructions; the full list, rejected findings included, goes along for reference), or **Close**. The message tells the model to keep changes scoped, run the checks, not commit, push, or switch branches, and report one line per finding. Run `/review` again when it is done. With no UI you get the report only. With no findings and a pass, there is no dialog.
+- **Findings and fixes.** With a UI and at least one finding, a scrollable dialog titled `Review · N finding(s)` shows the same Findings table with the same numbers: static blocking findings, failed checks (Where is the command), static suggestions, then the model findings. The accepted model findings are the numbered ones, with who raised each and the reviewer's call in the Decision column (`kept · Astra agrees`, `kept`, `kept (Astra's finding)`). Findings Opus rejected, and advisor concerns it could not weigh, are rows numbered `–` (`dropped: <reason>`); **Fix…** can still refer to them by text. Choose **Fix all** to send the numbered findings to the model in this session, **Fix…** to type which to fix (numbers like `1, 3` and/or your own instructions; the full list, rejected findings included, goes along for reference), or **Close**. The message tells the model to keep changes scoped, run the checks, not commit, push, or switch branches, and report one line per finding. Run `/review` again when it is done. With no UI you get the report only. With no findings and a pass, there is no dialog.
 
 ### Other commands
 

@@ -164,13 +164,13 @@ describe("/review advisors", () => {
     const dialog = t.dialogs[0]!;
     expect(dialog.title).toBe("Review · 2 finding(s)");
     expect(dialog.markdown).toContain("Advisors: Astra, Fable (branch has a high ticket)");
-    expect(dialog.markdown).toContain("| # | Severity | Where | Finding | Raised by | Opus |");
-    expect(dialog.markdown).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | Astra agrees |");
-    expect(dialog.markdown).toContain("| 2 | MEDIUM | src/retry.ts | no jitter. | Fable | accepts |");
-    expect(dialog.markdown).toContain("| – | LOW | src/retry.ts | rename retry to attempts. | Astra | rejects: style only |");
+    expect(dialog.markdown).toContain("| # | Severity | Where | Finding | Raised by | Decision |");
+    expect(dialog.markdown).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | kept · Astra agrees |");
+    expect(dialog.markdown).toContain("| 2 | MEDIUM | src/retry.ts | no jitter. | Fable | kept (Fable's finding) |");
+    expect(dialog.markdown).toContain("| – | LOW | src/retry.ts | rename retry to attempts. | Astra | dropped: style only |");
     expect(dialog.markdown).not.toMatch(/\| 3 \|/);
     // The chat block carries the same rows with the same numbers.
-    expect(t.reports.at(-1)).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | Astra agrees |");
+    expect(t.reports.at(-1)).toContain("| 1 | HIGH | src/retry.ts | retry never backs off. | Opus | kept · Astra agrees |");
   });
 
   it("Fix all sends only the accepted findings; Fix… may still reference the rejected one by text", async () => {

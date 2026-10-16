@@ -73,7 +73,7 @@ describe("reviewMarkdown tables", () => {
     expect(markdown).toContain("**npm test** (exit 1)\n```\nboom line 1\nboom line 2\n```");
   });
 
-  it("orders findings static blocking, failed checks, suggestions, then model, with the Opus column", () => {
+  it("orders findings static blocking, failed checks, suggestions, then model, with the Decision column", () => {
     const rows = rowsOf(markdown, "Findings").slice(2);
     expect(rows.map((row) => row.split(" | ").slice(0, 3).join(" | "))).toEqual([
       "| 1 | BLOCKING | security",
@@ -83,9 +83,9 @@ describe("reviewMarkdown tables", () => {
       "| 5 | MEDIUM | tests/evidence.test.ts",
       "| – | LOW | tsconfig.json",
     ]);
-    expect(rows[3]).toContain("| Opus | Astra agrees |");
-    expect(rows[4]).toContain("| Fable | accepts |");
-    expect(rows[5]).toContain("| Astra | rejects: tests run under tsx |");
+    expect(rows[3]).toContain("| Opus | kept · Astra agrees |");
+    expect(rows[4]).toContain("| Fable | kept (Fable's finding) |");
+    expect(rows[5]).toContain("| Astra | dropped: tests run under tsx |");
   });
 
   it("numbers the dialog table and Fix all items exactly like the report", () => {
@@ -98,7 +98,7 @@ describe("reviewMarkdown tables", () => {
     expect(items.some((item) => item.text.includes("not type-checked"))).toBe(false);
   });
 
-  it("writes a dash in the Opus column when no advisor was consulted", () => {
+  it("writes a dash in the Decision column when no advisor was consulted", () => {
     const solo: ReviewReport = { ...base, modelReview: { ...base.modelReview!, resolution: undefined, advisors: undefined, advisorRule: undefined }, stages: { checks: {}, model: { costUsd: 0.14 } } };
     const text = reviewMarkdown(solo, { setupConfigured: true });
     expect(text).toContain("| 4 | HIGH | package.json | tsx is not in devDependencies | Opus | — |");

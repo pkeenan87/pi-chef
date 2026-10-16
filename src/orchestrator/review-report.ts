@@ -45,7 +45,7 @@ export interface ReviewRow {
   where: string;
   finding: string;
   raisedBy: string;
-  /** The reviewer's verdict column: who agrees, "accepts", "rejects: why", or "—" when no advisor was consulted. */
+  /** The Decision column: "kept · Astra agrees", "kept", "kept (Astra's finding)", "dropped: why", "unresolved", or "—" when there was no decision. */
   verdict: string;
 }
 
@@ -91,7 +91,7 @@ export function reviewRows(report: ReviewReport): ReviewRow[] {
     // After the advisors answered, the reviewer's accepted findings are the model findings; rejected ones are notes.
     const name = (source: string) => (source === "opus" ? shortModel(model.model) : shortModel(source));
     for (const { finding, text } of acceptedLines(model)) {
-      const agrees = finding.agreedBy.map((who) => `${name(who)} agrees`);
+      const agrees = finding.agreedBy.map(name);
       rows.push({
         kind: "model",
         item: { kind: "model", text },
@@ -99,11 +99,11 @@ export function reviewRows(report: ReviewReport): ReviewRow[] {
         where: finding.file ?? NONE,
         finding: finding.message,
         raisedBy: name(finding.source),
-        verdict: [...(finding.source === "opus" ? [] : ["accepts"]), ...agrees].join("; ") || NONE,
+        verdict: finding.source === "opus" ? (agrees.length > 0 ? `kept · ${agrees.join(" and ")} agrees` : "kept") : `kept (${name(finding.source)}'s finding)`,
       });
     }
     for (const finding of model.resolution.findings.filter((item) => item.status === "rejected")) {
-      rows.push({ kind: "model", severity: finding.severity.toUpperCase(), where: finding.file ?? NONE, finding: finding.message, raisedBy: name(finding.source), verdict: `rejects: ${finding.rationale || "no reason given"}` });
+      rows.push({ kind: "model", severity: finding.severity.toUpperCase(), where: finding.file ?? NONE, finding: finding.message, raisedBy: name(finding.source), verdict: `dropped: ${finding.rationale || "no reason given"}` });
     }
   } else if (model) {
     for (const finding of model.findings) {
@@ -147,11 +147,11 @@ const table = (head: string[], rows: string[][]) => [`| ${head.join(" | ")} |`, 
 
 /** The Findings table, shared by the chat block and the findings dialog so the numbers match. */
 export function findingsTable(report: ReviewReport): string[] {
-  const reviewer = report.modelReview ? shortModel(report.modelReview.model) : "Opus";
-  return table(
-    ["#", "Severity", "Where", "Finding", "Raised by", reviewer],
+  const lines = table(
+    ["#", "Severity", "Where", "Finding", "Raised by", "Decision"],
     reviewRows(report).map((row) => [row.n === undefined ? "–" : String(row.n), row.severity, cell(row.where, 80), cell(row.finding, FINDING_CELL), cell(row.raisedBy, 40), cell(row.verdict, 120)]),
   );
+  return report.modelReview?.advisors?.length ? [...lines, "", "Decision = the reviewer's call after the advisors; dropped findings are not sent by Fix all."] : lines;
 }
 
 /** "$0.14", "unknown" for a call with no known price, "—" when the stage billed nothing. */
