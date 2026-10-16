@@ -225,13 +225,6 @@ describe("presentForDecision", () => {
     expect(seen).toHaveLength(2);
     expect(posted).toHaveLength(1);
   });
-
-  it("notifies by default, which draws at once inside a tool call", async () => {
-    const notes: string[] = [];
-    const ctx = { ui: { select: async () => "Approve", notify: (message: string) => void notes.push(message) } };
-    await presentForDecision(ctx as never, request);
-    expect(notes).toEqual([request.markdown]);
-  });
 });
 
 describe("/implement git preflight", () => {

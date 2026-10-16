@@ -1,6 +1,6 @@
 import { WorkflowError, type PlanAdvisorReview, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
 import { remember } from "./budget.js";
-import { iso, knownZero, type WorkflowContext } from "./context.js";
+import { active, iso, knownZero, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
 import { applyOverlap, assertGraph, forNewPlan, PLAN_FILE, renderPlanReview, ticketsTableLines } from "./plan.js";
@@ -63,14 +63,14 @@ export function previewPlan(ctx: WorkflowContext, tickets: Ticket[], advisorRevi
  * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
  * Plan approval is still required before /build.
  */
-export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): Promise<{ plan: PlanDocument; files: string[]; markdown: string; table: string }> {
+export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview, options: { present?: boolean } = {}): Promise<{ plan: PlanDocument; files: string[]; markdown: string; table: string }> {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
   const at = iso(ctx);
   const draft = draftFor(ctx, task, tickets, at, advisorReview);
   const routing = task.routing;
   const state = await ctx.store.update(task.taskId, "tickets drafted", (current) =>
-    move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
+    move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, presentPlan: options.present ? { version: draft.version } : undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
   );
   const files = ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
   const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE), ctx.config);
@@ -83,4 +83,19 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
   return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config).join("\n") };
+}
+
+/**
+ * Replaces the tickets of the draft that is waiting for approval with edited ones (Edit tickets after the plan was
+ * shown), rewrites the ticket files and plan.md.
+ */
+export async function redraftTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<PlanDocument> {
+  const task = active(ctx);
+  if (!task?.plan || task.phase !== "AWAITING_PLAN_APPROVAL") throw new WorkflowError("NO_DRAFT", "There is no draft waiting for approval.");
+  const draft = draftFor(ctx, task, tickets, iso(ctx), task.plan.advisorReview);
+  await ctx.store.update(task.taskId, "tickets edited", (current) => ({ ...current, ...forNewPlan(current, draft), plan: draft, publishApproved: false }));
+  ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
+  ctx.store.writeText(task.taskId, "plan.json", JSON.stringify(draft, null, 2));
+  ctx.store.writeText(task.taskId, PLAN_FILE, renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE), ctx.config));
+  return draft;
 }

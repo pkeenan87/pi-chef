@@ -104,7 +104,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
 }
 
 /** The plan document for a task as it is shown for review: `plan.md`, or rendered from the stored plan. */
-function planMarkdown(ctx: WorkflowContext, task: TaskState): string {
+export function planMarkdown(ctx: WorkflowContext, task: TaskState): string {
   return ctx.store.readText(task.taskId, PLAN_FILE) ?? renderPlanReview(task.plan!, ctx.store.readText(task.taskId, SPEC_FILE), ctx.config);
 }
 

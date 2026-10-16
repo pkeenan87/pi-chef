@@ -520,6 +520,8 @@ export interface TaskState {
   taskId: string;
   phase: Phase;
   planning?: PlanningProgress;
+  /** A freshly drafted plan that has not been shown yet: the extension posts it and asks for the decision when the planning turn settles. */
+  presentPlan?: { version: number };
   pausedFrom?: Phase;
   createdAt: string;
   updatedAt: string;

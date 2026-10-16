@@ -27,6 +27,8 @@ export interface WorkflowBinding {
   report?: (markdown: string) => void;
   /** The live Pi UI for the progress line; undefined without a UI. Set on every bind, from the live ctx. */
   indicatorSink?: IndicatorSink;
+  /** Opens Pi's editor with a prompt and prefill (Edit tickets). Absent without a UI. */
+  edit?: (title: string, prefill: string) => Promise<string | undefined>;
   /** Shows a plan or review inline and returns the action chosen in a compact picker. Absent without a UI. */
   review?: PlanReviewFn;
   /** Posts a plan as a displayed message in the chat transcript. */

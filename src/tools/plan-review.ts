@@ -7,14 +7,13 @@ import type { PlanReviewAction, PlanReviewRequest } from "../orchestrator/types.
  * for text in Pi's editor before it resolves; leaving that editor empty returns to the choice. Esc resolves undefined,
  * which callers treat as "dismissed" (a plan is saved as a draft, a review is closed).
  *
- * `post` puts the markdown in the transcript and must show it now. Inside a tool call (plan_tickets runs mid-turn) Pi
- * holds `sendMessage` until the turn ends, after the choice, so the tool passes `ui.notify`, which draws immediately.
- * Commands run while Pi is idle, where `sendMessage` appends at once.
+ * `post` puts the markdown in the transcript and must show it now, so call this only while Pi is idle (a command, or
+ * `agent_settled`): during a turn `sendMessage` is held until the turn ends, after the choice.
  */
 export async function presentForDecision(
   ctx: Pick<ExtensionContext, "ui">,
   request: PlanReviewRequest,
-  post: (markdown: string) => void = (markdown) => ctx.ui.notify(markdown, "info"),
+  post: (markdown: string) => void,
 ): Promise<{ value: string; text?: string } | undefined> {
   if (!request.alreadyShown) post(request.markdown);
   for (;;) {

@@ -1,12 +1,9 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../orchestrator/service.js";
-import { parseTicketsMarkdown, renderTicketsMarkdown } from "../orchestrator/tickets.js";
 import { DIFFICULTIES, TIERS, type Ticket } from "../domain.js";
-import type { PlanReviewAction } from "../orchestrator/types.js";
 import { consultResultText } from "../orchestrator/plan-consult.js";
 import { isSecuritySensitive } from "../router/classify.js";
-import { presentForDecision } from "./plan-review.js";
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
 
@@ -106,76 +103,36 @@ export function createPlanConsultTool(getWorkflow: () => Workflow | undefined) {
   });
 }
 
-const REVIEW_ACTIONS: PlanReviewAction[] = [
-  { value: "approve", label: "Approve plan" },
-  { value: "revise", label: "Request changes", input: "What should change in the plan? (spec or tickets)" },
-  { value: "edit", label: "Edit tickets" },
-  { value: "save", label: "Save as draft" },
-];
-
 export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
   return defineTool({
     name: "plan_tickets",
     label: "Plan Tickets",
     description:
-      "Submit the tickets (vertical, independently testable slices, each within one context window, each with technical implementation steps) for the saved spec. The tool validates them, shows the user the full plan for review, writes the ticket files, and saves the plan as a draft, or approves it when the user chooses Approve. Only usable after plan_spec.",
+      "Submit the tickets (vertical, independently testable slices, each within one context window, each with technical implementation steps) for the saved spec. The tool validates them, writes the ticket files, and saves the plan as a draft. When the turn ends the user sees the full plan and chooses Approve, Request changes, Edit tickets or Save as draft. Only usable after plan_spec.",
     promptSnippet: "plan_tickets: submit the vertical-slice tickets for the spec",
     parameters: PlanTicketsParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const workflow = getWorkflow();
       if (!workflow) throw new Error("The cost workflow is not available.");
       workflow.requireTicketStage();
-      let check = workflow.checkTickets(params.tickets);
+      const check = workflow.checkTickets(params.tickets);
       if (check.errors.length) throw new Error(`Tickets rejected. Fix these and call plan_tickets again:\n- ${check.errors.join("\n- ")}`);
       // Advisors were consulted (or could not be): refuses until plan_consult ran and the resolution is written.
       const advisorReview = await workflow.adviceForTickets(params.advisorResolution, check.tickets, params.reconsultWaived);
-      let tickets: Ticket[] = check.tickets;
-      let edited = false;
-      let approve = false;
+      // With a UI the plan is shown once this turn has settled (see presentPendingPlan), as markdown, then the person decides.
       const inline = ctx.hasUI && typeof ctx.ui.select === "function";
+      const tickets: Ticket[] = check.tickets;
+      const { plan, files, markdown, table } = await workflow.commitTickets(tickets, advisorReview, { present: inline });
       if (inline) {
-        // The person reads the whole plan (spec and tickets) inline before anything is saved, then picks an action.
-        let shown: string | undefined;
-        for (;;) {
-          const markdown = workflow.previewPlan(tickets, advisorReview);
-          // Back from an empty editor or a cancelled edit the plan is unchanged: pick again without posting it twice.
-          const choice = await presentForDecision(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown, actions: REVIEW_ACTIONS, alreadyShown: markdown === shown }, (text) => ctx.ui.notify(text, "info"));
-          shown = markdown;
-          // Closing the review (Esc) keeps the work: it saves the draft like "Save as draft".
-          if (!choice || choice.value === "save") break;
-          if (choice.value === "approve") {
-            approve = true;
-            break;
-          }
-          if (choice.value === "revise") {
-            // The revised draft is a new draft: it may consult the advisors again.
-            await workflow.clearConsult();
-            return text(
-              `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_consult again for the revised draft and plan_tickets with the full revised ticket list and your advisorResolution.`,
-            );
-          }
-          const changed = await ctx.ui.editor("Edit the tickets (titles, implementation, criteria, Blocked by)", renderTicketsMarkdown(tickets));
-          if (changed === undefined) continue;
-          check = workflow.checkTickets(parseTicketsMarkdown(changed));
-          if (check.errors.length) {
-            ctx.ui.notify(`Edited tickets are invalid, keeping the previous version:\n- ${check.errors.join("\n- ")}`, "warning");
-            continue;
-          }
-          tickets = check.tickets;
-          edited = true;
-        }
+        return text(
+          `${tickets.length} tickets written (${files.length} files). The plan is saved as a draft and will be shown to the user for approval when this turn ends. End your turn now with a one-line summary; do not repeat the plan.\n\n${table}`,
+          { tickets, files, version: plan.version, approved: false },
+        );
       }
-      const { plan, files, markdown, table } = await workflow.commitTickets(tickets, advisorReview);
-      // With a UI the plan was already posted before the choice; without one it is posted here (when this turn ends).
-      if (!inline) workflow.showMarkdown(markdown);
-      const editNote = edited ? " The user edited the tickets before saving." : "";
+      // No UI: the plan is posted in the chat when this turn ends, and approved later with /show-plan.
+      workflow.showMarkdown(markdown);
       const ending = "End your turn with a two-line summary; do not repeat the plan and do not implement anything.";
-      if (approve) {
-        const approved = await workflow.approveDraft();
-        if (!approved.ok) throw new Error(`The tickets were saved but approval failed: ${approved.text}`);
-        return text(`${tickets.length} tickets written (${files.length} files). The user approved plan v${plan.version}; they run /build next.${editNote}\n\n${table}\n\n${ending}`, { tickets, files, version: plan.version, approved: true });
-      }
-      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and was shown to the user in full. Draft saved; the user can /show-plan to approve it later.${editNote}\n\n${table}\n\nMention in your summary how many tickets are low, medium and high and who builds them. ${ending}`;
+      const summary = `${tickets.length} tickets written (${files.length} files). Plan v${plan.version} is a draft and was shown to the user in full. Draft saved; the user can /show-plan to approve it later.\n\n${table}\n\nMention in your summary how many tickets are low, medium and high and who builds them. ${ending}`;
       return text(summary, { tickets, files, version: plan.version, approved: false });
     },
   });
