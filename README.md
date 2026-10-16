@@ -158,7 +158,7 @@ Then add these lines to the project's `.gitignore`:
 .pi-workflows/*.local.yaml
 ```
 
-A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/ship` to pass (see [Sample workflow](#sample-workflow)).
+A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
 
 Task files, the cost ledger, metrics, and reports are gitignored. The config file is not.
 
@@ -206,6 +206,11 @@ The YAML must not contain secrets, API keys, or tokens.
 | `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
 | `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
 | `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
+| `routing.sessionTier` (default `premium`) | Tier every chat turn on `cost-opt/auto` routes to. While it is set nothing is classified for chat, so no Decisions call is made. One of `cheap`, `standard`, `premium` |
+| `routing.directTier` (default `cheap`) | Tier for compaction and other direct calls on `cost-opt/auto` |
+| `routing.reviewTier` (default `premium`) | Tier of the `/review` model pass. A failed part falls back to `standard` candidates once this tier has none left |
+| `routing.maxEscalations` (default 3) | Failed attempts a ticket gets before `/build` stops climbing: low, medium, high, then premium |
+| `tiers.ticketLow`, `tiers.ticketMedium`, `tiers.ticketHigh` | Models for tickets of difficulty `low`, `medium`, `high`. A config that lists `tiers` without them runs those tickets on `cheap`, `standard` and `premium`, with a warning in `/status` |
 | `routing.attemptOverheadUsd` (default 0.02, at least 0) | Ranking only. Added to each candidate's price before it is divided by its success rate, so a $0 model with a poor record does not always win. Never billed, never in a budget |
 | `review` | The advisory model pass of `/review`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
 
@@ -313,10 +318,15 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 |---|---|
 | deterministic / mechanical | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
 | classifier | `Microsoft-Decision-1` deployed in Azure Foundry, or `typesafe-ai/jev` on Vercel AI Gateway. Both use the Decisions API |
-| cheap | ChatGPT Luna `gpt-6-luna` (OpenAI account login), or Claude Haiku `claude-haiku-5-5` (Anthropic account login) |
-| standard | Claude Sonnet `claude-sonnet-5-5` (Anthropic), Grok 4.7 through a SuperGrok subscription (`xai`), or Grok 4.7 deployed in Foundry |
-| premium | Claude Opus `claude-opus-5-5` (Anthropic), or Sol 6.1 `gpt-6.1-sol` (OpenAI) |
-| advisor (on demand) | Claude Fable `claude-fable-5-1` (Anthropic), or GPT Astra `gpt-6-astra` (OpenAI and/or a Foundry deployment) |
+| cheap (`routing.directTier`) | Claude Haiku `claude-haiku-5-5` (Anthropic account login), then ChatGPT Luna `gpt-6-luna` (OpenAI account login). Compaction and other direct calls |
+| standard | Claude Sonnet `claude-sonnet-5-5`, Sol 6.1 `gpt-6.1-sol`. `/plan` and `/route` previews |
+| premium (`routing.sessionTier`, `routing.reviewTier`) | Claude Opus `claude-opus-5-5`. The main chat session, the `/review` model pass, and the last step of the ticket ladder |
+| ticketLow | Grok 4.7 `grok-4.7` through a SuperGrok subscription (`xai`). Tickets of difficulty `low` |
+| ticketMedium | Claude Sonnet `claude-sonnet-5-5`. Difficulty `medium` |
+| ticketHigh | Sol 6.1 `gpt-6.1-sol`. Difficulty `high` |
+| advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Not yet wired into `/plan` or `/review` |
+
+Who does what, by default: chat turns go to Opus; Haiku (then Luna) does the cheap side jobs; `/build` tickets go to Grok, Sonnet or Sol by difficulty and climb one step on each failure (Grok, Sonnet, Sol, Opus); `/review` asks Opus. The shipped quota weights rank Haiku ahead of Luna.
 
 ```yaml
 tiers:
@@ -337,7 +347,7 @@ How a candidate is picked:
 3. The lowest score wins. Ties go to config order. A candidate with no `pricing` row ranks after priced ones and the decision is flagged `price_unknown`.
 4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/build` stops with `NO_CANDIDATE`).
 
-Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. The advisory model pass of `/ship` is recorded under its own task type (`review:<task type>`), so review failures never count against a model's record for implementation work. A classifier call counts as a success when its answer reaches `routing.minConfidence`.
+Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. The advisory model pass of `/review` is recorded under its own task type (`review:<task type>`), so review failures never count against a model's record for implementation work. A classifier call counts as a success when its answer reaches `routing.minConfidence`.
 
 Subscription models (ChatGPT, Claude) are priced at 0 in the sample, because they have no per-token marginal cost. Every price in the sample config is a placeholder to replace from your rate cards.
 
@@ -374,12 +384,13 @@ Chat turns on `cost-opt/auto` set no status line of their own: Pi's footer alrea
 
 `auto` is a stateful, cache-aware router (`src/router/virtual.ts`). Switching models mid-conversation loses the provider's prompt cache, so it moves as rarely as it can.
 
+- **Session tier.** With `routing.sessionTier` set (default `premium`), every user, retry and continuation request routes to that tier whatever the classifier or the thinking level would say, and nothing is classified, so no Decisions call is made. The selector still picks the model in the tier (availability, budget, circuits, price). An escalation cue only raises a session pinned below `premium`. The rest of this list describes the classifying path, used only when no `sessionTier` is set.
 - **First user turn.** The message is classified once, with the same selector-chosen Decisions classifier that planning uses (keyword fallback if it is unavailable or not confident). The policy picks a tier (budget, availability, circuit breakers, and the org allowlist apply) and the selector picks a model in it. A model the session already uses is kept if it is a candidate of that tier. The choice is stored as router state (`tier`, model, classification, `switches`; a `phase` written by an older version is still read and ignored) on the session branch.
 - **Planning floor.** The hidden plan-interview context that `/plan` adds to each turn is not classified (it reaches the router as one more user message, so its `[PLAN ...]` marker tells it apart). While `/plan` is running the chat model is at least `standard`, and `premium` when the stored classification is high complexity or security-sensitive, even if the request was classified as cheap work.
 - **Later turns and tool follow-ups.** They stay on the stored model. It is re-evaluated only when a message is longer than 2000 characters or contains an escalation cue ("this is hard", "think harder", "use a stronger model"), or when the thinking level rises to `high` or `xhigh`. Tiers only go up this way, never down.
 - **No handoff to cheap.** The model stays on its routed tier after an edit or write. An earlier version switched to the `cheap` tier after the first successful edit, which put fixes for review findings on the cheapest model. Only escalation cues, long new requests, a higher thinking level, failures, and the `/plan` floor move the model.
 - **Retries.** After an overload, rate-limit, 5xx, or auth error the router moves to another candidate of the same tier and counts a failure against the failed model (feeding the circuit breaker). After a context overflow it picks a candidate with a larger context window in the same or a higher tier. Other errors retry on the same model.
-- **Compaction and other direct calls** go to the `cheap` tier.
+- **Compaction and other direct calls** go to `routing.directTier` (default `cheap`: Haiku, then Luna).
 - **Budget.** A hard limit stops routing with an error. A soft limit prefers the cheapest candidate in a tier and never moves up a tier.
 - Every returned model must be registered in Pi with credentials (OpenAI and Anthropic only through account login); unusable candidates are skipped, and the error names the tier if none is left.
 
@@ -469,7 +480,7 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 **Per ticket**, in dependency order (`blockedBy`):
 
-1. **Route.** The ticket is routed with purpose `implement`. `suggestedTier` is a hint, capped by `routing.maxTier`, and a security-sensitive classification still forces the policy tier. The selector picks the model within the tier, and a tier with no usable model moves up one. The status line shows the choice and a `route` event is logged.
+1. **Route.** The ticket is routed with purpose `implement` to the tier of its `difficulty` (`low` to `ticketLow`, `medium` to `ticketMedium`, `high` to `ticketHigh`). The planner sets `difficulty` on each ticket: low is mechanical or small and well specified, medium is typical feature work, high is cross-cutting, tricky logic, concurrency, security, or a large blast radius. An old plan with only `suggestedTier` maps deterministic and cheap to low, standard to medium, premium to high, and none to medium; `difficulty` wins when both are present. A security-sensitive plan or classification starts at `ticketHigh` at least. After a failure the ticket moves one step up the ladder `ticketLow`, `ticketMedium`, `ticketHigh`, `premium`. The selector picks the model within the tier, and a tier with no usable model, an open circuit, or a provider that is not signed in moves up the same ladder. The status line shows the choice and a `route` event is logged.
 2. **Fresh session.** `/build` opens a new Pi session on that model, so each ticket starts with an empty context. The first message holds the chunk rules (one ticket only, no commit, push, or branch switch), the ticket (what to build, implementation steps, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by, and the repo's `AGENTS.md`. The model works in your checkout with Pi's normal tools. While a ticket runs, a `git push` and a branch switch are blocked.
 3. **Checks.** When the model stops, `setup` runs once per build, then the ticket's `checks` (else `config.checks`), in the repo root. A failure sends the output tail back to the same session for one retry turn. If it fails again the ticket is `failed`.
 4. **Commit.** On a pass, the whole tree is committed as `<id>: <title>`, the ticket file's `## Status:` becomes `done`, criteria are ticked from the model's closing checklist (best effort), and the model's success is recorded. `/build` then moves on to the next ticket by itself. A ticket with no checks anywhere is committed with a warning that nothing verified it.
@@ -493,7 +504,7 @@ A check that cannot run (no such command, a denied command, or a failing `setup`
 
 ### Other commands
 
-`/route <task>` previews tier, provider, and expected cost and writes nothing. `/status` shows phase, approval, the build branch and ticket progress, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
+`/route <task>` previews tier, provider, and expected cost, plus who serves chat, direct calls, review and each ticket difficulty, and writes nothing. `/status` shows the same routing summary, phase, approval, the build branch and ticket progress, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
 
 ## Cost
 
@@ -507,7 +518,7 @@ Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not p
 
 `/cost json` is the dashboard source. `compareBaseline` in `src/cost/ledger.ts` diffs this workflow against a Cursor Auto sample you supply (cost per merged PR, time to merge-ready, success rate, retries, regressions, interventions). The repo does not invent a Cursor Auto number.
 
-Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at the cheapest proven tier, or at deterministic for mechanical work, and escalates at most `maxEscalations` times (default 2), never past `maxTier`. The classifier tier is for decisions, so a failed deterministic step escalates to `cheap`, not to the classifier. Three failures and zero successes in a task class open the circuit breaker.
+Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at its difficulty tier and climbs one step per failure (default `maxEscalations` 3, so the full ladder fits), never past `maxTier`. The classifier tier is for decisions, so it is never on a ladder. Three failures and zero successes in a task class open the circuit breaker.
 
 ## Web tools
 
@@ -521,7 +532,7 @@ The extension registers two tools for the model to call.
 Task state is `state.json` plus an append-only `events.jsonl`. On startup the store rebuilds from the log if the snapshot is missing or torn, then rewrites the snapshot. Writes go through a temp file and rename, under a lock file. Nothing here deletes `plan.md`, the approved snapshot, or reports.
 
 - **Esc during `/build`.** The build stops after the current turn. The ticket stays in progress and nothing is committed. Run `/build` to continue.
-- **A failed ticket.** `/build` stops and says why. Fix it in the chat (the working tree keeps the failed attempt), then run `/build`: the checks run again, and if they pass your fix is committed and the build goes on. If you change nothing, the ticket goes to a model one tier up. A new plan version keeps the runs of tickets whose text is unchanged and builds the rest again.
+- **A failed ticket.** `/build` stops and says why. Fix it in the chat (the working tree keeps the failed attempt), then run `/build`: the checks run again, and if they pass your fix is committed and the build goes on. If you change nothing, the ticket goes to a model one step up the ticket ladder. A new plan version keeps the runs of tickets whose text is unchanged and builds the rest again.
 - **A failed `/review`.** Choose Fix all (or Fix…) in the findings dialog, or fix by hand, then run `/review` again. `/review` commits and pushes nothing.
 - **A crash or closed Pi.** Commits already made stay on the branch. `/build` resumes from the first ticket that is not done. It needs you on the recorded branch, and says which `git switch` to run if you are not.
 - **An expired login** pauses the task. Rate-limit and outage errors from the Foundry and local clients surface as provider errors and do not rewrite policy.
