@@ -67,7 +67,7 @@ describe("virtual model route with tiers", () => {
     expect(picked.model).toEqual({ provider: "foundry", id: "grok-4-7" });
     // the Pi footer shows the routed model; chat turns set no status line of their own
     expect(statuses).toHaveLength(0);
-    expect((picked as { state?: { tier: string; model: string } }).state).toMatchObject({ v: 1, tier: "standard", model: "grok-4-7", phase: "plan", switches: 0 });
+    expect((picked as { state?: { tier: string; model: string } }).state).toMatchObject({ v: 1, tier: "standard", model: "grok-4-7", switches: 0 });
     const events = readFileSync(path.join(app.store.root, "tasks", app.activeTaskId()!, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(events.filter((event) => event.type === "route").at(-1).route).toMatchObject({ purpose: "user", tier: "standard", provider: "foundry", model: "grok-4-7" });
     // chat models were registered with Pi at session start, with command-based credentials

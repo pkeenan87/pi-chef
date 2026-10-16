@@ -67,7 +67,7 @@ describe("routeVirtual", () => {
     expect(t.classify).toHaveBeenCalledTimes(1);
     expect(result.model).toMatchObject({ provider: "foundry", id: "grok-4-7" });
     expect(result.thinkingLevel).toBe("medium");
-    expect(result.state).toMatchObject({ v: 1, tier: "standard", provider: "foundry", model: "grok-4-7", phase: "plan", switches: 0 });
+    expect(result.state).toMatchObject({ v: 1, tier: "standard", provider: "foundry", model: "grok-4-7", switches: 0 });
     expect(result.state!.classification).toMatchObject({ taskType: "feature", securitySensitive: false, source: "model" });
     expect(JSON.parse(JSON.stringify(result.state))).toEqual(result.state);
     expect(t.onRoute).toHaveBeenCalledTimes(1);
@@ -106,7 +106,7 @@ describe("routeVirtual", () => {
     t.classify.mockResolvedValueOnce(classification("premium", { complexity: "high" }));
     const long = await routeVirtual(t.request({ state: first.state, messages: [{ role: "user", content: "x".repeat(2500) }] }), t.deps);
     expect(t.classify).toHaveBeenCalledTimes(2);
-    expect(long.state).toMatchObject({ tier: "premium", switches: 1, phase: "plan" });
+    expect(long.state).toMatchObject({ tier: "premium", switches: 1 });
     t.classify.mockResolvedValueOnce(classification("cheap"));
     const again = await routeVirtual(t.request({ state: long.state, messages: [{ role: "user", content: "y".repeat(2500) }] }), t.deps);
     expect(again.state!.tier).toBe("premium");
@@ -120,34 +120,28 @@ describe("routeVirtual", () => {
     expect(cue.state!.tier).toBe("premium");
   });
 
-  it("switches once to the cheap tier after a successful edit", async () => {
-    const t = setup({ tier: "premium" });
-    const first = await routeVirtual(t.request(), t.deps);
-    expect(first.state!.phase).toBe("plan");
-    const switched = await routeVirtual(t.request({ reason: "continuation", state: first.state, messages: edited, previous: { model: first.model } }), t.deps);
-    expect(switched.state).toMatchObject({ tier: "cheap", phase: "build", switches: 1 });
-    expect(switched.model.id).toBe(switched.state!.model);
-    const later = await routeVirtual(t.request({ reason: "continuation", state: switched.state, messages: edited, previous: { model: first.model } }), t.deps);
-    expect(later.model).toMatchObject({ id: switched.state!.model });
-    expect(later.state).toBeUndefined();
+  it("stays on its routed tier after a successful edit (no handoff to cheap)", async () => {
+    for (const tier of ["standard", "premium"] as const) {
+      const t = setup({ tier });
+      const first = await routeVirtual(t.request(), t.deps);
+      expect(first.state).not.toHaveProperty("phase");
+      const after = await routeVirtual(t.request({ reason: "continuation", state: first.state, messages: edited, previous: { model: first.model } }), t.deps);
+      expect(after.model).toMatchObject({ id: first.state!.model });
+      expect(after.state).toBeUndefined();
+      expect(t.onRoute).toHaveBeenCalledTimes(1);
+    }
   });
 
-  it("does not switch for security-sensitive or high-complexity work, or after a failed edit", async () => {
-    const sensitive = setup({ tier: "premium", extra: { risk: "high" } });
-    const first = await routeVirtual(sensitive.request(), sensitive.deps);
-    expect(first.state!.classification.securitySensitive).toBe(true);
-    const stay = await routeVirtual(sensitive.request({ reason: "continuation", state: first.state, messages: edited }), sensitive.deps);
-    expect(stay.model.id).toBe(first.model.id);
-    expect(stay.state).toBeUndefined();
-
-    const hard = setup({ tier: "premium", extra: { complexity: "high" } });
-    const h = await routeVirtual(hard.request(), hard.deps);
-    expect((await routeVirtual(hard.request({ reason: "continuation", state: h.state, messages: edited }), hard.deps)).model.id).toBe(h.model.id);
-
-    const plain = setup({ tier: "premium" });
-    const p = await routeVirtual(plain.request(), plain.deps);
-    const failedEdit = edited.map((m) => (m.role === "toolResult" ? { ...m, isError: true } : m));
-    expect((await routeVirtual(plain.request({ reason: "continuation", state: p.state, messages: failedEdit }), plain.deps)).model.id).toBe(p.model.id);
+  it("loads state stored with the old phase field and keeps the tier on a fix after review findings", async () => {
+    const t = setup({ tier: "premium" });
+    const first = await routeVirtual(t.request(), t.deps);
+    const old = { ...first.state!, phase: "plan" as const };
+    const fix = await routeVirtual(t.request({ reason: "continuation", state: old, messages: edited, previous: { model: first.model } }), t.deps);
+    expect(fix.model).toMatchObject({ id: first.state!.model });
+    expect(fix.state).toBeUndefined();
+    const later = await routeVirtual(t.request({ state: old, messages: [{ role: "user", content: "fix the HIGH findings" }] }), t.deps);
+    expect(later.model).toMatchObject({ id: first.state!.model });
+    expect(later.state).toBe(old);
   });
 
   it("retries on another model of the same tier after an overload and records a failure", async () => {

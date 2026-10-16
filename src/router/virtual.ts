@@ -10,7 +10,8 @@ import { shadowCost, tierCost, type SuccessTable } from "./stats.js";
  * The cost-opt/auto virtual model. Stateful and cache-aware: the first user request is classified once,
  * the chosen model then stays for the session (a switch loses the prompt cache), and it moves only when
  * the work really changes: an escalation cue, a long new request, a higher thinking level, a failure,
- * or the single plan-to-build handoff to the cheap tier after the first successful edit.
+ * or an explicit failure. There is no handoff to a cheaper tier after the first edit: a fix for a review finding
+ * needs the same model as the plan, so the chat model stays on its routed tier.
  */
 
 export type ChatTier = "cheap" | "standard" | "premium";
@@ -32,7 +33,8 @@ export interface RouterState {
   tier: ChatTier;
   provider: string;
   model: string;
-  phase: "plan" | "build";
+  /** Written by older versions (the removed plan-to-build handoff). Still loaded; never read or written now. */
+  phase?: "plan" | "build";
   classifiedAt: string;
   classification: RouterClassification;
   switches: number;
@@ -112,7 +114,6 @@ export interface RouterResult<M extends ModelLike> {
   state?: RouterState;
 }
 
-const EDIT_TOOLS = new Set(["edit", "write"]);
 const LONG_MESSAGE = 2000;
 const ESCALATION_CUE = /\b(this is (?:really )?hard|think harder|use a (?:stronger|better|smarter|bigger) model|stronger model)\b/i;
 const CONTEXT_OVERFLOW = /context (?:length|window)|context_length|prompt is too long|too many tokens|maximum context|input is too long|exceeds? the (?:context|maximum)|overflow/i;
@@ -145,12 +146,6 @@ function lastUserIndex(messages: readonly RouterMessage[]): number {
 function lastUser(messages: readonly RouterMessage[]): string {
   const index = lastUserIndex(messages);
   return index >= 0 ? textOf(messages[index]!.content) : "";
-}
-
-/** A successful edit or write tool result after the last user message. */
-function editedThisTurn(messages: readonly RouterMessage[]): boolean {
-  const last = lastUserIndex(messages);
-  return messages.slice(last + 1).some((item) => item.role === "toolResult" && EDIT_TOOLS.has(item.toolName ?? "") && !item.isError);
 }
 
 /** Lowest tier a thinking level allows: high floors at standard, xhigh at premium. */
@@ -239,28 +234,16 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
       for (const tier of CHAT_TIERS.slice(rank(floor))) {
         const pick = await choose(snapshot, tier, {}, "planning needs at least standard");
         if (!pick) continue;
-        const next: RouterState = { ...state, tier, provider: pick.candidate.provider, model: pick.candidate.model, phase: "plan", switches: state.switches + 1 };
+        const next: RouterState = { ...state, tier, provider: pick.candidate.provider, model: pick.candidate.model, switches: state.switches + 1 };
         await emit("planning", next, pick.reason);
         return { model: pick.model, thinkingLevel, state: next };
       }
     }
   }
 
-  // Tool follow-ups stay put; they carry the plan-to-build handoff, nothing else.
+  // Tool follow-ups stay on the model they were routed to.
   if (request.reason === "continuation") {
     if (state) {
-      const switched = state.phase === "plan" && state.tier !== "cheap" && !state.classification.securitySensitive && state.classification.complexity !== "high" && editedThisTurn(request.messages);
-      if (switched) {
-        const snapshot = await deps.snapshot();
-        if (snapshot.budget !== "hard") {
-          const pick = await choose(snapshot, "cheap", {}, "build handoff");
-          if (pick) {
-            const next: RouterState = { ...state, tier: "cheap", provider: pick.candidate.provider, model: pick.candidate.model, phase: "build", switches: state.switches + 1 };
-            await emit("handoff", next, pick.reason);
-            return { model: pick.model, thinkingLevel, state: next };
-          }
-        }
-      }
       const model = usableModel(state.provider, state.model) ?? request.previous?.model;
       if (model) return { model, thinkingLevel };
     } else if (request.previous) {
@@ -331,7 +314,6 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
     tier: decision.tier,
     provider: decision.candidate.provider,
     model: decision.candidate.model,
-    phase: decision.tier === "cheap" ? "build" : "plan",
     classification: summary,
     classifiedAt,
     switches: state.switches + 1,
@@ -442,8 +424,7 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
       tier: decision.tier,
       provider: decision.candidate.provider,
       model: decision.candidate.model,
-      phase: decision.tier === "cheap" ? "build" : "plan",
-      classifiedAt: deps.now().toISOString(),
+        classifiedAt: deps.now().toISOString(),
       classification: summary,
       switches: 0,
     };
