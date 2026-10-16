@@ -195,15 +195,28 @@ export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
 export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
   deterministic: [{ provider: "local", model: "qwen2.5-coder:7b" }],
   cheap: [{ provider: "anthropic", model: "claude-haiku-5-5" }],
-  batch: [{ provider: "openai", model: "gpt-6-luna" }],
+  // Foundry entries are fallbacks for when the account login does not work (for example ChatGPT Enterprise, or no SuperGrok).
+  // A Foundry candidate with no endpoint or no az login is unavailable and skipped. The `model` is YOUR deployment name:
+  // these assume deployments named like the models, so rename them in your config.
+  batch: [
+    { provider: "openai", model: "gpt-6-luna" },
+    { provider: "foundry", model: "gpt-6-luna", label: "GPT Luna (Foundry)" },
+  ],
   standard: [
     { provider: "anthropic", model: "claude-sonnet-5-5" },
     { provider: "openai", model: "gpt-6.1-sol" },
+    { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
   ],
   premium: [{ provider: "anthropic", model: "claude-opus-5-5" }],
-  ticketLow: [{ provider: "xai", model: "grok-4.7", label: "Grok 4.7 (SuperGrok)" }],
+  ticketLow: [
+    { provider: "xai", model: "grok-4.7", label: "Grok 4.7 (SuperGrok)" },
+    { provider: "foundry", model: "grok-4-7", label: "Grok 4.7 (Foundry)" },
+  ],
   ticketMedium: [{ provider: "anthropic", model: "claude-sonnet-5-5" }],
-  ticketHigh: [{ provider: "openai", model: "gpt-6.1-sol" }],
+  ticketHigh: [
+    { provider: "openai", model: "gpt-6.1-sol" },
+    { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
+  ],
   advisor: [
     { provider: "openai", model: "gpt-6-astra" },
     { provider: "anthropic", model: "claude-fable-5-1" },

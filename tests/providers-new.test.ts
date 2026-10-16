@@ -180,7 +180,7 @@ describe("local reachability and provider registration", () => {
     expect(names.sort()).toEqual(["foundry", "local", "vercel"]);
     expect(registered.foundry!.baseUrl).toBe("https://res.services.ai.azure.com/openai/v1");
     expect(registered.foundry!.apiKey).toBe("!az account get-access-token --resource 'https://ai.azure.com' --query accessToken -o tsv");
-    expect(registered.foundry!.models.map((m) => m.id).sort()).toEqual(["gpt-6-astra", "grok-4-7"]);
+    expect(registered.foundry!.models.map((m) => m.id).sort()).toEqual(["gpt-6-astra", "gpt-6-luna", "grok-4-7"]);
     expect(registered.vercel!.baseUrl).toBe("https://ai-gateway.vercel.sh/v1");
     expect(registered.vercel!.apiKey.startsWith("!sed ")).toBe(true);
     expect(registered.vercel!.apiKey).toContain("/proj/.env.local");

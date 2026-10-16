@@ -126,7 +126,7 @@ export function ticketRouteView(config: WorkflowConfig, ticket: Ticket): { imple
   const difficulty = ticketDifficulty(ticket);
   const first = tierCandidates(config, DIFFICULTY_TIER[difficulty])[0];
   const candidates = tierCandidates(config, "advisor").map((item) => ({ provider: item.provider, model: item.model }));
-  const picked = advisorsFor({ difficulty, implementerProvider: first?.provider ?? "", candidates });
+  const picked = advisorsFor({ difficulty, implementerProvider: first?.provider ?? "", implementerModel: first?.model, candidates });
   const advisors = picked.length === 0 ? "—" : picked.length === 1 ? `${picked[0]!.provider}/${picked[0]!.model}` : picked.length === 2 ? "both" : `all ${picked.length}`;
   return { implementer: first ? `${first.provider}/${first.model}` : "(none)", advisors };
 }

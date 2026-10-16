@@ -42,7 +42,7 @@ describe("tiers config", () => {
     expect(tierCandidates(withBatch, "cheap").map((item) => item.model)).toEqual(["claude-haiku-5-5"]);
     expect(tierCandidates(withBatch, "batch").map((item) => item.model)).toEqual(["gpt-6-luna"]);
     // No batch list: the built-in batch tier applies (openai is defined here).
-    expect(tierCandidates(tieredConfig(), "batch").map((item) => item.model)).toEqual(["gpt-6-luna"]);
+    expect(tierCandidates(tieredConfig(), "batch").map((item) => item.model)).toEqual(["gpt-6-luna", "gpt-6-luna"]);
     expect(() => parseConfig("routing:\n  maxTier: batch\n")).toThrow(/routing\.maxTier/);
   });
 
@@ -102,20 +102,21 @@ tiers:
     expect(tierCandidates(config, "advisor").map((item) => item.model)).toEqual(["gpt-6-astra", "claude-fable-5-1", "gpt-6-astra"]);
     const ids = (tier: Parameters<typeof tierCandidates>[1]) => tierCandidates(config, tier).map((item) => `${item.provider}/${item.model}`);
     expect(ids("cheap")).toEqual(["anthropic/claude-haiku-5-5"]);
-    expect(ids("batch")).toEqual(["openai/gpt-6-luna"]);
+    expect(ids("batch")).toEqual(["openai/gpt-6-luna", "foundry/gpt-6-luna"]);
     expect(config.quota.models.find((row) => row.model === "gpt-6-luna")?.perMillionTokensUsd).toBe(0.4);
-    expect(ids("standard")).toEqual(["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"]);
+    expect(ids("standard")).toEqual(["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "foundry/gpt-6.1-sol"]);
     expect(ids("premium")).toEqual(["anthropic/claude-opus-5-5"]);
-    expect(ids("ticketLow")).toEqual(["xai/grok-4.7"]);
+    expect(ids("ticketLow")).toEqual(["xai/grok-4.7", "foundry/grok-4-7"]);
     expect(ids("ticketMedium")).toEqual(["anthropic/claude-sonnet-5-5"]);
-    expect(ids("ticketHigh")).toEqual(["openai/gpt-6.1-sol"]);
+    expect(ids("ticketHigh")).toEqual(["openai/gpt-6.1-sol", "foundry/gpt-6.1-sol"]);
     expect(config.routing).toMatchObject({ reviewTier: "premium", maxEscalations: 3 });
     expect(config.session).toEqual({ model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "cheap" });
     expect(config.warnings ?? []).toEqual([]);
     // every listed chat model has a quota weight
     for (const tier of ["cheap", "batch", "standard", "premium", "ticketLow", "ticketMedium", "ticketHigh", "advisor"] as const) {
       for (const item of tierCandidates(config, tier)) {
-        if (item.provider === "foundry") continue;
+        // Per-token providers (foundry, vercel, local) have no subscription quota to weight.
+        if (item.provider === "foundry" || item.provider === "vercel" || item.provider === "local") continue;
         expect(config.quota.models.some((row) => row.provider === item.provider && row.model === item.model), `quota ${item.provider}/${item.model}`).toBe(true);
       }
     }

@@ -39,14 +39,26 @@ export const ADVISOR_REASONING_HEADROOM = 2048;
 export const advisorRequestLimit = (maxOutputTokens: number): number => maxOutputTokens + ADVISOR_REASONING_HEADROOM;
 
 /**
+ * Who made the model, for the cross-vendor rule: by model name (gpt-* is OpenAI, grok-* is xAI, claude-* is Anthropic),
+ * else the provider. A Foundry deployment of Astra or Grok is still OpenAI's or xAI's model.
+ */
+export function vendorOf(candidate: { provider: string; model?: string }): string {
+  const model = (candidate.model ?? "").toLowerCase();
+  if (model.startsWith("gpt-")) return "openai";
+  if (model.startsWith("grok-")) return "xai";
+  if (model.startsWith("claude-")) return "anthropic";
+  return candidate.provider;
+}
+
+/**
  * Which advisors to consult for a ticket (pure). `candidates` is the advisor tier in preference order, already limited
  * to the ones that can be called. At most one per provider, and a model name already listed is not repeated (the
  * Foundry deployment of Astra is a fallback for the OpenAI one, not a second opinion).
  *  - low: none.
- *  - medium: exactly one, from a provider other than the implementer's (the first such in order).
+ *  - medium: exactly one, from a vendor other than the implementer's (the first such in order; see `vendorOf`).
  *  - high: all of them.
  */
-export function advisorsFor(input: { difficulty: Difficulty; implementerProvider: string; candidates: AdvisorCandidate[] }): AdvisorCandidate[] {
+export function advisorsFor(input: { difficulty: Difficulty; implementerProvider: string; implementerModel?: string; candidates: AdvisorCandidate[] }): AdvisorCandidate[] {
   if (input.difficulty === "low") return [];
   const providers = new Set<string>();
   const models = new Set<string>();
@@ -58,7 +70,8 @@ export function advisorsFor(input: { difficulty: Difficulty; implementerProvider
     unique.push(candidate);
   }
   if (input.difficulty === "high") return unique;
-  const other = unique.find((candidate) => candidate.provider !== input.implementerProvider);
+  const implementerVendor = vendorOf({ provider: input.implementerProvider, model: input.implementerModel });
+  const other = unique.find((candidate) => vendorOf(candidate) !== implementerVendor);
   return other ? [other] : [];
 }
 
@@ -76,10 +89,10 @@ export interface ReviewAdvisorPick {
  *  - only low tickets: none;
  *  - ad hoc: one from a different vendor when more than `adHocMinLines` lines changed, else none.
  */
-export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLines: number; adHocMinLines: number; reviewerProvider: string; candidates: AdvisorCandidate[] }): ReviewAdvisorPick {
+export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLines: number; adHocMinLines: number; reviewerProvider: string; reviewerModel?: string; candidates: AdvisorCandidate[] }): ReviewAdvisorPick {
   const { maxDifficulty } = input;
   const pick = (difficulty: Difficulty, reason: string): ReviewAdvisorPick => {
-    const advisors = advisorsFor({ difficulty, implementerProvider: input.reviewerProvider, candidates: input.candidates });
+    const advisors = advisorsFor({ difficulty, implementerProvider: input.reviewerProvider, implementerModel: input.reviewerModel, candidates: input.candidates });
     return { advisors, reason: advisors.length === 0 ? `${reason}, but no advisor is available` : reason };
   };
   if (maxDifficulty === undefined) {
