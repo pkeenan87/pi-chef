@@ -30,7 +30,12 @@ export const BASE_TIERS = ["deterministic", "classifier", "cheap", "standard", "
 /** /build ticket tiers, by the difficulty the planner assigns. A failed ticket climbs low, medium, high, then premium. */
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
-export const TIERS = [...BASE_TIERS, ...TICKET_TIERS] as const;
+/**
+ * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
+ * diff clip cut). Not part of any ladder; a config without it runs them on `cheap`.
+ */
+export const BATCH_TIERS = ["batch"] as const;
+export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...BATCH_TIERS] as const;
 export type Tier = (typeof TIERS)[number];
 
 export const DIFFICULTIES = ["low", "medium", "high"] as const;

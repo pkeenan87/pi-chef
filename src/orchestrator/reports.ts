@@ -41,7 +41,7 @@ function routingLines(ctx: WorkflowContext): string[] {
   const summary = routingSummary(ctx);
   const list = (models: string[]) => models.join(" | ") || "none";
   return [
-    `Routing: chat ${summary.chat} · direct ${summary.direct} · review ${summary.review}`,
+    `Routing: chat ${summary.chat} · direct ${summary.direct} · ${summary.batch} · review ${summary.review}`,
     `Ticket models: low ${list(summary.tickets.low)} · medium ${list(summary.tickets.medium)} · high ${list(summary.tickets.high)} · then ${list(summary.tickets.then)} (up to ${ctx.config.routing.maxEscalations} escalation(s))`,
   ];
 }

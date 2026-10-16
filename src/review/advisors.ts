@@ -231,30 +231,55 @@ export async function consultAdvisors(
 /** Room left in the diff budget below which a file is only listed as cut instead of cut in half. */
 const MIN_PARTIAL_CHARS = 2000;
 
+/** One file a diff clip cut: its name, how it was cut, and its section of the diff (hunks included). */
+export interface CutFile {
+  name: string;
+  /** "<name> (not shown)" or "<name> (partly shown)". */
+  label: string;
+  text: string;
+}
+
+export interface ClippedDiff {
+  /** The diff that fits, then the note naming what was cut. */
+  text: string;
+  /** The diff that fits, without the note. */
+  body: string;
+  /** One label per cut file. */
+  cut: string[];
+  cutFiles: CutFile[];
+}
+
+/** The line that says a diff was clipped. `summaries` (by file name) add what each cut file changed. */
+export function clipNote(maxChars: number, cutFiles: CutFile[], summaries?: Map<string, string>): string {
+  if (!summaries || summaries.size === 0) return `[diff clipped to ${maxChars} characters; cut: ${cutFiles.map((item) => item.label).join(", ")}]`;
+  return [`[diff clipped to ${maxChars} characters; cut files:`, ...cutFiles.map((item) => `- ${item.label}${summaries.has(item.name) ? `: ${summaries.get(item.name)}` : ""}`), "]"].join("\n");
+}
+
 /**
  * Cuts a diff to `maxChars` at file boundaries and says what was cut: a file that does not fit is cut in half when
  * there is room left for a useful part, and every later file is dropped. The note names each cut file.
  */
-export function clipDiff(diff: string, maxChars: number): { text: string; cut: string[] } {
-  if (diff.length <= maxChars) return { text: diff, cut: [] };
+export function clipDiff(diff: string, maxChars: number): ClippedDiff {
+  if (diff.length <= maxChars) return { text: diff, body: diff, cut: [], cutFiles: [] };
   const name = (section: string) => /^diff --git a\/.+? b\/(.+)$/m.exec(section.split("\n", 1)[0] ?? "")?.[1] ?? "(unnamed section)";
   let used = 0;
-  let text = "";
-  const cut: string[] = [];
+  let body = "";
+  const cutFiles: CutFile[] = [];
   for (const section of diff.split(/(?=^diff --git )/m).filter(Boolean)) {
     const room = maxChars - used;
+    const file = name(section);
     if (section.length <= room) {
-      text += section;
+      body += section;
       used += section.length;
-    } else if (room >= MIN_PARTIAL_CHARS && cut.length === 0) {
-      text += `${section.slice(0, room)}\n`;
+    } else if (room >= MIN_PARTIAL_CHARS && cutFiles.length === 0) {
+      body += `${section.slice(0, room)}\n`;
       used = maxChars;
-      cut.push(`${name(section)} (partly shown)`);
+      cutFiles.push({ name: file, label: `${file} (partly shown)`, text: section });
     } else {
-      cut.push(`${name(section)} (not shown)`);
+      cutFiles.push({ name: file, label: `${file} (not shown)`, text: section });
     }
   }
-  return { text: `${text}\n[diff clipped to ${maxChars} characters; cut: ${cut.join(", ")}]`, cut };
+  return { text: `${body}\n${clipNote(maxChars, cutFiles)}`, body, cut: cutFiles.map((item) => item.label), cutFiles };
 }
 
 /** One advisor's answer as the reviewer reads it when resolving. */

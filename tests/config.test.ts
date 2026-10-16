@@ -37,6 +37,7 @@ describe("parseConfig validation", () => {
     ["advisors:\n  tickets: yes please\n", /advisors\.tickets/],
     ["advisors:\n  plan: sure\n", /advisors\.plan/],
     ["advisors:\n  adHocMinLines: -1\n", /advisors\.adHocMinLines/],
+    ["advisors:\n  summarizeCut: 1\n", /advisors\.summarizeCut/],
     ["advisors: 3\n", /advisors/],
     ["routing:\n  sessionTier: ticketLow\n", /routing\.sessionTier/],
     ["routing:\n  directTier: huge\n", /routing\.directTier/],

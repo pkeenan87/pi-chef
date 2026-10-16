@@ -1,12 +1,13 @@
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import { ticketDifficulty, type AdvisorOpinion, type ModelReview, type PlanDocument, type RoutingDecision } from "../domain.js";
 import { redact } from "../redact.js";
-import { advisorBlock, clipDiff, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
+import { advisorBlock, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
 import { isLockfile, omitLockfiles } from "../review/model-review.js";
 import { parseResolution, shortModel } from "../review/review-resolution.js";
 import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
+import { clipDiffSummarized } from "./cut-summary.js";
 
 /**
  * Advisors in the branch-level /review. The review model (Opus) lists its findings and puts 2-3 questions to the
@@ -48,10 +49,9 @@ export function planMaxDifficulty(plan: PlanDocument | undefined): "low" | "medi
 }
 
 /** What an advisor gets: the plan in brief, the reviewer's findings, the changed files with stats, and the clipped diff. Never a transcript. */
-export function reviewPacket(input: { plan: PlanDocument; review: ModelReview; files: ChangedFile[]; diff: string; maxChars: number }): string {
+export function reviewPacket(input: { plan: PlanDocument; review: ModelReview; files: ChangedFile[]; diffText: string }): string {
   const { plan, review } = input;
   const lockfiles = input.files.filter((item) => isLockfile(item.file)).map((item) => item.file);
-  const clipped = clipDiff(omitLockfiles(input.diff), input.maxChars);
   const findings = review.findings.map((item) => `- ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.message}`);
   return redact(
     [
@@ -70,7 +70,7 @@ export function reviewPacket(input: { plan: PlanDocument; review: ModelReview; f
       "# Diff",
       ...(lockfiles.length ? ["", `[lockfiles omitted: ${lockfiles.join(", ")}]`] : []),
       "",
-      clipped.text.trim() ? clipped.text : "(no changes)",
+      input.diffText.trim() ? input.diffText : "(no changes)",
     ].join("\n"),
   );
 }
@@ -93,7 +93,8 @@ export async function adviseReview(
   input: { taskId: string; taskType: string; decision: RoutingDecision; candidates: { provider: string; model: string }[]; review: ModelReview; plan: PlanDocument; diff: string; advisors: AdvisorCandidate[]; progress: (line: string) => void },
 ): Promise<Partial<ModelReview>> {
   const files = changedFiles(input.diff);
-  const packet = reviewPacket({ plan: input.plan, review: input.review, files, diff: input.diff, maxChars: ctx.config.advisors.maxDiffChars });
+  const clipped = await clipDiffSummarized(ctx, input.taskId, omitLockfiles(input.diff), ctx.config.advisors.maxDiffChars);
+  const packet = reviewPacket({ plan: input.plan, review: input.review, files, diffText: clipped.text });
   const questions = input.review.questions?.length ? input.review.questions : DEFAULT_REVIEW_QUESTIONS;
   input.progress(`asking ${input.advisors.map((item) => `${item.provider}/${item.model}`).join(", ")}`);
   const asked = await consultAdvisors(ctx, { purpose: "branch review", packet, questions, candidates: input.advisors, taskId: input.taskId });

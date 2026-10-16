@@ -2,7 +2,7 @@ import path from "node:path";
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
 import { type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewReport, type RoutingDecision, type TierCandidate } from "../domain.js";
 import { availableAdvisors, reviewAdvisorsFor } from "../review/advisors.js";
-import { modelReviewLines, runModelReview } from "../review/model-review.js";
+import { modelReviewLines, runModelReview, unreviewedDiff } from "../review/model-review.js";
 import { acceptedLines, advisorsHeader, rejectedLines, unresolvedConcernLines } from "../review/review-resolution.js";
 import { reviewDiff } from "../review/review.js";
 import { fallbackClassification } from "../router/classify.js";
@@ -12,6 +12,7 @@ import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
 import { active, done, guard, iso, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
+import { summarizeCutFiles } from "./cut-summary.js";
 import { adviseReview, changedFiles, changedLineCount, planMaxDifficulty } from "./review-advisors.js";
 import { announce, decide } from "./routing.js";
 import { splitCheckLine } from "./tickets.js";
@@ -130,7 +131,15 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
   let micro: number | null = 0;
   let review: ModelReview;
   try {
+    // Parts beyond review.maxChunks are not sent; the batch tier says in a line each what those files change.
+    const skipped = unreviewedDiff(diff, ctx.config.review.maxDiffChars, ctx.config.review.maxChunks);
+    const sections = skipped.split(/(?=^diff --git )/m).flatMap((text) => {
+      const name = /^diff --git a\/.+? b\/(.+)$/m.exec(text.split("\n", 1)[0] ?? "")?.[1];
+      return name ? [{ name, label: name, text }] : [];
+    });
+    const lines = sections.length > 0 ? await summarizeCutFiles(ctx, taskId, sections) : new Map<string, string>();
     review = await runModelReview(ctx.chat, reviewCandidates(ctx, decision), {
+      notSent: lines.size > 0 ? sections.map((item) => `- ${item.name}${lines.has(item.name) ? `: ${lines.get(item.name)}` : ""}`).join("\n") : undefined,
       plan,
       diff,
       maxDiffChars: ctx.config.review.maxDiffChars,

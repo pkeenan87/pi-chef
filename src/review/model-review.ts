@@ -75,8 +75,13 @@ export function splitDiff(diff: string, maxChars: number): string[] {
   return parts;
 }
 
+/** The parts of a diff beyond the first `maxChunks`, as `runModelReview` splits it: what a review will not see. */
+export function unreviewedDiff(diff: string, maxDiffChars: number, maxChunks: number): string {
+  return splitDiff(redact(omitLockfiles(diff)), maxDiffChars).slice(Math.max(1, maxChunks)).join("");
+}
+
 /** The user turn: plan context first (stable), then the diff cut to `maxDiffChars` from the head. */
-export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars: number, part?: { index: number; count: number }): { text: string; truncated: boolean } {
+export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars: number, part?: { index: number; count: number }, notSent?: string): { text: string; truncated: boolean } {
   const tickets = (plan.tickets ?? []).map((ticket) => `- ${ticket.id} ${ticket.title}: ${ticket.acceptanceCriteria.join("; ")}`);
   const head = [
     "# Plan",
@@ -92,7 +97,7 @@ export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars
   ].join("\n");
   const truncated = diff.length > maxDiffChars;
   const body = truncated ? `${diff.slice(0, maxDiffChars)}\n[... diff truncated at ${maxDiffChars} characters; ${diff.length - maxDiffChars} more not shown ...]` : diff;
-  return { text: `${head}${body}`, truncated };
+  return { text: `${head}${body}${notSent ? `\n\n# Not sent for review (other parts of the branch, summarized; do not report on them)\n${notSent}` : ""}`, truncated };
 }
 
 /** Balanced `[...]` and `{...}` spans of the text in order of their start, skipping brackets inside JSON strings. */
@@ -228,6 +233,8 @@ export async function runModelReview(
     onProgress?: (line: string) => void;
     onCall?: (call: ModelReviewCall) => void | Promise<void>;
     stop?: () => string | undefined;
+    /** Lines summarizing the files of parts beyond `maxChunks`, which are not sent; added to every part's prompt. */
+    notSent?: string;
     /** Advisors will be consulted next: the answer also carries 2-3 questions for them. */
     askQuestions?: boolean;
   },
@@ -251,7 +258,7 @@ export async function runModelReview(
       result.failures.push(`not attempted: ${stopped}`);
       continue;
     }
-    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length });
+    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length }, input.notSent);
     const [first, second] = order();
     const attempts = second ? [first!, second] : [first!];
     for (const [retry, candidate] of attempts.entries()) {

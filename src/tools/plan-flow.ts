@@ -63,7 +63,7 @@ export const PlanTicketsParams = Type.Object({
       acceptanceCriteria: Type.Array(Type.String(), { description: "At least one checkable criterion" }),
       blockedBy: Type.Array(Type.String(), { description: "Ids of tickets that must finish first" }),
       difficulty: Type.Optional(Type.String({ description: `One of: ${DIFFICULTIES.join(", ")}. Picks the model: low is mechanical or small and well specified; medium is typical feature work; high is cross-cutting, tricky logic, concurrency, security, or a large blast radius.` })),
-      suggestedTier: Type.Optional(Type.String({ description: `Old plans only; use difficulty. One of: ${TIERS.join(", ")}` })),
+      suggestedTier: Type.Optional(Type.String({ description: `Old plans only; use difficulty. One of: ${TIERS.filter((tier) => tier !== "batch").join(", ")}` })),
       files: Type.Optional(Type.Array(Type.String(), { description: "Files this ticket touches (ownership hints; overlapping tickets run one after another)" })),
       estimatedContextTokens: Type.Number({ description: "Your estimate of the tokens one fresh context needs for this ticket" }),
       checks: Type.Optional(Type.Array(Type.String(), { description: "Shell command lines the parent runs after the ticket, one command per entry (for example \"npm test\"); destructive commands are refused. Not prose: verification steps that are not a command go in implementation." })),

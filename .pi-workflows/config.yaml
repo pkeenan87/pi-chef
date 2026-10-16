@@ -41,7 +41,8 @@ providers:
 # its circuit is open, or its expected cost exceeds the remaining budget.
 # Who does what:
 #   cost-opt/auto chat turns    routing.sessionTier (premium: Opus 5.5)
-#   compaction and summaries    routing.directTier (cheap: Haiku 5.5, then Luna)
+#   compaction and summaries    routing.directTier (cheap: Haiku 5.5), in the session
+#   standalone batch jobs       batch (Luna): one-line summaries of files a diff clip cut
 #   /build tickets              ticketLow / ticketMedium / ticketHigh by the ticket's difficulty; a failure
 #                               climbs ticketLow -> ticketMedium -> ticketHigh -> premium
 #   /review model pass          routing.reviewTier (premium: Opus 5.5)
@@ -54,8 +55,9 @@ tiers:
   classifier:
     - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
     - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
-  cheap:                # direct jobs: compaction, summaries
+  cheap:                # direct jobs inside the session: compaction and summaries
     - { provider: anthropic, model: claude-haiku-5-5 }
+  batch:                # standalone jobs the extension runs by itself, outside any conversation (cut-file summaries)
     - { provider: openai, model: gpt-6-luna }
   standard:             # /plan and preview routes
     - { provider: anthropic, model: claude-sonnet-5-5 }
@@ -95,13 +97,21 @@ workers:
   tokenBudget: 8000
   ticketContextTokens: 150000
 
-# Second opinions during /build. After a ticket's checks pass, the review tier (Opus) reads the ticket and its own diff
-# and may put 2-3 questions to the advisor tier. Medium tickets consult one advisor from another provider than the
-# implementer; high tickets consult every advisor (one per provider) in parallel; low tickets none. Opus gives the
-# final verdict. Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed
-# per token on an API key (see the api-key pricing rows).
+# Second opinions. Advisors advise; the Opus session or review model resolves, and approval stays yours.
+#   /plan     plan_consult puts the draft tickets and 2-3 questions to every advisor (one per provider), once per
+#             plan version; plan_tickets then needs Opus's advisorResolution.
+#   /build    after a ticket's checks pass, Opus reads the ticket and its own diff and may put 2-3 questions to the
+#             advisor tier. Medium tickets consult one advisor from another provider than the implementer; high
+#             tickets consult every advisor in parallel; low tickets none. Opus gives the final verdict.
+#   /review   by the branch's highest ticket difficulty: high both, medium one from another vendor than the reviewer,
+#             low none. With no plan: Astra above adHocMinLines changed lines. Opus resolves the findings.
+# Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed per token on
+# an API key (see the api-key pricing rows).
 advisors:
   tickets: true         # false turns the per-ticket review (and its advisors) off
+  plan: true            # false skips plan_consult (and the advisorResolution plan_tickets would ask for)
+  adHocMinLines: 400    # /review on a branch with no plan: Astra only above this many changed lines
+  summarizeCut: true    # the batch tier (Luna) writes one line per file a diff clip cut, in advisor packets and review parts
   timeoutMs: 180000     # per advisor or review call
   maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
   maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)
@@ -167,7 +177,7 @@ pricing:
 # to how scarce each model's quota is on your plan.
 quota:
   models:
-    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 1.5 }   # above Haiku so Haiku ranks first for direct jobs
+    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 0.4 }
     - { provider: anthropic, model: claude-haiku-5-5, perMillionTokensUsd: 1 }
     - { provider: anthropic, model: claude-sonnet-5-5, perMillionTokensUsd: 3 }
     - { provider: anthropic, model: claude-opus-5-5, perMillionTokensUsd: 10 }

@@ -159,9 +159,10 @@ export interface WorkflowConfig {
    * Second opinions during /build: after a ticket's checks pass, the review tier reads its diff and, by difficulty,
    * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off; `plan: false` skips the
    * advisor consult on every plan (plan_consult). `adHocMinLines`: an ad-hoc branch (no plan) with more changed lines
-   * than this gets one advisor in /review.
+   * than this gets one advisor in /review. `summarizeCut`: when a diff is clipped for an
+   * advisor packet or a review part, the batch tier writes a one-line summary of each cut file.
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -201,7 +202,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400 },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -455,8 +456,8 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
     checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
     checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
-    if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier))) {
-      invalid(where, "routing.maxTier", `must be one of ${TIERS.join(", ")}`);
+    if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier) || routing.maxTier === "batch")) {
+      invalid(where, "routing.maxTier", `must be one of ${TIERS.filter((tier) => tier !== "batch").join(", ")}`);
     }
     for (const field of ["sessionTier", "directTier", "reviewTier"] as const) {
       if (routing[field] !== undefined && (typeof routing[field] !== "string" || !CHAT_TIER_NAMES.includes(routing[field] as string))) {
@@ -503,6 +504,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     if (!isRecord(raw.advisors)) invalid(where, "advisors", "must be a mapping");
     if (raw.advisors.tickets !== undefined && typeof raw.advisors.tickets !== "boolean") invalid(where, "advisors.tickets", "must be a boolean");
     if (raw.advisors.plan !== undefined && typeof raw.advisors.plan !== "boolean") invalid(where, "advisors.plan", "must be a boolean");
+    if (raw.advisors.summarizeCut !== undefined && typeof raw.advisors.summarizeCut !== "boolean") invalid(where, "advisors.summarizeCut", "must be a boolean");
     checkNumber(raw.advisors, "timeoutMs", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
@@ -922,6 +924,8 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
   const explicit = config.tiers[tier];
   if (explicit) return explicit;
   if (tier === "deterministic" || tier === "advisor") return [];
+  // Standalone jobs run on the direct tier's models when the config has no batch list.
+  if (tier === "batch") return tierCandidates(config, "cheap");
   // Ticket tiers missing from an older config run on the general tier of the same strength.
   if (tier === "ticketLow" || tier === "ticketMedium" || tier === "ticketHigh") {
     return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");

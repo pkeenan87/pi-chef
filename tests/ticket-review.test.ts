@@ -304,7 +304,7 @@ describe("per-ticket review in /build", () => {
       d.write("secret.txt", "token = ghp_abcdefghijklmnopqrstuvwxyz0123456789\n");
     });
     expect((await t.run(d.driver)).ok).toBe(true);
-    const sent = t.calls[0]!.user;
+    const sent = t.calls.find((call) => call.model === OPUS)!.user;
     expect(sent).toContain("[diff clipped to 3000 characters; cut:");
     expect(sent).toContain("b.txt (not shown)");
     expect(sent).not.toContain("lock\": 1");

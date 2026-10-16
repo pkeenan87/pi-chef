@@ -89,19 +89,22 @@ interface Handlers {
   pass?: (call: FakeCall) => string;
   advisor?: (call: FakeCall) => string;
   resolve?: (call: FakeCall) => string;
+  summary?: (call: FakeCall) => string;
 }
 
 function roles(handlers: Handlers) {
   return (call: FakeCall): string => {
     if (call.system.includes("engineering advisor")) return (handlers.advisor ?? (() => advisorOut(call.provider === "openai" ? "disagree" : "agree", [{ severity: "medium", file: "src/retry.ts", issue: call.provider === "openai" ? "rename retry to attempts." : "no jitter." }])))(call);
+    if (call.system.includes("You summarize code changes")) return (handlers.summary ?? (() => "{}"))(call);
     if (call.system.includes("final word on a branch")) return (handlers.resolve ?? (() => resolutionOut))(call);
     return (handlers.pass ?? ((c) => (c.system.includes("Independent advisors will be asked") ? JSON.stringify({ findings: opusFindings, questions: questionsOut }) : JSON.stringify(opusFindings))))(call);
   };
 }
 
-async function setup(options: { tickets?: Ticket[]; handlers?: Handlers; checkCode?: number; lines?: number; choice?: { value: string; text?: string } } = {}) {
+async function setup(options: { tickets?: Ticket[]; handlers?: Handlers; checkCode?: number; lines?: number; choice?: { value: string; text?: string }; mutate?: (config: ReturnType<typeof tieredConfig>) => void; extraFiles?: Record<string, string> } = {}) {
   const cwd = await tempRepo();
   const config = withAdvisors(tieredConfig());
+  options.mutate?.(config);
   config.tiers.premium = [{ provider: "anthropic", model: OPUS, api: "chat" }];
   const fake = fakeChat(roles(options.handlers ?? {}));
   const reports: string[] = [];
@@ -125,6 +128,7 @@ async function setup(options: { tickets?: Ticket[]; handlers?: Handlers; checkCo
   await git(cwd, "switch", "-c", "feature/retry");
   mkdirSync(path.join(cwd, "src"), { recursive: true });
   writeFileSync(path.join(cwd, "src", "retry.ts"), Array.from({ length: options.lines ?? 3 }, (_, i) => `export const retry${i} = ${i};`).join("\n") + "\n");
+  for (const [name, body] of Object.entries(options.extraFiles ?? {})) writeFileSync(path.join(cwd, name), body);
   await git(cwd, "add", ".");
   await git(cwd, "commit", "-m", "Add retry");
   turns.length = 0; // the /plan fixture started a turn
@@ -236,5 +240,38 @@ describe("/review advisors", () => {
     const result = await t.app.review();
     expect(advisorCalls(t)).toHaveLength(0);
     expect(reportOf(result).modelReview!.advisorsSkipped).toBe("the model pass produced no result");
+  });
+
+  it("puts the batch tier's one-line summaries of the cut files in the advisor packet", async () => {
+    const t = await setup({
+      tickets: [sampleTicket("01", { difficulty: "high" })],
+      mutate: (config) => void (config.advisors.maxDiffChars = 1000),
+      extraFiles: { "big-one.ts": `export const one = "${"x".repeat(900)}";\n`, "big-two.ts": `export const two = "${"y".repeat(900)}";\n` },
+      handlers: { summary: () => JSON.stringify({ "big-two.ts": "adds the two constant", "big-one.ts": "adds the one constant", "src/retry.ts": "adds retry" }) },
+    });
+    const result = await t.app.review();
+    expect(result.ok, result.text).toBe(true);
+    const summaryCalls = t.calls.filter((call) => call.system.includes("You summarize code changes"));
+    expect(summaryCalls).toHaveLength(1);
+    expect(summaryCalls[0]!.model).toBe("gpt-6-luna");
+    const packet = advisorCalls(t)[0]!.user;
+    expect(packet).toContain("[diff clipped to 1000 characters; cut files:");
+    expect(packet).toMatch(/- big-two\.ts \(not shown\): adds the two constant/);
+    expect(packet).not.toContain("cut: ");
+  });
+
+  it("says in a line what the files of parts beyond review.maxChunks change", async () => {
+    const t = await setup({
+      mutate: (config) => {
+        config.review.maxDiffChars = 1000;
+        config.review.maxChunks = 1;
+      },
+      extraFiles: { "big-one.ts": `export const one = "${"x".repeat(900)}";\n`, "big-two.ts": `export const two = "${"y".repeat(900)}";\n` },
+      handlers: { summary: () => JSON.stringify({ "big-one.ts": "adds the one constant", "big-two.ts": "adds the two constant" }) },
+    });
+    await t.app.review();
+    const pass = passCalls(t)[0]!.user;
+    expect(pass).toContain("# Not sent for review");
+    expect(pass).toMatch(/- big-two\.ts: adds the two constant/);
   });
 });

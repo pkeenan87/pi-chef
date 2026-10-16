@@ -62,12 +62,13 @@ export async function announce(
 }
 
 /** Who does what under the current config: the tiers for chat, direct jobs, review, and tickets, with their chat models. */
-export function routingSummary(ctx: WorkflowContext): { chat: string; direct: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
+export function routingSummary(ctx: WorkflowContext): { chat: string; direct: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
   const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).filter((item) => item.api === "chat").map((item) => `${item.provider}/${item.model}`);
   const { sessionTier, directTier, reviewTier } = ctx.config.routing;
   return {
     chat: sessionTier ? `${sessionTier}: ${models(sessionTier).join(", ")}` : "classified per session",
     direct: `${directTier}: ${models(directTier).join(", ")}`,
+    batch: `batch: ${models("batch").join(", ")}`,
     review: `${reviewTier}: ${models(reviewTier).join(", ")}`,
     tickets: { low: models("ticketLow"), medium: models("ticketMedium"), high: models("ticketHigh"), then: models("premium") },
   };

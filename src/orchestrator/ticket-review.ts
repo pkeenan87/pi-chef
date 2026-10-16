@@ -1,11 +1,12 @@
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import { ticketDifficulty, type AdvisorOpinion, type RoutingDecision, type TaskState, type Ticket, type TicketReviewFinding, type TicketReviewRecord, type TicketRun } from "../domain.js";
 import { redact } from "../redact.js";
-import { advisorBlock, advisorsFor, availableAdvisors, clipDiff, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
+import { advisorBlock, advisorsFor, availableAdvisors, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
 import { bracketSpans, omitLockfiles } from "../review/model-review.js";
 import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
 import { workspaceName, type WorkflowContext } from "./context.js";
+import { clipDiffSummarized } from "./cut-summary.js";
 import { reviewCandidates } from "./review.js";
 import { decide } from "./routing.js";
 
@@ -255,7 +256,7 @@ export async function reviewTicket(ctx: WorkflowContext, state: TaskState, ticke
   const candidates = reviewCandidates(ctx, decision);
   const reviewer = label(decision);
 
-  const { text: diffText } = clipDiff(await ticketDiff(ctx), ctx.config.advisors.maxDiffChars);
+  const { text: diffText } = await clipDiffSummarized(ctx, state.taskId, await ticketDiff(ctx), ctx.config.advisors.maxDiffChars);
   const found = await availableAdvisors(ctx);
   const advisors = advisorsFor({ difficulty: ticketDifficulty(ticket), implementerProvider: run.provider ?? "", candidates: found.candidates });
   const packet = advisorPacket(ticket, diffText);
