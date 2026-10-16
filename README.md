@@ -185,7 +185,7 @@ npm run typecheck
 
 **Layering.** `~/.pi/agent/cost-workflow.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
 
-**User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `decisionsPath` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
+**User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, and `envFile` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
 
 **Policy fields a project can only tighten.**
 
@@ -206,8 +206,9 @@ The YAML must not contain secrets, API keys, or tokens.
 | `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
 | `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
 | `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
-| `routing.sessionTier` (default `premium`) | Tier every chat turn on `cost-opt/auto` routes to. While it is set nothing is classified for chat, so no Decisions call is made. One of `cheap`, `standard`, `premium` |
-| `routing.directTier` (default `cheap`) | Tier for compaction and other direct calls on `cost-opt/auto` |
+| `session.model` (default `anthropic/claude-opus-5-5`) | The main chat session's model, as `provider/id`. Set on `session_start` when the session started on another model |
+| `session.pin` (default `true`) | Whether `session.model` is set at session start. `false` leaves the model you picked with `/model` alone, and `/build` puts that model back when it finishes |
+| `session.compactionTier` (default `cheap`) | Tier that writes compaction summaries (`session_before_compact`). One of `cheap`, `standard`, `premium` |
 | `routing.reviewTier` (default `premium`) | Tier of the `/review` model pass. A failed part falls back to `standard` candidates once this tier has none left |
 | `routing.maxEscalations` (default 3) | Tier steps a failed ticket may climb from its difficulty tier (low, medium, high, then premium). When they are used up the ticket stays `failed`, `/build` stops with `MAX_ESCALATIONS`, and you fix it in the chat or raise the limit |
 | `tiers.ticketLow`, `tiers.ticketMedium`, `tiers.ticketHigh` | Models for tickets of difficulty `low`, `medium`, `high`. A config that lists `tiers` without them runs those tickets on `cheap`, `standard` and `premium`, with a warning in `/status` |
@@ -215,9 +216,9 @@ The YAML must not contain secrets, API keys, or tokens.
 | `advisors` | Second opinions: `tickets` (default true; false turns the per-ticket review in `/build` off), `plan` (default true; false skips `plan_consult` and its requirement), `adHocMinLines` (default 400; an ad-hoc branch with more changed lines than this gets one advisor in `/review`), `summarizeCut` (default true; the batch tier writes a one-line summary of each file a diff clip cut), `timeoutMs` (default 180000, per call), `maxDiffChars` (default 40000, the diff sent to advisors), `maxOutputTokens` (default 1500, the visible answer an advisor is asked to stay within) |
 | `review` | The advisory model pass of `/review`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
 
-Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, and `budgets.autopilotPrUsd`. An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
+Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, `budgets.autopilotPrUsd`, `routing.sessionTier`, `routing.directTier`, `routing.minConfidence`, `providers.*.decisionsPath`, `models.classifier`, `tiers.classifier`, and any tier entry with `api: decisions` (that entry is dropped). An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
 
-Provider setup: [Azure CLI and Foundry](#azure-cli-and-foundry-deployments) (`endpoint`, `audience: https://ai.azure.com`, `decisionsPath`) and [Vercel CLI and AI Gateway](#vercel-cli-and-ai-gateway) (`vercel login`, `vercel link`, `vercel env pull`, `projectDir`).
+Provider setup: [Azure CLI and Foundry](#azure-cli-and-foundry-deployments) (`endpoint`, `audience: https://ai.azure.com`) and [Vercel CLI and AI Gateway](#vercel-cli-and-ai-gateway) (`vercel login`, `vercel link`, `vercel env pull`, `projectDir`).
 
 ## Account login
 
@@ -254,7 +255,7 @@ The key is billed per token, so pricing switches to the `billing: api-key` rows 
 A subscription login is not proof of free API usage.
 
 - Pi marks both ChatGPT and Claude Pro/Max as `isSubscription: true`, then sends the token to an API. Confirm the account with a real request after `/login`. Tests in this repo do not make that call.
-- ChatGPT sign-in keeps the chat models `gpt-6-luna`, `gpt-6-astra`, and `gpt-6.1-sol`. Pi filters out only classifier-type models for oauth credentials, which is why the classifier tier uses Foundry or Vercel instead.
+- ChatGPT sign-in keeps the chat models `gpt-6-luna`, `gpt-6-astra`, and `gpt-6.1-sol`.
 - Anthropic's own setting `warnings.anthropicExtraUsage` (default on) warns that subscription auth may bill extra usage. This tool does not turn that off and does not invent a different login.
 
 ### Session renewal
@@ -279,16 +280,15 @@ providers:
     routeStyle: v1                    # <endpoint>/openai/v1/..., deployment name in `model`, no api-version
     audience: https://ai.azure.com    # az account get-access-token --resource https://ai.azure.com
     api: openai-completions           # or openai-responses
-    # decisionsPath: /decisions       # Decisions API path under <endpoint>/openai/v1 (unverified, see below)
 ```
 
 The current Foundry route is the OpenAI-compatible v1 API at `https://<resource>.services.ai.azure.com/openai/v1/` (also `<resource>.openai.azure.com/openai/v1/`). The deployment name goes in `model`, there is no `api-version`, and the Entra token audience is `https://ai.azure.com`. A `tiers` entry for Foundry names a deployment, for example `{ provider: foundry, model: grok-4-7 }`.
 
 Configs written for the legacy deployments route keep working: set `apiVersion` (and the `cognitiveservices` audience) and omit `routeStyle`, and requests go to `/openai/deployments/<name>/chat/completions?api-version=...` as before. Set `routeStyle: v1` to opt in.
 
-`az account get-access-token` supplies the bearer for a call. The decisions client keeps it in memory until five minutes before expiry; chat models registered with Pi read it through an `!az account get-access-token ...` command. Do not set `AZURE_OPENAI_API_KEY` for this workflow.
+`az account get-access-token` supplies the bearer for a call. Chat models registered with Pi read it through an `!az account get-access-token ...` command. Do not set `AZURE_OPENAI_API_KEY` for this workflow.
 
-`Microsoft-Decision-1` is in the Foundry catalog (Direct from Azure, preview). It is a Decisions-API model, not a chat model, so the classifier tier calls `POST <endpoint>/openai/v1/decisions`. That path is an assumption: if your deployment exposes it elsewhere, set `providers.foundry.decisionsPath`. Decision-1 takes text only and has a 32K context, so the classifier input is truncated.
+Foundry serves chat models only (for example a `gpt-6-astra` deployment as an advisor).
 
 ## Vercel CLI and AI Gateway
 
@@ -307,7 +307,7 @@ providers:
     envFile: .env.local                         # default
 ```
 
-The gateway authenticates with `Authorization: Bearer <VERCEL_OIDC_TOKEN>`. The token comes from the `VERCEL_OIDC_TOKEN` environment variable or from `envFile` inside `projectDir`. The expiry is read from the token's `exp` claim (not verified; Vercel verifies it). If the token is missing or has less than 10 minutes left, the extension runs `vercel env pull .env.local --yes` in `projectDir` (an argument array, no shell) and reads the file again. Tokens last about 12 hours. The token is cached in memory until it nears expiry and is never logged, written to config, or put in a task file. Model ids are `creator/model`, for example `typesafe-ai/jev`.
+The gateway authenticates with `Authorization: Bearer <VERCEL_OIDC_TOKEN>`. The token comes from the `VERCEL_OIDC_TOKEN` environment variable or from `envFile` inside `projectDir`. The expiry is read from the token's `exp` claim (not verified; Vercel verifies it). If the token is missing or has less than 10 minutes left, the extension runs `vercel env pull .env.local --yes` in `projectDir` (an argument array, no shell) and reads the file again. Tokens last about 12 hours. The token is cached in memory until it nears expiry and is never logged, written to config, or put in a task file. Model ids are `creator/model`, for example `anthropic/claude-haiku-5-5`.
 
 `/auth status` reports Vercel. `/auth login vercel` prints `vercel login && vercel link`. The ignore rules should already cover `.env.local`; check that yours do.
 
@@ -317,18 +317,17 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 
 | Tier | Candidates (sample config) |
 |---|---|
-| deterministic / mechanical | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
-| classifier | `Microsoft-Decision-1` deployed in Azure Foundry, or `typesafe-ai/jev` on Vercel AI Gateway. Both use the Decisions API |
-| cheap (`routing.directTier`) | Claude Haiku `claude-haiku-5-5` (Anthropic account login). Compaction and other direct calls inside the session |
+| deterministic | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
+| cheap (`session.compactionTier`) | Claude Haiku `claude-haiku-5-5` (Anthropic account login). Compaction summaries |
 | batch | ChatGPT Luna `gpt-6-luna` (OpenAI account login). Standalone jobs the extension runs by itself, outside any conversation: today the one-line summaries of files a diff clip cut. A config without a `batch` list runs them on `cheap` |
 | standard | Claude Sonnet `claude-sonnet-5-5`, Sol 6.1 `gpt-6.1-sol`. `/plan` and `/route` previews |
-| premium (`routing.sessionTier`, `routing.reviewTier`) | Claude Opus `claude-opus-5-5`. The main chat session, the `/review` model pass, and the last step of the ticket ladder |
+| premium (`routing.reviewTier`) | Claude Opus `claude-opus-5-5`. The `/review` model pass and the last step of the ticket ladder. The main session runs on Opus through `session.model`, not through this tier |
 | ticketLow | Grok 4.7 `grok-4.7` through a SuperGrok subscription (`xai`). Tickets of difficulty `low` |
 | ticketMedium | Claude Sonnet `claude-sonnet-5-5`. Difficulty `medium` |
 | ticketHigh | Sol 6.1 `gpt-6.1-sol`. Difficulty `high` |
 | advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Consulted on every plan (`plan_consult`, both), by `/build`'s per-ticket review (medium: one, high: both) and by `/review` (by the branch's highest ticket difficulty). Astra is $0 on a ChatGPT subscription; Fable is billed per token on an API key |
 
-Who does what, by default: chat turns go to Opus; Haiku does the in-session side jobs and Luna the standalone batch jobs; `/build` tickets go to Grok, Sonnet or Sol by difficulty and climb one step on each failure (Grok, Sonnet, Sol, Opus); `/review` asks Opus.
+Who does what, by default: the main session runs on Opus (`session.model`); Haiku writes compaction summaries and Luna the standalone batch jobs; `/build` tickets go to Grok, Sonnet or Sol by difficulty and climb one step on each failure (Grok, Sonnet, Sol, Opus); `/review` asks Opus.
 
 ```yaml
 tiers:
@@ -336,12 +335,9 @@ tiers:
     - { provider: anthropic, model: claude-haiku-5-5 }
   batch:
     - { provider: openai, model: gpt-6-luna }
-  classifier:
-    - { provider: foundry, model: Microsoft-Decision-1, api: decisions }
-    - { provider: vercel, model: "typesafe-ai/jev", api: decisions }
 ```
 
-The old `models: { classifier: local, cheap: foundry, ... }` map still works. Each entry becomes a one-candidate tier. A tier listed under `tiers` replaces its `models` entry. `deterministic` and `advisor` exist only under `tiers`; `batch` falls back to `cheap` when it is not listed.
+The old `models: { cheap: foundry, ... }` map still works. Each entry becomes a one-candidate tier. A tier listed under `tiers` replaces its `models` entry. `deterministic` and `advisor` exist only under `tiers`; `batch` falls back to `cheap` when it is not listed.
 
 How a candidate is picked:
 
@@ -350,7 +346,7 @@ How a candidate is picked:
 3. The lowest score wins. Ties go to config order. A candidate with no `pricing` row ranks after priced ones and the decision is flagged `price_unknown`.
 4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/build` stops with `NO_CANDIDATE`).
 
-Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. The advisory model pass of `/review` is recorded under its own task type (`review:<task type>`), so review failures never count against a model's record for implementation work. A classifier call counts as a success when its answer reaches `routing.minConfidence`.
+Successes and failures are recorded per task type, tier, and model next to the old per-tier counters, which still drive the circuit breaker. The advisory model pass of `/review` is recorded under its own task type (`review:<task type>`), so review failures never count against a model's record for implementation work.
 
 Subscription models (ChatGPT, Claude) are priced at 0 in the sample, because they have no per-token marginal cost. Every price in the sample config is a placeholder to replace from your rate cards.
 
@@ -381,40 +377,26 @@ quota:
 
 Every routing decision (`/plan`, each `/build` ticket and escalation, `/review`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
 
-Chat turns on `cost-opt/auto` set no status line of their own: Pi's footer already shows `auto • level → model`. While a task is active they still add a `route` event to its log.
+### The main session
 
-### Chat routing (`cost-opt/auto`)
+The main session is a normal Pi model, not a router. There is no virtual model: `/model` lists the models Pi has, and the one you chat with is the one Pi shows in its footer.
 
-`auto` is a stateful, cache-aware router (`src/router/virtual.ts`). Switching models mid-conversation loses the provider's prompt cache, so it moves as rarely as it can.
-
-- **Session tier.** With `routing.sessionTier` set (default `premium`), every user, retry and continuation request routes to that tier whatever the classifier or the thinking level would say, and nothing is classified, so no Decisions call is made. The selector still picks the model in the tier (availability, budget, circuits, price). An escalation cue only raises a session pinned below `premium`. The rest of this list describes the classifying path, used only when no `sessionTier` is set.
-- **First user turn.** The message is classified once, with the same selector-chosen Decisions classifier that planning uses (keyword fallback if it is unavailable or not confident). The policy picks a tier (budget, availability, circuit breakers, and the org allowlist apply) and the selector picks a model in it. A model the session already uses is kept if it is a candidate of that tier. The choice is stored as router state (`tier`, model, classification, `switches`; a `phase` written by an older version is still read and ignored) on the session branch.
-- **Planning floor.** The hidden plan-interview context that `/plan` adds to each turn is not classified (it reaches the router as one more user message, so its `[PLAN ...]` marker tells it apart). While `/plan` is running the chat model is at least `standard`, and `premium` when the stored classification is high complexity or security-sensitive, even if the request was classified as cheap work.
-- **Later turns and tool follow-ups.** They stay on the stored model. It is re-evaluated only when a message is longer than 2000 characters or contains an escalation cue ("this is hard", "think harder", "use a stronger model"), or when the thinking level rises to `high` or `xhigh`. Tiers only go up this way, never down.
-- **No handoff to cheap.** The model stays on its routed tier after an edit or write. An earlier version switched to the `cheap` tier after the first successful edit, which put fixes for review findings on the cheapest model. Only escalation cues, long new requests, a higher thinking level, failures, and the `/plan` floor move the model.
-- **Retries.** After an overload, rate-limit, 5xx, or auth error the router moves to another candidate of the same tier and counts a failure against the failed model (feeding the circuit breaker). After a context overflow it picks a candidate with a larger context window in the same or a higher tier. Other errors retry on the same model.
-- **Compaction and other direct calls** go to `routing.directTier` (default `cheap`: Haiku, then Luna).
-- **Budget.** A hard limit stops routing with an error. A soft limit prefers the cheapest candidate in a tier and never moves up a tier.
-- Every returned model must be registered in Pi with credentials (OpenAI and Anthropic only through account login); unusable candidates are skipped, and the error names the tier if none is left.
-
-Thinking levels offered: `low`, `medium`, `high`, `xhigh`. They pass through as the physical thinking level (Pi clamps it to the model) and also steer the tier:
-
-| Level | Effect |
-|---|---|
-| `low` | Prefer cheaper: one tier below the classifier's choice, never below `cheap`, never for security-sensitive work |
-| `medium` | The classifier's choice |
-| `high` | At least `standard` |
-| `xhigh` | `premium` |
-
-The declared context window and max output are the smallest known across the configured chat candidates.
+- **Pinned model.** On `session_start`, when `session.pin` is on (the default), the extension sets `session.model` (default `anthropic/claude-opus-5-5`) if the session started on another model, through `pi.setModel(registry.find(...))`. If the model cannot be found, or Pi refuses the switch (no login), you get one warning and the session stays as it is. With `session.pin: false` the extension never changes your model. A model that `/build` has set for a ticket's fresh session takes precedence, and `/build` puts `session.model` back when it finishes (with pinning off: the model you were on before it started).
+- **Compaction on a cheap tier.** A `session_before_compact` hook sends the messages Pi is about to discard to a model of `session.compactionTier` (default `cheap`, Haiku in the sample) through Pi's model registry, and returns that summary to Pi. The prompt asks for the goal, decisions, file paths, open tasks and errors, folds in the earlier summary, and follows `/compact <instructions>` when you give any. The call is ledgered with reason `compaction`. If no candidate is signed in, the call fails, the reply is empty, or the budget is hard, the hook returns nothing and Pi compacts with the session model as usual. It never throws.
+- **Budget gate.** An `input` hook checks the budget before a prompt reaches the model. On a hard budget (task or daily) a prompt is refused with "Task or daily budget is exhausted. Run /cost for details." and never sent. Commands that start with `/` always pass, so `/cost`, `/status` and the rest still work, and so does input an extension sent itself (`/build` and `/plan` check the budget on their own). On a soft budget you get one warning per session and the prompt goes through. Spend of the main session is ledgered from each assistant message (`message_end`), as before.
 
 ### Advisor
 
 `/advisor <question>` asks the advisor tier one question. It checks the budget first, builds a redacted context of at most 8,000 characters (task request, plan summary, classification, last failure, diff stat), picks a candidate with the same selector, ledgers the call with reason `advisor`, and prints the answer. It never changes the task phase and never edits files. Pi only suggests it, after a security-sensitive plan. The suggestion is a notification ("Consider /advisor ..."); the model is never called without the command.
 
-### Classifier
+### Classification
 
-The classifier tier sends one Decisions request with five questions (`task_type`, `complexity`, `risk`, `recommended_tier`, and a `security_sensitive` predicate). Answer confidences and probabilities become the classification confidence (the weakest of the first three). A refusal, a missing answer, or a confidence below `routing.minConfidence` uses the keyword fallback. When the call itself fails, the reason (redacted, one line) is posted to the chat and added to the task's event log as a `classify_failed` route event. Strong security keywords in the request still force a security classification when the model says otherwise. With no usable decisions candidate, the older chat classifier option, or the keyword fallback, applies.
+No model classifies a task. The classification (`task_type`, `complexity`, `risk`, security flag) decides premium review, human approval and where a ticket starts, and it is built from two deterministic parts:
+
+- **Keyword scan.** `classifyKeywords` reads text for security signals (one strong keyword such as authentication, secrets, credentials or production deployment, or two weaker ones such as token plus session). A hit gives a security-sensitive, high-risk task; otherwise a general, medium one. The request gets this scan when `/plan` starts. `/route` uses it alone and says that the planner sets complexity during `/plan`.
+- **The planner's rating.** `plan_spec` carries `complexity`, `risk` (low, medium or high), `securitySensitive` and a one-sentence `classificationReason`, which the planning model (Opus) fills. When the spec is saved they become the task's classification with source `planner`, and the plan's route is recomputed. `securitySensitive` is the planner's value OR the keyword scan of the request and the spec (summary, approach, file changes and risks). The scan can only raise the flag: if it finds a hit, the task is security-sensitive and high risk whatever the planner said, and `plan_spec` says so in its reply. A spec saved without a rating keeps the classification the task has.
+
+`/status` shows who rated the task and how. `/advisor` and the review route read the same classification.
 
 ### Where model calls come from
 
@@ -464,10 +446,10 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 ### /plan
 
-`/plan <request>` runs in your normal Pi session on the virtual auto model, with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), a new `/plan` closes it first with a `Closed <task>.` chat line. A task with unfinished tickets is revised instead.
+`/plan <request>` runs in your normal Pi session on the session model (Opus by default), with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), a new `/plan` closes it first with a `Closed <task>.` chat line. A task with unfinished tickets is revised instead.
 
 1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` again). The status line reads `plan · interview round N (k/7 questions)`.
-2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps). Code rejects a spec without an approach, file changes, or verification.
+2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps) and rates the task (`complexity`, `risk`, `securitySensitive`, `classificationReason`; see [Classification](#classification)). Code rejects a spec without an approach, file changes, or verification.
 3. **Tickets.** The model submits vertical, independently testable slices with `plan_tickets`. Code validates unique ids, existing blockers, no cycles, at least one acceptance criterion, and that each ticket fits `workers.ticketContextTokens` (the larger of the model's estimate and a code estimate of chars/4 plus listed file sizes plus 20K overhead). An oversize ticket is sent back to be split. A ticket's `checks` are command lines, one command per entry, never prose. `plan_tickets` rejects a check the deny rules would refuse, and one whose first word is not a command on `PATH`, so the planner rewrites it. Each ticket carries technical `implementation` steps beside its behavior and acceptance criteria. Before submitting, the model drafts the tickets and calls `plan_consult` (next step).
 4. **Advisor consult.** `plan_consult` takes the draft `tickets` (same schema as `plan_tickets`, validated the same way) and 2-3 specific `questions` about the riskiest parts. It puts them to every available advisor, one per provider (Astra and Fable in the sample config), in parallel. Each advisor sees the saved spec (clipped), the draft tickets rendered compactly and the questions, never the session transcript, and answers with a verdict, answers and concerns. The answers are stored on the task (`planning.consult`) and returned to the model, which must resolve any disagreement itself and then call `plan_tickets` with the final tickets and `advisorResolution`: what it accepted, what it rejected, and why. It runs once per plan version: a second call for the same draft returns the stored answers with no model calls, and a revision after **Request changes** is a new draft that may consult again. When advisors are available (`advisors.plan`, default true), `plan_tickets` refuses with "Call plan_consult first" until a consult exists and requires a non-empty `advisorResolution`; with no advisor available, or when the budget skipped them, it requires neither and the plan notes that. Advisors advise and never gate; the plan is still yours to approve.
 5. **Review screen.** You see the full plan (spec and every ticket) in a scrollable review and choose **Approve plan**, **Request changes** (typed feedback goes back to the model), **Edit tickets**, or **Save as draft**. Esc also saves a draft. The plan opens with an **Advisor review** section: each advisor's verdict and concerns (labelled by model), any errors, then `Opus resolution: ...`. Approving freezes `plan.vN.approved.json` (write-once). The plan is also posted in the chat and written to `tasks/<id>/plan.md`, and each ticket to `tasks/<id>/tickets/NN-slug.md`. A material scope change needs a new approval.
@@ -496,7 +478,7 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 A check that cannot run (no such command, a denied command, or a failing `setup`) stops the ticket as `failed` with the reason. It does not count against the model, because a stronger model cannot fix a plan.
 
-**Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (normally `cost-opt/auto`) and `/build` points you at `/review`.
+**Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (`session.model` when pinned, else the model you were on) and `/build` points you at `/review`.
 
 **Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, it is committed without a model turn. A ticket whose review failed is not committed this way: it goes one tier up. Otherwise it goes to a model again, one tier up, until `routing.maxEscalations` is used up. A hard budget starts no new ticket and says so.
 
@@ -521,7 +503,7 @@ Every model call the workflow records goes to `.pi-workflows/cost/ledger.jsonl`:
 
 Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. A deterministic step that made no model call is a known zero.
 
-Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, and a row with nothing to price it from (for example a classifier call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null` and `/cost` still lists those rows as unknown, with a count. An unknown row no longer makes the budget soft by itself.
+Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, and a row with nothing to price it from (for example a call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null` and `/cost` still lists those rows as unknown, with a count. An unknown row no longer makes the budget soft by itself.
 
 `/cost` also names models seen in the ledger that have no pricing row: their spend is unknown and estimated at the provider's dearest row for its current billing (subscription rows while on account login), which keeps the budget "soft", so add a row for each. Failures before any model request (a git error, a plan cycle) are ledgered as a known $0 and do not count against the model, and the classifier never calls a provider that is not signed in (keywords are used instead).
 
@@ -529,7 +511,7 @@ Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not p
 
 **Review and advisor cost.** Each ticket costs its implementer turns plus one Opus review call, a second Opus call when advisors answered, and the advisors. Prices come from `pricing` rows like every other call, and an unknown price stays unknown. Astra is $0 on a ChatGPT subscription (a Foundry deployment of it is billed per token); Fable is billed per token on an Anthropic API key (it needs `providers.anthropic.apiKeyFallback: true` in the user config and a `billing: api-key` row), so high tickets, which always consult both advisors, are where the advisor spend shows up. The split is in the build table, `/status` and `tickets.jsonl`.
 
-Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at its difficulty tier and climbs one step per failure, at most `routing.maxEscalations` steps (default 3, so the full ladder fits), never past `maxTier`. The classifier tier is for decisions, so it is never on a ladder. Three failures and zero successes in a task class open the circuit breaker.
+Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at its difficulty tier and climbs one step per failure, at most `routing.maxEscalations` steps (default 3, so the full ladder fits), never past `maxTier`. Three failures and zero successes in a task class open the circuit breaker.
 
 ## Web tools
 
@@ -571,11 +553,11 @@ Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPL
 ## Layout
 
 ```text
-src/extension.ts          Pi commands, the virtual model cost-opt/auto, and the /build session driver
+src/extension.ts          Pi commands, the session hooks (model pin, compaction, input budget gate), and the /build session driver
 src/commands.ts           the command table
 src/orchestrator/         state machine, plans, workflow; build.ts (/build), review.ts (/review)
-src/providers/            account-login gate, Foundry, Vercel, Decisions client, Pi registry chat
-src/router/               classifier schema, policy, and per-tier candidate selector
+src/providers/            account-login gate, Foundry, Vercel, Pi registry chat
+src/router/               keyword classification, policy, and per-tier candidate selector
 src/review/               static scan, checks, the advisory model pass, and the advisor client
 src/cost/                 ledger, budgets, quota, baseline compare
 src/storage/              lock, journal, snapshots
@@ -607,6 +589,6 @@ Artifacts for a task:
 - `/build` runs the model in your checkout with Pi's normal tools, not in a sandbox or worktree. The `git push` and branch-switch block during a ticket is a hook on Pi's `bash` tool, and shell can hide a command from it, so review the diff. Tickets run one at a time, never in parallel.
 - Pi's `/login` still offers an API-key prompt. This extension treats that credential as blocked unless the user config sets `apiKeyFallback` for that provider.
 - Interactive Pi bash is denied for destructive commands (`rm -rf`, force push, piping a download into a shell, and similar). Other commands are not restricted, because that would break the host agent. Checks and setup run any non-destructive command. While `/plan` runs, bash is limited to a read-only allowlist.
-- `cost-opt/auto` classifies once per session (and again only on a long or escalating message), and a Decisions classifier call is ledgered to the active task. It picks models with the same selector as the commands.
+- The compaction hook, the pinned session model and the input budget gate use Pi hooks (`session_before_compact`, `session_start` with `setModel`, `input`) that have been run against fakes only; see [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 - Nothing here pushes, opens a pull request, or merges. Do that yourself with git and the `origin` CLI (or `gh`).
 - A plan made only of literal edits (a ```` ```tasks ```` block) has no tickets, so `/build` cannot run it.
