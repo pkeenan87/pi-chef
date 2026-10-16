@@ -2,7 +2,7 @@ import { tierCandidates, type WorkflowConfig } from "../config.js";
 import { modelMetricKey, TIERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
 import { selectCandidate, type Availability, type Selection } from "./select.js";
 import type { QuotaUsage } from "../cost/quota.js";
-import { circuitOpenFor, rankingCost, rate, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
+import { circuitOpenFor, rankingCost, rate, reviewMetricType, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
 
 export { circuitOpenFor, DEFAULT_CIRCUIT_WINDOW_MS, EXPECTED_INPUT_SHARE, SUCCESS_PRIOR } from "./stats.js";
 export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
@@ -60,12 +60,14 @@ export function decideRoute(
     classification.required_capabilities.some((cap) => categories.includes(cap)) || categories.includes(classification.task_type);
   // Human approval additionally covers any high-risk task.
   const sensitive = premiumReview || classification.risk === "high";
+  // The /ship model review keeps its own record (reviewMetricType), so review picks never read implementation cells.
+  const metricType = purpose === "review" ? reviewMetricType(classification.task_type) : classification.task_type;
   const breaker = (tier: Tier) =>
-    circuitOpenFor(table, classification.task_type, tier, config.routing.circuitBreakerFailures, at, options.circuitWindowMs);
+    circuitOpenFor(table, metricType, tier, config.routing.circuitBreakerFailures, at, options.circuitWindowMs);
   const select = (tier: Tier, rng: (() => number) | undefined = options.rng): Selection =>
     selectCandidate({
       tier,
-      taskType: classification.task_type,
+      taskType: metricType,
       config,
       table,
       availability: options.availability,
@@ -145,8 +147,9 @@ export function decideRoute(
   const model = candidate ? candidate.model : blocked ? "blocked" : "deterministic";
   const cost = blocked ? null : candidate ? tierCost(config.pricing, candidate.provider, candidate.model, at, config.workers.tokenBudget) : 0;
   const rateUsdPerMillion = cost === null ? null : config.workers.tokenBudget > 0 ? (cost / config.workers.tokenBudget) * 1_000_000 : 0;
-  const modelStat = candidate ? rate(table, classification.task_type, modelMetricKey(tier, candidate.provider, candidate.model)) : undefined;
-  const stat = modelStat && modelStat.samples > 0 ? modelStat : rate(table, classification.task_type, tier);
+  const modelStat = candidate ? rate(table, metricType, modelMetricKey(tier, candidate.provider, candidate.model)) : undefined;
+  const stat = modelStat && modelStat.samples > 0 ? modelStat : rate(table, metricType, tier);
+  // Real price only: the quota shadow and the attempt overhead rank, they never count as spend.
   const expectedUsd = cost === null ? null : cost / Math.max(stat.rate, 0.05);
   if (stat.samples === 0) reasons.push(`success_prior_${SUCCESS_PRIOR}`);
   else reasons.push(`success_rate_${stat.rate.toFixed(2)}`);
@@ -183,7 +186,7 @@ function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig)
   return failed;
 }
 
-/** Cheapest expected ranking cost (real plus quota shadow) among a tier's priced candidates; unpriced tiers rank last. */
+/** Cheapest expected ranking cost (real plus quota shadow plus attempt overhead) among a tier's priced candidates; unpriced tiers rank last. */
 function expectedFor(candidate: Tier, config: WorkflowConfig, table: SuccessTable, taskType: string, at: Date, quota?: QuotaUsage): number {
   const candidates = tierCandidates(config, candidate);
   if (candidates.length === 0) return 0;

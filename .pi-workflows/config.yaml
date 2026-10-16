@@ -72,6 +72,10 @@ routing:
     - secrets
     - security-sensitive
   circuitBreakerFailures: 3
+  # Ranking only (never billed, never in a budget): USD added to every candidate's price before dividing by its
+  # success rate. It stands for the time and retry cost of a failed attempt, so a $0 subscription model with a
+  # poor record does not always win. 0 turns it off.
+  attemptOverheadUsd: 0.02
 
 workers:
   tokenBudget: 8000

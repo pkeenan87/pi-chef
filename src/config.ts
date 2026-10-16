@@ -110,6 +110,12 @@ export interface WorkflowConfig {
     maxTier: Tier;
     requirePremiumReviewFor: string[];
     circuitBreakerFailures: number;
+    /**
+     * Ranking-only USD added to every candidate's price before dividing by its success rate: the time and retry
+     * cost of a failed attempt, so a $0 subscription model with a poor record does not always win. Like the quota
+     * shadow price it never reaches the ledger, budgets, the over-budget filter, or expectedUsd.
+     */
+    attemptOverheadUsd: number;
   };
   workers: {
     /** Tokens the router prices one call at (the cost model). */
@@ -151,6 +157,7 @@ const DEFAULTS: WorkflowConfig = {
     maxTier: "premium",
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
+    attemptOverheadUsd: 0.02,
   },
   workers: {
     tokenBudget: 8000,
@@ -414,6 +421,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(routing, "minConfidence", where, { min: 0, max: 1 }, "routing");
     checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
     checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
+    checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
     if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier))) {
       invalid(where, "routing.maxTier", `must be one of ${TIERS.join(", ")}`);
     }

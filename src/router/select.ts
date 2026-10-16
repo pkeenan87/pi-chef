@@ -1,7 +1,7 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
 import { modelMetricKey, type ConsideredCandidate, type ProviderId, type TierCandidate, type TierKey } from "../domain.js";
 import type { QuotaUsage } from "../cost/quota.js";
-import { circuitOpenFor, shadowCost, tierCost, type SuccessTable } from "./stats.js";
+import { attemptOverhead, circuitOpenFor, shadowCost, tierCost, type SuccessTable } from "./stats.js";
 
 /** Snapshot of which providers can be called right now (auth ready, local server reachable). */
 export type Availability = Partial<Record<ProviderId, { ok: boolean; detail?: string }>>;
@@ -13,7 +13,7 @@ export interface SelectOptions {
   table: SuccessTable;
   /** Omitted means every provider is assumed available. */
   availability?: Availability;
-  /** Candidates whose expected cost exceeds this are excluded. Real prices only; quota shadow prices never count. */
+  /** Candidates whose expected cost exceeds this are excluded. Real prices only; quota shadow prices and the attempt overhead never count. */
   budgetRemainingUsd?: number;
   /** Subscription quota use, which scales `quota.models` shadow prices. Affects ranking only. */
   quota?: QuotaUsage;
@@ -100,7 +100,7 @@ export function selectCandidate(options: SelectOptions): Selection {
     if (!hard.has(candidate) && view && !view.ok) soft.set(candidate, `unavailable${view.detail ? `: ${view.detail}` : ""}`);
   }
   const eligible = candidates.filter((candidate) => !hard.has(candidate));
-  const consideredBase = (picked?: Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number }>, pool?: TierCandidate[]): ConsideredCandidate[] =>
+  const consideredBase = (picked?: Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number; overheadUsd?: number }>, pool?: TierCandidate[]): ConsideredCandidate[] =>
     candidates.map((candidate) => {
       const softOut = options.strictAvailability || (pool !== undefined && !pool.includes(candidate));
       const reason = hard.get(candidate) ?? (softOut ? soft.get(candidate) : undefined);
@@ -140,7 +140,7 @@ export function selectCandidate(options: SelectOptions): Selection {
     pool = eligible;
     fellBack = true;
   }
-  const ranked = new Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number }>();
+  const ranked = new Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number; overheadUsd?: number }>();
   const rows = pool.map((candidate, order) => {
     const cell = table[taskType]?.[modelMetricKey(tier, candidate.provider, candidate.model)];
     // A lone candidate needs no exploration draw.
@@ -148,9 +148,11 @@ export function selectCandidate(options: SelectOptions): Selection {
     const price = cost.get(candidate) ?? null;
     // The quota shadow price ranks scarce subscription models; the budget filter above used the real price only.
     const quotaUsd = price === null ? 0 : shadowCost(config, candidate.provider, candidate.model, options.quota);
-    const score = price === null ? undefined : (price + quotaUsd) / Math.max(p, MIN_P);
+    // The attempt overhead makes p matter even for a $0 model; it ranks like the shadow and is never billed.
+    const overheadUsd = price === null ? 0 : attemptOverhead(config);
+    const score = price === null ? undefined : (price + quotaUsd + overheadUsd) / Math.max(p, MIN_P);
     ranked.set(candidate, { score, priced: price !== null, quotaUsd });
-    return { candidate, order, p, price, quotaUsd, score };
+    return { candidate, order, p, price, quotaUsd, overheadUsd, score };
   });
   rows.sort((a, b) => {
     if ((a.score === undefined) !== (b.score === undefined)) return a.score === undefined ? 1 : -1;
@@ -164,7 +166,7 @@ export function selectCandidate(options: SelectOptions): Selection {
       ? "only eligible candidate"
       : best.score === undefined
         ? "no candidate has a price; first by config order"
-        : `lowest expected cost per success ($${best.score.toFixed(4)}${best.quotaUsd > 0 ? ` incl. $${best.quotaUsd.toFixed(4)} quota shadow` : ""}, sampled p=${best.p.toFixed(2)})`;
+        : `lowest expected cost per success ($${best.score.toFixed(4)}${best.quotaUsd > 0 || best.overheadUsd > 0 ? ` incl. ${[best.quotaUsd > 0 ? `$${best.quotaUsd.toFixed(4)} quota` : "", best.overheadUsd > 0 ? `$${best.overheadUsd.toFixed(4)} overhead` : ""].filter(Boolean).join(", ")}` : ""}, sampled p=${best.p.toFixed(2)})`;
   return {
     tier,
     candidate: best.candidate,

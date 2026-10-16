@@ -79,8 +79,24 @@ export function shadowCost(config: WorkflowConfig, provider: string, model: stri
   return fromMicroUsd(micro * (quota?.[provider]?.multiplier ?? 1));
 }
 
-/** Real expected cost plus the quota shadow cost, for ranking only. Null when the model has no pricing row. */
+/**
+ * Ranking-only per-attempt overhead (`routing.attemptOverheadUsd`): the time and retry cost of a failed attempt,
+ * so a $0 model with a poor record cannot win on price alone. Never use this for budgets or the ledger.
+ */
+export function attemptOverhead(config: WorkflowConfig): number {
+  return config.routing.attemptOverheadUsd;
+}
+
+/** Real expected cost plus the quota shadow cost and attempt overhead, for ranking only. Null when the model has no pricing row. */
 export function rankingCost(config: WorkflowConfig, provider: string, model: string, at: Date, quota?: QuotaUsage): number | null {
   const real = tierCost(config.pricing, provider, model, at, config.workers.tokenBudget);
-  return real === null ? null : real + shadowCost(config, provider, model, quota);
+  return real === null ? null : real + shadowCost(config, provider, model, quota) + attemptOverhead(config);
+}
+
+/**
+ * Metrics are keyed by task type. The advisory /ship model review keeps its outcomes under this derived type so
+ * a review failure never counts against the model's record on implementation work.
+ */
+export function reviewMetricType(taskType: string): string {
+  return taskType.startsWith("review:") ? taskType : `review:${taskType}`;
 }

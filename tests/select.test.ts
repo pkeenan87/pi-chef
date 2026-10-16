@@ -6,7 +6,7 @@ import { modelMetricKey, type CostRecord } from "../src/domain.js";
 import { classificationFromAnswers, validateClassification } from "../src/router/classify.js";
 import { decideRoute } from "../src/router/policy.js";
 import { sampleBeta, selectCandidate } from "../src/router/select.js";
-import type { SuccessTable } from "../src/router/stats.js";
+import { reviewMetricType, type SuccessTable } from "../src/router/stats.js";
 import { seededRng, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const at = new Date("2026-10-14T12:00:00.000Z");
@@ -287,7 +287,7 @@ describe("subscription quota shadow prices", () => {
     for (let seed = 1; seed <= 200; seed++) picks[run(config, cells([19, 1], [19, 1]), {}, seed).candidate!.model as "a" | "b"] += 1;
     expect(picks.b).toBeGreaterThan(195);
     const result = run(config, cells([19, 1], [19, 1]), {}, 3);
-    expect(result.reason).toMatch(/quota shadow/);
+    expect(result.reason).toMatch(/\$0\.0080 quota/);
     // 8000 tokens at $1/M = $0.008 shadow; the real price stays 0.
     const b = result.considered.find((item) => item.model === "b")!;
     expect(b.quotaUsd).toBeCloseTo(0.008, 10);
@@ -422,5 +422,89 @@ quota:
     expect(report.text).toContain("  anthropic: 1,500 tokens today / 1,000 cap, 1,500 this week (over cap: shadow prices x4)");
     const json = (await app.cost("json")).data as { quota: Record<string, { dailyTokens: number; overCap: boolean }> };
     expect(json.quota.anthropic).toMatchObject({ dailyTokens: 1500, overCap: true });
+  });
+});
+
+describe("per-attempt overhead (ranking only)", () => {
+  /** a is a $0 subscription model; b costs real money. */
+  function freeVersusPriced(overhead?: number) {
+    const config = subscriptions();
+    const b = config.pricing.find((row) => row.model === "b")!;
+    b.inputPerMillionUsd = 1;
+    b.outputPerMillionUsd = 4;
+    if (overhead !== undefined) config.routing.attemptOverheadUsd = overhead;
+    return config;
+  }
+
+  it("defaults to 0.02 and rejects a negative value", () => {
+    expect(subscriptions().routing.attemptOverheadUsd).toBe(0.02);
+    expect(() => parseConfig("routing: { attemptOverheadUsd: -1 }")).toThrow(/attemptOverheadUsd/);
+  });
+
+  it("a $0 model with a poor record loses to a priced model with a good record", () => {
+    const table = cells([2, 38], [38, 2]);
+    for (let seed = 1; seed <= 50; seed++) expect(run(freeVersusPriced(), table, {}, seed).candidate?.model).toBe("b");
+    // Without the overhead the $0 model would win every time, which is the bug.
+    for (let seed = 1; seed <= 50; seed++) expect(run(freeVersusPriced(0), table, {}, seed).candidate?.model).toBe("a");
+  });
+
+  it("keeps the old ordering when records are equal", () => {
+    // A constant rng gives both candidates the same sampled p, so only price decides, with or without the overhead.
+    const table = cells([19, 1], [19, 1]);
+    const flat = { rng: () => 0.5 };
+    for (const [onConfig, offConfig] of [[freeVersusPriced(), freeVersusPriced(0)], [pair(), pair("routing: { attemptOverheadUsd: 0 }\n")]] as const) {
+      const on = run(onConfig, table, flat);
+      expect(on.candidate?.model).toBe(run(offConfig, table, flat).candidate?.model);
+    }
+    expect(run(pair(), table, flat).candidate?.model).toBe("b");
+    expect(run(freeVersusPriced(), table, flat).candidate?.model).toBe("a");
+  });
+
+  it("names the overhead in the reason", () => {
+    const result = run(freeVersusPriced(), cells([19, 1], [1, 19]), {}, 3);
+    expect(result.reason).toMatch(/incl\. \$0\.0200 overhead, sampled p=/);
+  });
+
+  it("never reaches the ledger, the budget, the over-budget filter, or expectedUsd", () => {
+    const config = freeVersusPriced(5);
+    // The over-budget filter looks at the real price only: a $0 model passes with nothing left.
+    expect(run(config, {}, { budgetRemainingUsd: 0 }).considered.find((item) => item.model === "a")?.excludedReason).toBeUndefined();
+    const entry = buildCostRecord(
+      { provider: "anthropic", model: "a", phase: "IMPLEMENTING", taskId: "t", tier: "standard", usage: { input: 900_000, output: 100_000, cacheRead: 0, cacheWrite: 0, requests: 1 }, outcome: "success", retries: 0, reason: "test" },
+      config.pricing,
+      at,
+      "id-1",
+    );
+    expect(entry.actualUsd).toBe(0);
+    const summary = summarize([entry], { pricing: config.pricing });
+    expect(summary.knownUsd).toBe(0);
+    expect(budgetStatusFor(summary, 0.01, 0.8)).toBe("ok");
+    const classification = { task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], recommended_tier: "standard" as const, confidence: 1, reason_codes: [], source: "fallback" as const };
+    // A $0 model stays $0 in expectedUsd however large the overhead is; the priced one stays on its real price.
+    const onlyFree = { ...config, orgProviderAllowlist: ["anthropic" as const] };
+    expect(decideRoute(classification, onlyFree, {}, { purpose: "preview", at }).expectedUsd).toBe(0);
+    const onlyPriced = { ...config, orgProviderAllowlist: ["openai" as const] };
+    const priced = decideRoute(classification, onlyPriced, {}, { purpose: "preview", at });
+    const real = decideRoute(classification, { ...freeVersusPriced(0), orgProviderAllowlist: ["openai" as const] }, {}, { purpose: "preview", at });
+    expect(priced.expectedUsd).toBe(real.expectedUsd);
+  });
+});
+
+describe("review outcomes are keyed apart from implementation", () => {
+  it("a failing review record does not change implement selection", () => {
+    const classification = { task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], recommended_tier: "standard" as const, confidence: 1, reason_codes: [], source: "fallback" as const };
+    const key = modelMetricKey("standard", "anthropic", "a");
+    const implement: SuccessTable = { general: { [key]: { success: 19, failure: 1 } } };
+    const withReviewFailures: SuccessTable = { ...implement, [reviewMetricType("general")]: { [key]: { success: 0, failure: 30 } } };
+    const config = pair();
+    for (let seed = 1; seed <= 30; seed++) {
+      const a = decideRoute(classification, config, implement, { purpose: "implement", tierHint: "standard", at, rng: seededRng(seed) });
+      const b = decideRoute(classification, config, withReviewFailures, { purpose: "implement", tierHint: "standard", at, rng: seededRng(seed) });
+      expect(b.model).toBe(a.model);
+      expect(b.reason).toEqual(a.reason);
+    }
+    // Review picks read the review record: a's 30 review failures open its circuit there.
+    const review = decideRoute(classification, config, withReviewFailures, { purpose: "review", at, rng: seededRng(1) });
+    expect(review.model).toBe("b");
   });
 });
