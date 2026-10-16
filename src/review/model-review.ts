@@ -231,6 +231,8 @@ export async function runModelReview(
     timeoutMs?: number;
     signal?: AbortSignal;
     onProgress?: (line: string) => void;
+    /** What is running now, for the live progress line: "model review part 2/3 · provider/model", "retrying part 2 on provider/model". */
+    onStage?: (text: string) => void;
     onCall?: (call: ModelReviewCall) => void | Promise<void>;
     stop?: () => string | undefined;
     /** Lines summarizing the files of parts beyond `maxChunks`, which are not sent; added to every part's prompt. */
@@ -272,6 +274,7 @@ export async function runModelReview(
           ? `asking ${label(candidate)} to review part ${index + 1} of ${reviewed.length} (${Math.round(part.length / 1000)}k chars)`
           : `retrying part ${index + 1} of ${reviewed.length} on ${label(candidate)}`,
       );
+      input.onStage?.(retry === 0 ? `model review part ${index + 1}/${reviewed.length} · ${label(candidate)}` : `retrying part ${index + 1} on ${label(candidate)}`);
       const timeout = input.timeoutMs !== undefined ? AbortSignal.timeout(input.timeoutMs) : undefined;
       const signals = [input.signal, timeout].filter((item): item is AbortSignal => !!item);
       const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);

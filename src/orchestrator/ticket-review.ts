@@ -3,6 +3,7 @@ import { ticketDifficulty, type AdvisorOpinion, type RoutingDecision, type TaskS
 import { redact } from "../redact.js";
 import { advisorBlock, advisorsFor, availableAdvisors, consultAdvisors, sumUsd, type AdvisorCandidate } from "../review/advisors.js";
 import { bracketSpans, omitLockfiles } from "../review/model-review.js";
+import { shortModel } from "../review/review-resolution.js";
 import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
 import { workspaceName, type WorkflowContext } from "./context.js";
@@ -287,6 +288,7 @@ async function reviewTicketUnsafe(ctx: WorkflowContext, state: TaskState, ticket
   const advisors = advisorsFor({ difficulty: ticketDifficulty(ticket), implementerProvider: run.provider ?? "", candidates: found.candidates });
   const packet = advisorPacket(ticket, diffText);
 
+  ctx.indicator?.stage(`${shortModel(decision.model)} review`);
   progress(`${reviewer} reads the diff (${Math.round(diffText.length / 1000)}k chars)${advisors.length ? `; advisors ${advisors.map(label).join(", ")}` : ""}`);
   const first = await ask(ctx, state, decision, candidates, `ticket review ticket ${ticket.id}`, `${TICKET_REVIEW_SYSTEM}\n${reviewFormat(advisors)}`, packet);
   if (!first.parsed) return unavailable(first.error ?? "the review call failed", { review: first.costUsd, advisors: 0 });
@@ -294,6 +296,7 @@ async function reviewTicketUnsafe(ctx: WorkflowContext, state: TaskState, ticket
   let consultation = { results: [] as AdvisorOpinion[], skipped: undefined as string | undefined, costUsd: 0 as number | null };
   if (advisors.length > 0) {
     const questions = first.parsed.questions.length ? first.parsed.questions : DEFAULT_QUESTIONS;
+    ctx.indicator?.stage(`advisors · ${advisors.map((item) => shortModel(item.model)).join(", ")}`);
     const asked = await consultAdvisors(ctx, { purpose: "ticket review", packet, questions, candidates: advisors, taskId: state.taskId, ticketId: ticket.id });
     consultation = { results: asked.results, skipped: asked.skipped, costUsd: asked.costUsd };
     if (asked.skipped) progress(`advisors skipped: ${asked.skipped}`);
@@ -317,6 +320,7 @@ async function reviewTicketUnsafe(ctx: WorkflowContext, state: TaskState, ticket
       "# Advisors",
       ...consultation.results.map(advisorBlock),
     ].join("\n\n");
+    ctx.indicator?.stage("resolving");
     const second = await ask(ctx, state, decision, candidates, `ticket review resolve ticket ${ticket.id}`, resolveSystem(), redact(user));
     reviewCost = sumUsd([reviewCost, second.costUsd]);
     if (second.parsed) {

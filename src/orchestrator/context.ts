@@ -7,6 +7,7 @@ import type { CheckRunner } from "../review/review.js";
 import { redact } from "../redact.js";
 import type { TaskStore } from "../storage/store.js";
 import { move } from "./machine.js";
+import type { Indicator } from "./progress.js";
 import type { PlanReviewFn } from "./types.js";
 
 /** Everything the orchestrator modules share. The UI hooks are mutable: `Workflow.bind` swaps them per command. */
@@ -32,6 +33,8 @@ export interface WorkflowContext {
   progress?: (message: string) => void;
   /** Multi-line markdown blocks kept in the chat transcript. Absent without a UI. */
   report?: (markdown: string) => void;
+  /** Live one-line progress while work runs and no model streams (/review, /build between turns). A no-op without a UI. */
+  indicator?: Indicator;
   chat?: ChatFn;
   status?: (text: string | undefined) => void;
   /** Plan-interview progress line (separate from the routing status so a routed turn does not overwrite it). */

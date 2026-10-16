@@ -117,6 +117,8 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
       report: (markdown) => showPlanMessage(ctx, markdown, "cost-report"),
+      // The live ctx's widget slot above the editor; a replaced session's ctx is swapped out by the next bind.
+      indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("cost-progress", line === undefined ? undefined : [line]) } : undefined,
       review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });

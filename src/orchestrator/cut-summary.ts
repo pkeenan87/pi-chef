@@ -2,6 +2,7 @@ import { emptyUsage } from "../domain.js";
 import { redact } from "../redact.js";
 import { clipDiff, clipNote, type CutFile } from "../review/advisors.js";
 import { bracketSpans } from "../review/model-review.js";
+import { shortModel } from "../review/review-resolution.js";
 import { selectCandidate } from "../router/select.js";
 import { budgetRemainingUsd, budgetState, quotaState, record } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
@@ -69,6 +70,7 @@ export async function summarizeCutFiles(ctx: WorkflowContext, taskId: string, fi
   });
   const candidate = selection.candidate;
   if (!candidate) return none;
+  ctx.indicator?.stage(`summarizing cut files · ${shortModel(candidate.model)}`);
   const listed = files.slice(0, MAX_FILES);
   const user = redact(listed.map((file) => `### ${file.name}\n${file.text.slice(0, HUNK_CHARS)}`).join("\n\n"));
   const phase = ctx.store.load(taskId)?.phase ?? "IDLE";
