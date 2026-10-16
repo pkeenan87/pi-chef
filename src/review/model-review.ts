@@ -1,6 +1,7 @@
 import { emptyUsage, type ModelFinding, type ModelReview, type ModelReviewPart, type PlanDocument, type ProviderId, type TokenUsage } from "../domain.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
+import { acceptedLines, advisorSummaryLines, rejectedLines, unresolvedConcernLines } from "./review-resolution.js";
 
 /**
  * The model pass of /review: a review-tier model reads the branch diff against the plan and lists findings for a
@@ -17,11 +18,20 @@ export const MODEL_REVIEW_SYSTEM = [
   "At most 20 findings, most severe first. An empty array [] means you found nothing worth a person's time.",
 ].join("\n");
 
+/** Added to the system prompt when advisors will be consulted next: the answer carries the questions for them. */
+export const ADVISOR_QUESTIONS_FORMAT = [
+  "Independent advisors will be asked about this diff next. Answer instead with ONLY a JSON object (no prose, no code fence): {\"findings\": [the same elements as above], \"questions\": [...]}.",
+  "In \"questions\" put 2-3 specific questions for the advisors: the points where a second opinion would change what you report. Do not ask what the diff plainly shows. When the diff is one part of several, ask about this part.",
+].join("\n");
+
+const MAX_QUESTIONS = 3;
 const MAX_FINDINGS = 20;
 const SEVERITIES = new Set(["high", "medium", "low"]);
 
 /** Lockfiles are generated and large; the model gets one line each instead of the body. */
 const LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "Cargo.lock", "poetry.lock", "Gemfile.lock", "composer.lock", "go.sum", "uv.lock"]);
+
+export const isLockfile = (file: string): boolean => LOCKFILES.has(file.split("/").pop() ?? "");
 
 /** Replaces each lockfile's section of a unified diff with `# <path>: lockfile changed (+A/-D lines), not sent for review`. */
 export function omitLockfiles(diff: string): string {
@@ -65,8 +75,13 @@ export function splitDiff(diff: string, maxChars: number): string[] {
   return parts;
 }
 
+/** The parts of a diff beyond the first `maxChunks`, as `runModelReview` splits it: what a review will not see. */
+export function unreviewedDiff(diff: string, maxDiffChars: number, maxChunks: number): string {
+  return splitDiff(redact(omitLockfiles(diff)), maxDiffChars).slice(Math.max(1, maxChunks)).join("");
+}
+
 /** The user turn: plan context first (stable), then the diff cut to `maxDiffChars` from the head. */
-export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars: number, part?: { index: number; count: number }): { text: string; truncated: boolean } {
+export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars: number, part?: { index: number; count: number }, notSent?: string): { text: string; truncated: boolean } {
   const tickets = (plan.tickets ?? []).map((ticket) => `- ${ticket.id} ${ticket.title}: ${ticket.acceptanceCriteria.join("; ")}`);
   const head = [
     "# Plan",
@@ -82,11 +97,11 @@ export function modelReviewPrompt(plan: PlanDocument, diff: string, maxDiffChars
   ].join("\n");
   const truncated = diff.length > maxDiffChars;
   const body = truncated ? `${diff.slice(0, maxDiffChars)}\n[... diff truncated at ${maxDiffChars} characters; ${diff.length - maxDiffChars} more not shown ...]` : diff;
-  return { text: `${head}${body}`, truncated };
+  return { text: `${head}${body}${notSent ? `\n\n# Not sent for review (other parts of the branch, summarized; do not report on them)\n${notSent}` : ""}`, truncated };
 }
 
 /** Balanced `[...]` and `{...}` spans of the text in order of their start, skipping brackets inside JSON strings. */
-function bracketSpans(text: string): string[] {
+export function bracketSpans(text: string): string[] {
   const spans: string[] = [];
   for (let start = 0; start < text.length; start++) {
     const open = text[start];
@@ -123,11 +138,21 @@ function asFindingList(value: unknown): unknown[] | undefined {
  * inside prose that parses as a list of objects; entries with a usable message are kept. Undefined when there is none.
  */
 export function parseModelFindings(text: string): ModelFinding[] | undefined {
+  return parseModelAnswer(text)?.findings;
+}
+
+/** Like `parseModelFindings`, and also the advisor questions when the answer is an object that carries `questions`. */
+export function parseModelAnswer(text: string): { findings: ModelFinding[]; questions: string[] } | undefined {
   const fenced = [...text.matchAll(/```[a-z]*\s*\n?([\s\S]*?)```/gi)].map((match) => match[1]!);
   let parsed: unknown[] | undefined;
+  let questions: string[] = [];
   for (const candidate of [text.trim(), ...fenced.map((item) => item.trim()), ...bracketSpans(text)]) {
     try {
-      parsed = asFindingList(JSON.parse(candidate));
+      const value: unknown = JSON.parse(candidate);
+      parsed = asFindingList(value);
+      if (parsed && value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as { questions?: unknown }).questions)) {
+        questions = (value as { questions: unknown[] }).questions.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => redact(item.trim()).slice(0, 400)).slice(0, MAX_QUESTIONS);
+      }
     } catch {
       continue;
     }
@@ -147,7 +172,23 @@ export function parseModelFindings(text: string): ModelFinding[] | undefined {
     findings.push({ severity, category, message, ...(file ? { file } : {}), ...(evidence ? { evidence } : {}) });
     if (findings.length >= MAX_FINDINGS) break;
   }
-  return findings;
+  return { findings, questions };
+}
+
+/** Questions from several parts, at most `MAX_QUESTIONS`: the first of each part, then the second of each, and so on, without repeats. */
+export function mergeQuestions(perPart: string[][]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let round = 0; out.length < MAX_QUESTIONS && perPart.some((list) => round < list.length); round++) {
+    for (const list of perPart) {
+      const question = list[round];
+      if (question === undefined || seen.has(question.toLowerCase())) continue;
+      seen.add(question.toLowerCase());
+      out.push(question);
+      if (out.length >= MAX_QUESTIONS) break;
+    }
+  }
+  return out;
 }
 
 const RANK: Record<ModelFinding["severity"], number> = { high: 0, medium: 1, low: 2 };
@@ -192,6 +233,10 @@ export async function runModelReview(
     onProgress?: (line: string) => void;
     onCall?: (call: ModelReviewCall) => void | Promise<void>;
     stop?: () => string | undefined;
+    /** Lines summarizing the files of parts beyond `maxChunks`, which are not sent; added to every part's prompt. */
+    notSent?: string;
+    /** Advisors will be consulted next: the answer also carries 2-3 questions for them. */
+    askQuestions?: boolean;
   },
 ): Promise<ModelReview> {
   if (candidates.length === 0) throw new Error("runModelReview needs at least one candidate.");
@@ -200,6 +245,8 @@ export async function runModelReview(
   const reviewed = parts.slice(0, limit);
   const findings: ModelFinding[] = [];
   const results: ModelReviewPart[] = [];
+  const questions: string[][] = [];
+  const system = input.askQuestions ? `${MODEL_REVIEW_SYSTEM}\n${ADVISOR_QUESTIONS_FORMAT}` : MODEL_REVIEW_SYSTEM;
   const failed = new Map<string, number>();
   // Fewest failures in this pass first, then preference order.
   const order = () => candidates.map((candidate, rank) => ({ candidate, rank, failures: failed.get(label(candidate)) ?? 0 })).sort((a, b) => a.failures - b.failures || a.rank - b.rank).map((row) => row.candidate);
@@ -211,7 +258,7 @@ export async function runModelReview(
       result.failures.push(`not attempted: ${stopped}`);
       continue;
     }
-    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length });
+    const prompt = modelReviewPrompt(input.plan, part, input.maxDiffChars, { index: index + 1, count: reviewed.length }, input.notSent);
     const [first, second] = order();
     const attempts = second ? [first!, second] : [first!];
     for (const [retry, candidate] of attempts.entries()) {
@@ -232,7 +279,7 @@ export async function runModelReview(
       try {
         response = await chat(candidate, {
           messages: [
-            { role: "system", content: MODEL_REVIEW_SYSTEM },
+            { role: "system", content: system },
             { role: "user", content: prompt.text },
           ],
           maxTokens: 4000,
@@ -253,7 +300,8 @@ export async function runModelReview(
         input.onProgress?.(`part ${index + 1}: ${label(candidate)} failed: ${why.slice(0, 160)}`);
         continue;
       }
-      const parsed = parseModelFindings(response.text);
+      const answer = parseModelAnswer(response.text);
+      const parsed = answer?.findings;
       await input.onCall?.({ candidate, part: index + 1, retry, usage: response.usage, outcome: parsed === undefined ? "failure" : "success" });
       if (parsed === undefined) {
         failed.set(label(candidate), (failed.get(label(candidate)) ?? 0) + 1);
@@ -264,6 +312,7 @@ export async function runModelReview(
       findings.push(...parsed.map((finding) => ({ ...finding, message: redact(finding.message), ...(finding.evidence ? { evidence: redact(finding.evidence) } : {}) })));
       result.reviewedBy = label(candidate);
       result.findings = parsed.length;
+      if (answer!.questions.length) questions.push(answer!.questions);
       input.onProgress?.(`part ${index + 1}: ${parsed.length} finding(s) from ${label(candidate)}`);
       break;
     }
@@ -286,6 +335,7 @@ export async function runModelReview(
     truncated: parts.length > reviewed.length || parts.some((part) => part.includes("was cut at")),
     chunks: reviewed.length,
     parts: results,
+    ...(input.askQuestions ? { questions: mergeQuestions(questions) } : {}),
     ...(errors.length ? { error: errors.join("; ") } : {}),
   };
 }
@@ -319,6 +369,13 @@ export function modelReviewLines(review: ModelReview): string[] {
   const parts = partLines(review);
   if (review.error && review.findings.length === 0) return [`${label} produced no findings: ${review.error}`, ...parts];
   const head = `${label}: ${review.findings.length} finding(s)${review.truncated ? " (part of the diff was not reviewed)" : ""}.`;
+  const advisors = review.advisors?.length ? ["", "Advisors:", ...advisorSummaryLines(review.advisors)] : [];
+  if (review.resolution) {
+    const accepted = acceptedLines(review).map(({ finding, text }) => `- ${text}${finding.evidence ? ` (evidence: ${finding.evidence})` : ""}`);
+    const rationale = review.resolution.rationale ? [`- ${review.model} resolution: ${review.resolution.rationale}`] : [];
+    return [head, ...parts, ...accepted, ...rejectedLines(review), ...advisors, ...rationale, ...(review.error ? [`- note: ${review.error}`] : [])];
+  }
   const lines = review.findings.map((finding) => `- ${finding.severity.toUpperCase().padEnd(6)} ${finding.file ? `${finding.file} — ` : ""}${finding.message}${finding.evidence ? ` (evidence: ${finding.evidence})` : ""}`);
-  return [head, ...parts, ...lines, ...(review.error ? [`- note: ${review.error}`] : [])];
+  const unresolved = review.resolutionError ? [...unresolvedConcernLines(review.advisors ?? []), `- note: ${review.model} could not weigh the advisors' answers (${review.resolutionError}); the findings above are unresolved.`] : [];
+  return [head, ...parts, ...lines, ...advisors, ...unresolved, ...(review.error ? [`- note: ${review.error}`] : [])];
 }

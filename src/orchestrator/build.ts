@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
-import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, Tier } from "../domain.js";
+import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
+import { TICKET_LADDER } from "../router/policy.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
 import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
 import { formatDuration, formatUsd } from "./format.js";
@@ -12,6 +13,7 @@ import { move } from "./machine.js";
 import { assertGraph, waves } from "./plan.js";
 import { ticketPrompt } from "./prompts.js";
 import { decide } from "./routing.js";
+import { reviewFailureDetail, reviewTicket, type TicketReviewOutcome } from "./ticket-review.js";
 import { groupId, parseCriteriaMet, setTicketStatus, splitCheckLine, tickCriteria, ticketFileName, ticketsToGroups } from "./tickets.js";
 
 /** Phases /build may start or resume from. PUBLISHED: an old task file; more tickets on the same branch. */
@@ -46,8 +48,8 @@ export type NextChunk =
   | { kind: "stopped"; code: string; reason: string };
 
 export type ChunkFinish =
-  | { kind: "committed"; sha: string; elapsedMs: number; costUsd: number | null; warning?: string }
-  | { kind: "retry"; text: string }
+  | { kind: "committed"; sha: string; elapsedMs: number; costUsd: number | null; costSplit: CostSplit; review?: string; warning?: string }
+  | { kind: "retry"; reason: "checks" | "review"; text: string }
   | { kind: "stopped"; reason: string; code: string };
 
 const BLANK: TicketRun = { status: "in-progress", attempts: 0, turns: 0, tokens: 0, costUsd: 0, maxContextTokens: 0, crossedTarget: false };
@@ -243,33 +245,55 @@ function failureDetail(evidence: CheckEvidence[]): string {
 // ---------------------------------------------------------------------------------------------------------------------
 // spend
 
-/** Known spend on a ticket since a chunk began, from the ledger. Null when any entry's cost is unknown. */
-function ticketSpend(ctx: WorkflowContext, taskId: string, ticketId: string, since: string | undefined): number | null {
-  let micro = 0;
+/**
+ * Known spend on a ticket since a chunk began, from the ledger, split by who incurred it: the advisors
+ * (`advisor ...`), the review model (`ticket review ...`), and the implementer (the rest: its turns). A part is
+ * null when any of its entries is unknown.
+ */
+function ticketSpend(ctx: WorkflowContext, taskId: string, ticketId: string, since: string | undefined): CostSplit & { total: number | null } {
+  const micro: Record<keyof CostSplit, number | null> = { implementer: 0, review: 0, advisors: 0 };
   for (const record of ctx.store.readLedger()) {
     if (record.taskId !== taskId || !record.reason.endsWith(` ticket ${ticketId}`) || (since !== undefined && record.at < since)) continue;
-    if (record.actualUsd === null) return null;
-    micro += toMicroUsd(record.actualUsd);
+    const part: keyof CostSplit = record.reason.startsWith("advisor ") ? "advisors" : record.reason.startsWith("ticket review") ? "review" : "implementer";
+    micro[part] = micro[part] === null || record.actualUsd === null ? null : micro[part]! + toMicroUsd(record.actualUsd);
   }
-  return fromMicroUsd(micro);
+  const split = { implementer: micro.implementer === null ? null : fromMicroUsd(micro.implementer), review: micro.review === null ? null : fromMicroUsd(micro.review), advisors: micro.advisors === null ? null : fromMicroUsd(micro.advisors) };
+  return { ...split, total: sumSplit(split) };
 }
 
 const addUsd = (a: number | null, b: number | null): number | null => (a === null || b === null ? null : fromMicroUsd(toMicroUsd(a) + toMicroUsd(b)));
+const sumSplit = (split: CostSplit): number | null => addUsd(addUsd(split.implementer, split.review), split.advisors);
+const addSplit = (a: CostSplit | undefined, b: CostSplit): CostSplit => ({ implementer: addUsd(a?.implementer ?? 0, b.implementer), review: addUsd(a?.review ?? 0, b.review), advisors: addUsd(a?.advisors ?? 0, b.advisors) });
 
 // ---------------------------------------------------------------------------------------------------------------------
 // settling a ticket: checks, commit, bookkeeping
 
 type Settled =
   | { kind: "committed"; sha: string; warning?: string }
-  | { kind: "failed"; verdict: "failed" | "unrunnable" | "setup"; detail: string };
+  | { kind: "failed"; verdict: "failed" | "unrunnable" | "setup"; detail: string }
+  | { kind: "review-failed"; record: TicketReviewRecord; text: string; final: boolean };
 
 /**
- * Runs the checks and, on a pass, commits the whole tree and marks the ticket done. Does not record failures:
- * the caller decides whether a failure is final. `credit` bumps the model's metric on a pass.
+ * Runs the checks and, on a pass, the ticket's review (when `review` is given) and then commits the whole tree and
+ * marks the ticket done. Does not record failures: the caller decides whether a failure is final. `credit` bumps the
+ * model's metric on a pass. A review that is unavailable does not block the commit; it adds a warning.
  */
-async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, lastText: string, credit: boolean): Promise<Settled> {
+async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, lastText: string, credit: boolean, review?: () => Promise<TicketReviewOutcome | undefined>): Promise<Settled> {
   const outcome = await runChecks(ctx, state, ticket);
   if (outcome.verdict !== "pass") return { kind: "failed", verdict: outcome.verdict, detail: failureDetail(outcome.evidence) };
+  const warnings: string[] = [];
+  const reviewed = review ? await review() : undefined;
+  if (reviewed) {
+    await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, reviews: [...(previous.reviews ?? []), reviewed.record] }));
+    if (reviewed.kind === "fail") {
+      const run = state.ticketRuns?.[ticket.id];
+      return { kind: "review-failed", record: reviewed.record, text: reviewed.text, final: (run?.reviews ?? []).some((item) => item.tier === reviewed.record.tier && item.verdict === "fail") };
+    }
+    if (reviewed.kind === "unavailable") {
+      ctx.progress?.(reviewed.warning);
+      warnings.push(reviewed.warning);
+    }
+  }
   const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
@@ -277,11 +301,13 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     const run = state.ticketRuns?.[ticket.id];
     await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run?.tier ?? "standard", true, ctx.now(), run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
   }
-  return { kind: "committed", sha, ...(outcome.none ? { warning: `Ticket ${ticket.id} has no checks and none are configured (checks: in .pi-workflows/config.yaml), so nothing verified it.` } : {}) };
+  if (outcome.none) warnings.push(`Ticket ${ticket.id} has no checks and none are configured (checks: in .pi-workflows/config.yaml), so nothing verified it.`);
+  return { kind: "committed", sha, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
 }
 
-function attempt(run: TicketRun, ticket: Ticket, startedAt: string, elapsedMs: number, costUsd: number | null, outcome: TicketAttempt["outcome"], error?: string): TicketAttempt {
-  return { attempt: run.attempts, tier: run.tier ?? "standard", provider: run.provider ?? "", model: run.model ?? "", startedAt, elapsedMs, turns: 0, costUsd, outcome, ...(error ? { error: error.slice(0, 500) } : {}) };
+function attempt(run: TicketRun, startedAt: string, elapsedMs: number, split: CostSplit & { total: number | null }, outcome: TicketAttempt["outcome"], failedBy?: TicketAttempt["failedBy"], error?: string): TicketAttempt {
+  const { total, ...costSplit } = split;
+  return { attempt: run.attempts, tier: run.tier ?? "standard", provider: run.provider ?? "", model: run.model ?? "", startedAt, elapsedMs, turns: 0, costUsd: total, costSplit, outcome, ...(failedBy ? { failedBy } : {}), ...(error ? { error: error.slice(0, 500) } : {}) };
 }
 
 const clip = (text: string) => text.slice(0, MAX_SUMMARY_CHARS);
@@ -302,17 +328,42 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       const ticket = orderedTickets(state.plan.tickets).find((item) => state.ticketRuns?.[item.id]?.status !== "done");
       if (!ticket) return { kind: "done" };
       const run = state.ticketRuns?.[ticket.id];
-      if (run && run.attempts > 0 && run.status === "failed" && (await dirtyPaths(ctx)).length > 0) {
+      // A ticket the review failed is not settled by passing checks: it goes to a stronger model, not to a commit.
+      if (run && run.attempts > 0 && run.status === "failed" && run.failedBy !== "review" && (await dirtyPaths(ctx)).length > 0) {
         ctx.progress?.(`Ticket ${ticket.id}: re-running checks on the changes in the tree`);
-        const settled = await settle(ctx, state, ticket, run.summary ?? "", false);
-        if (settled.kind === "committed") {
-          await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, status: "done", error: undefined, commit: settled.sha }));
-          ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes · committed ${settled.sha.slice(0, 7)}`);
-          if (settled.warning) ctx.notify(settled.warning);
-          continue;
+        const began = iso(ctx);
+        // Nobody can say which model wrote a hand fix: the review runs without an implementer, and no model metric moves.
+        const handFixed: TicketRun = { ...run, provider: undefined, model: undefined };
+        const settled = await settle(ctx, state, ticket, run.summary ?? "", false, () => reviewTicket(ctx, state, ticket, handFixed));
+        if (settled.kind === "committed" || settled.kind === "review-failed") {
+          const spent = ticketSpend(ctx, state.taskId, ticket.id, began);
+          const elapsed = Math.max(0, ctx.now().getTime() - new Date(began).getTime());
+          const { total, ...split } = spent;
+          const accrue = (previous: TicketRun): TicketRun => ({ ...previous, elapsedMs: (previous.elapsedMs ?? 0) + elapsed, costUsd: addUsd(previous.costUsd, total), costSplit: addSplit(previous.costSplit, split) });
+          const entry = (previous: TicketRun, outcome: TicketAttempt["outcome"], failedBy?: TicketAttempt["failedBy"], error?: string): TicketAttempt => ({ ...attempt(previous, began, elapsed, spent, outcome, failedBy, error), provider: "", model: "hand fix" });
+          if (settled.kind === "committed") {
+            await patch(ctx, state.taskId, ticket, (previous) => {
+              const next = accrue(previous);
+              return { ...next, status: "done", error: undefined, failedBy: undefined, commit: settled.sha, attemptLog: [...(next.attemptLog ?? []), entry(next, "success")] };
+            });
+            logTicket(ctx, state.taskId, ticket.id);
+            ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes · committed ${settled.sha.slice(0, 7)}`);
+            if (settled.warning) ctx.notify(settled.warning);
+            continue;
+          }
+          // The review failed the hand fix: the ticket stays failed and the next model attempt gets the findings.
+          const reason = reviewFailureDetail(settled.record);
+          await patch(ctx, state.taskId, ticket, (previous) => {
+            const next = accrue(previous);
+            return { ...next, status: "failed", failedBy: "review", error: clip(reason), attemptLog: [...(next.attemptLog ?? []), entry(next, "failure", "review", reason)] };
+          });
+          editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "failed"));
+          logTicket(ctx, state.taskId, ticket.id);
+          ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes, but the review failed them; the next attempt gets its findings`);
+          return await prepare(ctx, ctx.store.load(state.taskId) ?? state, ticket);
         }
         // The failure text goes to the next model.
-        await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
+        if (settled.kind === "failed") await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
       }
       return await prepare(ctx, state, ticket);
     }
@@ -321,17 +372,41 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
   }
 }
 
-/** Routes the ticket (tier hint, one tier up after a failure), gates the budget, builds the prompt, and marks the ticket running. */
+/** The ticket tier a first attempt starts on: its difficulty, and at least ticketHigh in a security-sensitive plan. */
+function startTier(state: TaskState, ticket: Ticket): TicketTier {
+  const tier = DIFFICULTY_TIER[ticketDifficulty(ticket)];
+  return state.plan?.securitySensitive ? "ticketHigh" : tier;
+}
+
+/** Routes the ticket (its difficulty tier, one step up the ticket ladder after a failure), gates the budget, builds the prompt, and marks the ticket running. */
 async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): Promise<NextChunk> {
   const run = state.ticketRuns?.[ticket.id];
   const budget = budgetState(ctx, state.taskId);
   if (budget.status === "hard") return { kind: "stopped", code: "BUDGET", reason: "Task or daily budget is exhausted; no further ticket was started. /build resumes after the budget is raised." };
   if (budget.status === "soft") warnSoft(ctx, state.taskId);
-  const failedTier: Tier | undefined = run?.status === "failed" ? run.tier : undefined;
+  // The tier the ticket is on: the latest attempt's, whatever its status. A failed one escalates from it; an aborted or
+  // in-progress one resumes on it (no escalation, no reset to the start tier).
+  const attempted = run && run.attempts > 0 ? (run.tier ?? run.attemptLog?.at(-1)?.tier) : undefined;
+  const failedTier: Tier | undefined = run?.status === "failed" ? attempted : undefined;
+  const resumeTier: Tier | undefined = run?.status === "failed" ? undefined : attempted;
+  if (attempted) {
+    // routing.maxEscalations: how many tiers a ticket may climb from the one its difficulty starts on.
+    const from = TICKET_LADDER.indexOf(startTier(state, ticket));
+    const at = Math.max(TICKET_LADDER.indexOf(attempted), ...(run?.attemptLog ?? []).map((item) => TICKET_LADDER.indexOf(item.tier)));
+    const climbed = from >= 0 && at >= 0 ? Math.max(0, at - from) : (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
+    const limit = ctx.config.routing.maxEscalations;
+    if (failedTier && climbed >= limit) {
+      return {
+        kind: "stopped",
+        code: "MAX_ESCALATIONS",
+        reason: `Ticket ${ticket.id} is still failing on ${failedTier} after climbing ${climbed} tier(s) from ${startTier(state, ticket)} (routing.maxEscalations is ${limit}), so it stays failed and the build stops. Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.`,
+      };
+    }
+  }
   const escalations = (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
   const classification = state.classification!;
   // A tier with no model cannot run a chunk, so it moves up one tier (as ticket-run did).
-  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, tierHint: failedTier ? undefined : ticket.suggestedTier, strictAvailability: true });
+  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(state, ticket), strictAvailability: true });
   if (decision.provider === "none" && !decision.blocked) {
     decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }
@@ -350,7 +425,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     ctx,
     state.taskId,
     ticket,
-    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: previous.attempts + 1, error: undefined, startedAt: previous.startedAt ?? now }),
+    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: previous.attempts + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: previous.startedAt ?? now }),
     (build) => ({ ...build, currentTicket: ticket.id, chunkStartedAt: now }),
   );
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));
@@ -368,9 +443,11 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
 // finishChunk
 
 /**
- * Settles one chunk. Aborted: the ticket stays in-progress. Otherwise the checks run; on a pass the tree is committed
- * and the ticket is done. A failure returns `retry` once (not `final`) so the same session can fix it, then fails the
- * ticket. A check that cannot run, or a failing setup, stops the ticket with no strike against the model.
+ * Settles one chunk. Aborted: the ticket stays in-progress. Otherwise the checks run, then the ticket's review; on a
+ * pass the tree is committed and the ticket is done. A check failure returns `retry` once (not `final`) so the same
+ * session can fix it, then fails the ticket; a failed review does the same with its own counter (the reviews already
+ * stored for this attempt). A check that cannot run, or a failing setup, stops the ticket with no strike against the
+ * model. A review that is unavailable commits with a warning.
  */
 export async function finishChunk(ctx: WorkflowContext, ticketId: string, result: { lastText: string; aborted: boolean }, options: { final?: boolean } = {}): Promise<ChunkFinish> {
   try {
@@ -379,41 +456,130 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
     if (!ticket || !state.build) return { kind: "stopped", code: "NOT_STARTED", reason: `Ticket ${ticketId} is not part of a running build.` };
     const run = state.ticketRuns?.[ticketId] ?? BLANK;
     const startedAt = state.build.chunkStartedAt ?? iso(ctx);
-    const elapsed = Math.max(0, ctx.now().getTime() - new Date(startedAt).getTime());
-    const spent = ticketSpend(ctx, state.taskId, ticketId, startedAt);
-    const accrue = (previous: TicketRun): TicketRun => ({ ...previous, elapsedMs: (previous.elapsedMs ?? 0) + elapsed, costUsd: addUsd(previous.costUsd, spent), summary: result.lastText ? clip(redact(result.lastText)) : previous.summary });
+    const measure = () => ({ elapsed: Math.max(0, ctx.now().getTime() - new Date(startedAt).getTime()), spent: ticketSpend(ctx, state.taskId, ticketId, startedAt) });
+    const accrue = (previous: TicketRun, m: ReturnType<typeof measure>): TicketRun => {
+      const { total, ...split } = m.spent;
+      return { ...previous, elapsedMs: (previous.elapsedMs ?? 0) + m.elapsed, costUsd: addUsd(previous.costUsd, total), costSplit: addSplit(previous.costSplit, split), summary: result.lastText ? clip(redact(result.lastText)) : previous.summary };
+    };
     const release = (build: BuildRecord): BuildRecord => ({ ...build, currentTicket: undefined, chunkStartedAt: undefined });
 
     if (result.aborted) {
-      await patch(ctx, state.taskId, ticket, (previous) => ({ ...accrue(previous), status: "in-progress" }), release);
+      const m = measure();
+      await patch(ctx, state.taskId, ticket, (previous) => ({ ...accrue(previous, m), status: "in-progress" }), release);
       return { kind: "stopped", code: "ABORTED", reason: `Stopped while ticket ${ticketId} was running. It stays in progress; /build resumes it.` };
     }
 
-    const settled = await settle(ctx, state, ticket, result.lastText, true);
+    const settled = await settle(ctx, state, ticket, result.lastText, true, () => reviewTicket(ctx, state, ticket, run));
     if (settled.kind === "committed") {
+      const m = measure();
       await patch(ctx, state.taskId, ticket, (previous) => {
-        const next = accrue(previous);
-        return { ...next, status: "done", error: undefined, commit: settled.sha, attemptLog: [...(next.attemptLog ?? []), attempt(next, ticket, startedAt, elapsed, spent, "success")] };
+        const next = accrue(previous, m);
+        return { ...next, status: "done", error: undefined, failedBy: undefined, commit: settled.sha, attemptLog: [...(next.attemptLog ?? []), attempt(next, startedAt, m.elapsed, m.spent, "success")] };
       }, release);
-      return { kind: "committed", sha: settled.sha, elapsedMs: elapsed, costUsd: addUsd(run.costUsd ?? 0, spent), ...(settled.warning ? { warning: settled.warning } : {}) };
+      logTicket(ctx, state.taskId, ticketId);
+      const done = ctx.store.load(state.taskId)?.ticketRuns?.[ticketId];
+      return { kind: "committed", sha: settled.sha, elapsedMs: done?.elapsedMs ?? m.elapsed, costUsd: done?.costUsd ?? m.spent.total, costSplit: done?.costSplit ?? { implementer: m.spent.implementer, review: m.spent.review, advisors: m.spent.advisors }, ...(done?.reviews?.length ? { review: reviewLabel(done) } : {}), ...(settled.warning ? { warning: settled.warning } : {}) };
     }
 
-    if (settled.verdict === "failed" && !options.final) {
-      return { kind: "retry", text: `The checks failed:\n\n${settled.detail}\n\nFix it; do not commit.` };
+    if (settled.kind === "review-failed" && !settled.final) {
+      return { kind: "retry", reason: "review", text: settled.text };
     }
-    const reason = settled.verdict === "setup" ? `Setup failed, so the checks did not run:\n${settled.detail}` : settled.verdict === "unrunnable" ? `A check could not run:\n${settled.detail}\nFix the plan's checks (a command that exists and is not destructive), then run /build again.` : `Checks failed after a retry:\n${settled.detail}`;
+    if (settled.kind === "failed" && settled.verdict === "failed" && !options.final) {
+      return { kind: "retry", reason: "checks", text: `The checks failed:\n\n${settled.detail}\n\nFix it; do not commit.` };
+    }
+    const failedBy: NonNullable<TicketRun["failedBy"]> = settled.kind === "review-failed" ? "review" : settled.verdict === "failed" ? "checks" : settled.verdict;
+    const reason =
+      settled.kind === "review-failed"
+        ? reviewFailureDetail(settled.record)
+        : settled.verdict === "setup"
+          ? `Setup failed, so the checks did not run:\n${settled.detail}`
+          : settled.verdict === "unrunnable"
+            ? `A check could not run:\n${settled.detail}\nFix the plan's checks (a command that exists and is not destructive), then run /build again.`
+            : `Checks failed after a retry:\n${settled.detail}`;
+    const m = measure();
     await patch(ctx, state.taskId, ticket, (previous) => {
-      const next = accrue(previous);
-      return { ...next, status: "failed", error: clip(reason), attemptLog: [...(next.attemptLog ?? []), attempt(next, ticket, startedAt, elapsed, spent, "failure", reason)] };
+      const next = accrue(previous, m);
+      return { ...next, status: "failed", failedBy, error: clip(reason), attemptLog: [...(next.attemptLog ?? []), attempt(next, startedAt, m.elapsed, m.spent, "failure", failedBy, reason)] };
     }, release);
     editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "failed"));
+    logTicket(ctx, state.taskId, ticketId);
     // Only a model-attributable failure counts against the model: a check that cannot run, or a broken setup, is not its fault.
-    if (settled.verdict === "failed") {
+    if (failedBy === "checks" || failedBy === "review") {
       await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run.tier ?? "standard", false, ctx.now(), run.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
     }
-    return { kind: "stopped", code: settled.verdict === "failed" ? "CHECKS_FAILED" : "CHECKS_UNRUNNABLE", reason: `Ticket ${ticketId} failed. ${reason.split("\n")[0]} Fix it in the chat and run /build again, or just run /build to retry on a stronger model.` };
+    const stop = failedBy === "review" ? { code: "REVIEW_FAILED", head: `Ticket ${ticketId} failed its review at ${run.tier ?? "this tier"} after a retry.` } : { code: failedBy === "checks" ? "CHECKS_FAILED" : "CHECKS_UNRUNNABLE", head: `Ticket ${ticketId} failed. ${reason.split("\n")[0]}` };
+    return { kind: "stopped", code: stop.code, reason: `${stop.head} Fix it in the chat and run /build again, or just run /build to retry on a stronger model.` };
   } catch (error) {
     return { kind: "stopped", code: (error as { code?: string }).code ?? "ERROR", reason: redact((error as Error).message || "Could not finish the ticket.") };
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// labels and the per-ticket log
+
+/** "gpt-6-astra" -> "Astra", "claude-fable-5-1" -> "Fable": the model's name without the vendor prefix and version numbers. */
+export function shortModel(model: string): string {
+  const words = model.split(/[-_/]/).filter((word) => word && !/^[\d.]+$/.test(word) && !["claude", "gpt"].includes(word.toLowerCase()));
+  const name = words.length > 0 ? words.join(" ") : model;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+const ordinal = (n: number) => (n === 1 ? "1st" : n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`);
+
+/** The review in one phrase: "pass (2nd) · Astra", "fail", "unavailable", or "-" with no review. */
+export function reviewLabel(run: TicketRun | undefined): string {
+  const last = run?.reviews?.[run.reviews.length - 1];
+  if (!last) return "-";
+  const advisors = last.advisors.filter((item) => !item.error).map((item) => shortModel(item.model));
+  const verdict = last.verdict === "unavailable" ? "unavailable" : last.round > 1 ? `${last.verdict} (${ordinal(last.round)})` : last.verdict;
+  return [verdict, ...(advisors.length ? [advisors.join(", ")] : [])].join(" · ");
+}
+
+const usdCell = (value: number | null | undefined) => (value === undefined ? "-" : formatUsd(value));
+
+/** "$0.42 (impl $0.02 · review $0.30 · advisors $0.10)"; just the total when no review ran. */
+export function costLabel(run: TicketRun | undefined): string {
+  if (!run) return "-";
+  if (!run.reviews?.length || !run.costSplit) return formatUsd(run.costUsd);
+  return `${formatUsd(run.costUsd)} (impl ${usdCell(run.costSplit.implementer)} · review ${usdCell(run.costSplit.review)} · advisors ${usdCell(run.costSplit.advisors)})`;
+}
+
+/**
+ * Appends one line to `.pi-workflows/metrics/tickets.jsonl` when a ticket finishes, done or failed: its difficulty, the
+ * implementers tried, how the review went, what it cost by who incurred it (null where unknown), and the time. Append
+ * only: the file is history, a ticket that fails and later succeeds on a stronger model has a line for each.
+ */
+function logTicket(ctx: WorkflowContext, taskId: string, ticketId: string): void {
+  try {
+    const state = ctx.store.load(taskId);
+    const run = state?.ticketRuns?.[ticketId];
+    const ticket = state?.plan?.tickets?.find((item) => item.id === ticketId);
+    if (!state || !run || !ticket) return;
+    const reviews = run.reviews ?? [];
+    const last = reviews[reviews.length - 1];
+    const answered = new Set<string>();
+    for (const item of reviews) for (const advisor of item.advisors) if (!advisor.error) answered.add(`${advisor.provider}/${advisor.model}`);
+    const split = run.costSplit ?? { implementer: run.costUsd, review: 0, advisors: 0 };
+    ctx.store.appendTicketLog({
+      at: iso(ctx),
+      taskId,
+      ticket: ticketId,
+      title: ticket.title,
+      difficulty: ticketDifficulty(ticket),
+      implementers: (run.attemptLog ?? []).map((item) => ({ tier: item.tier, provider: item.provider, model: item.model, outcome: item.outcome, ...(item.failedBy ? { failedBy: item.failedBy } : {}) })),
+      review: {
+        passes: reviews.filter((item) => item.verdict === "pass").length,
+        fails: reviews.filter((item) => item.verdict === "fail").length,
+        unavailable: reviews.filter((item) => item.verdict === "unavailable").length,
+        advisors: [...answered],
+        finalVerdict: last?.verdict ?? "none",
+        rationale: (last?.rationale ?? "").slice(0, 500),
+      },
+      costUsd: { implementer: split.implementer, review: split.review, advisors: split.advisors, total: run.costUsd },
+      elapsedMs: run.elapsedMs ?? 0,
+    });
+  } catch {
+    // The log is a convenience; losing a line must not fail the ticket.
   }
 }
 
@@ -428,11 +594,15 @@ export function buildReport(ctx: WorkflowContext, stopped?: string): string {
     const run = state.ticketRuns?.[ticket.id];
     const model = run?.provider && run.model ? `${run.provider}/${run.model}` : "-";
     const result = run?.status === "done" ? `done${run.commit ? ` ${run.commit.slice(0, 7)}` : ""}` : run?.status === "failed" ? "failed" : run && run.attempts > 0 ? "in progress" : "pending";
-    return `| ${ticket.id} | ${ticket.title.replace(/\|/g, "/")} | ${model} | ${run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"} | ${run ? formatUsd(run.costUsd) : "-"} | ${result} |`;
+    return `| ${ticket.id} | ${ticket.title.replace(/\|/g, "/")} | ${ticketDifficulty(ticket)} | ${model} | ${reviewLabel(run)} | ${run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"} | ${costLabel(run)} | ${result} |`;
+  });
+  const unreviewed = tickets.flatMap((ticket) => {
+    const last = state.ticketRuns?.[ticket.id]?.reviews?.at(-1);
+    return last?.verdict === "unavailable" && state.ticketRuns?.[ticket.id]?.status === "done" ? [`- Ticket ${ticket.id} was committed without its review: ${last.rationale}`] : [];
   });
   const finished = tickets.every((ticket) => state.ticketRuns?.[ticket.id]?.status === "done");
   const next = finished ? "Next: /review to check the branch, then push and open the PR yourself (git push, then origin pr create or gh pr create)." : `Next: ${stopped ?? "run /build to continue."} /build resumes from here.`;
-  return [`### Build${state.build ? ` · ${state.build.branch}` : ""}`, "", "| Ticket | Title | Model | Time | Cost | Result |", "| --- | --- | --- | --- | --- | --- |", ...rows, "", next].join("\n");
+  return [`### Build${state.build ? ` · ${state.build.branch}` : ""}`, "", "| Ticket | Title | Difficulty | Model | Review | Time | Cost | Result |", "| --- | --- | --- | --- | --- | --- | --- | --- |", ...rows, ...(unreviewed.length ? ["", ...unreviewed] : []), "", next].join("\n");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -484,10 +654,13 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
       running = chunk.ticket.id;
       await driver.fresh(chunk.model, async (session) => {
         let reply = await session.send(chunk.prompt);
+        // The check retry and the review retry are separate: each is offered once, so at most two retry turns follow.
+        let checksRetried = false;
         let finish = await getWorkflow().finishChunk(chunk.ticket.id, reply);
-        if (finish.kind === "retry") {
+        while (finish.kind === "retry") {
+          if (finish.reason === "checks") checksRetried = true;
           reply = await session.send(finish.text);
-          finish = await getWorkflow().finishChunk(chunk.ticket.id, reply, { final: true });
+          finish = await getWorkflow().finishChunk(chunk.ticket.id, reply, { final: checksRetried });
         }
         outcome = finish;
       });
@@ -500,7 +673,8 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
       }
       if (result.kind === "committed") {
         built += 1;
-        workflow.progress(`Ticket ${chunk.ticket.id} · ${chunk.model.provider}/${chunk.model.id} · ${formatDuration(workflow.now().getTime() - began)} · ${formatUsd(result.costUsd)} · checks passed · committed ${result.sha.slice(0, 7)}`);
+        const split = result.review ? ` (impl ${usdCell(result.costSplit.implementer)} · review ${usdCell(result.costSplit.review)} · advisors ${usdCell(result.costSplit.advisors)})` : "";
+        workflow.progress(`Ticket ${chunk.ticket.id} · ${ticketDifficulty(chunk.ticket)} · ${chunk.model.provider}/${chunk.model.id} · ${formatDuration(workflow.now().getTime() - began)} · ${formatUsd(result.costUsd)}${split} · checks passed${result.review ? ` · review ${result.review}` : ""} · committed ${result.sha.slice(0, 7)}`);
         if (result.warning) workflow.progress(result.warning);
         continue;
       }

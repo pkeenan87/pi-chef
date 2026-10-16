@@ -188,7 +188,7 @@ describe("plan tool restore", () => {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     const appended: { type: string; data: unknown }[] = [];
     const pi = {
-      registerCommand() {}, registerVirtualModel() {}, registerTool() {}, sendUserMessage() {},
+      registerCommand() {}, registerTool() {}, sendUserMessage() {},
       on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => void handlers.set(event, handler),
       appendEntry: (type: string, data: unknown) => void appended.push({ type, data }),
       getActiveTools: () => active,

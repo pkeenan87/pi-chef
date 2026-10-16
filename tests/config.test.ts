@@ -8,6 +8,7 @@ import {
   loadConfig,
   parseConfig,
   priceFor,
+  tierCandidates,
   toMicroUsd,
   type PricingRow,
 } from "../src/config.js";
@@ -25,14 +26,28 @@ providers:
 
 describe("parseConfig validation", () => {
   it.each([
-    ["routing:\n  minConfidence: 1.5\n", /routing\.minConfidence/],
-    ["routing:\n  minConfidence: -0.1\n", /routing\.minConfidence/],
     ["routing:\n  maxEscalations: -1\n", /routing\.maxEscalations/],
     ["routing:\n  maxEscalations: 1.5\n", /routing\.maxEscalations/],
     ["routing:\n  maxTier: ultra\n", /routing\.maxTier/],
+    ["advisors:\n  timeoutMs: 10\n", /advisors\.timeoutMs/],
+    ["advisors:\n  maxDiffChars: 1.5\n", /advisors\.maxDiffChars/],
+    ["advisors:\n  maxOutputTokens: 0\n", /advisors\.maxOutputTokens/],
+    ["advisors:\n  tickets: yes please\n", /advisors\.tickets/],
+    ["advisors:\n  plan: sure\n", /advisors\.plan/],
+    ["advisors:\n  adHocMinLines: -1\n", /advisors\.adHocMinLines/],
+    ["advisors:\n  summarizeCut: 1\n", /advisors\.summarizeCut/],
+    ["advisors: 3\n", /advisors/],
+    ["session:\n  model: opus\n", /session\.model/],
+    ["session:\n  model: anthropic/\n", /session\.model/],
+    ["session:\n  pin: maybe\n", /session\.pin/],
+    ["session:\n  compactionTier: ticketLow\n", /session\.compactionTier/],
+    ["routing:\n  reviewTier: classifier\n", /routing\.reviewTier/],
+    ["tiers:\n  ticketLow: []\n", /tiers\.ticketLow/],
+    ["tiers:\n  ticketExtra:\n    - { provider: local, model: m }\n", /tiers\.ticketExtra/],
     ["budgets:\n  taskUsd: 0\n", /budgets\.taskUsd/],
     ["budgets:\n  dailyUsd: -5\n", /budgets\.dailyUsd/],
     ["budgets:\n  softWarningRatio: 2\n", /budgets\.softWarningRatio/],
+    ["budgets:\n  unknownCallUsd: -0.01\n", /budgets\.unknownCallUsd/],
     ["models:\n  cheap: nowhere\n", /models\.cheap/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: '2026-01-01', inputPerMillionUsd: -1, outputPerMillionUsd: 1 }\n", /inputPerMillionUsd/],
     ["pricing:\n  - { provider: local, model: m, effectiveFrom: 'soon', inputPerMillionUsd: 1, outputPerMillionUsd: 1 }\n", /effectiveFrom/],
@@ -48,13 +63,13 @@ describe("parseConfig validation", () => {
   });
 
   it("rejects a tier whose provider is missing or has no model name", () => {
-    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
-    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { classifier: local, cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
+    expect(() => parseConfig(`${PROVIDERS_BLOCK.replace("model: gpt-5.4", "")}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`)).toThrow(/providers\.openai\.model/);
+    expect(() => parseConfig("providers:\n  local: { type: x, model: m }\nmodels: { cheap: foundry, standard: local, premium: local }\n")).toThrow(/models\.cheap/);
   });
 
   it("accepts valid boundaries and normalizes dates", () => {
     const config = parseConfig(`${PROVIDERS_BLOCK}
-models: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }
+models: { cheap: foundry, standard: anthropic, premium: openai }
 routing: { minConfidence: 0, maxEscalations: 0, maxTier: standard }
 budgets: { softWarningRatio: 1 }
 workers: { tokenBudget: 1 }
@@ -63,6 +78,33 @@ pricing:
 `);
     expect(config.routing.maxTier).toBe("standard");
     expect(config.pricing[0].effectiveFrom).toBe("2026-01-05");
+  });
+
+  it("defaults the session, compaction and review tiers and the escalation count, and accepts the ticket tiers", () => {
+    const config = parseConfig(`${PROVIDERS_BLOCK}
+tiers:
+  ticketLow:
+    - { provider: local, model: m }
+  ticketMedium:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+  ticketHigh:
+    - { provider: openai, model: gpt-6.1-sol }
+session: { compactionTier: standard }
+`);
+    expect(config.routing).toMatchObject({ reviewTier: "premium", maxEscalations: 3 });
+    expect(config.session).toEqual({ model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "standard" });
+    expect(tierCandidates(config, "ticketLow")).toEqual([expect.objectContaining({ provider: "local", model: "m" })]);
+    expect(tierCandidates(config, "ticketHigh")[0]!.model).toBe("gpt-6.1-sol");
+  });
+
+  it("loads the old routing.sessionTier and routing.directTier with one warning each", () => {
+    const config = parseConfig("routing:\n  sessionTier: premium\n  directTier: cheap\n  maxEscalations: 2\n");
+    expect(config.routing.maxEscalations).toBe(2);
+    expect(config.routing).not.toHaveProperty("sessionTier");
+    expect(config.routing).not.toHaveProperty("directTier");
+    expect(config.warnings).toHaveLength(2);
+    expect(config.warnings![0]).toMatch(/routing\.sessionTier is no longer used.*session\.model/);
+    expect(config.warnings![1]).toMatch(/routing\.directTier is no longer used.*session\.compactionTier/);
   });
 
   it("does not flag the repo config", () => {
@@ -102,7 +144,30 @@ describe("loadConfig layering", () => {
     process.env.HOME = priorHome;
   });
 
-  const base = `${PROVIDERS_BLOCK}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`;
+  const base = `${PROVIDERS_BLOCK}\nmodels: { cheap: foundry, standard: anthropic, premium: openai }\n`;
+
+  it("old configs without ticket tiers use cheap, standard and premium for low, medium and high, with a warning", () => {
+    writeProject(`${base}tiers:
+  cheap:
+    - { provider: local, model: m }
+  standard:
+    - { provider: anthropic, model: claude-sonnet }
+  premium:
+    - { provider: openai, model: gpt-5.4 }
+`);
+    const config = loadConfig(project);
+    const models = (tier: "ticketLow" | "ticketMedium" | "ticketHigh") => tierCandidates(config, tier).map((item) => item.model);
+    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["m"], ["claude-sonnet"], ["gpt-5.4"]]);
+    expect(config.warnings?.join("\n")).toMatch(/ticketLow\/ticketMedium\/ticketHigh not set: \/build uses cheap, standard and premium/);
+    // With all three set, there is nothing to warn about.
+    writeProject(`${base}tiers:
+  cheap: [{ provider: local, model: m }]
+  ticketLow: [{ provider: local, model: m }]
+  ticketMedium: [{ provider: anthropic, model: claude-sonnet }]
+  ticketHigh: [{ provider: openai, model: gpt-5.4 }]
+`);
+    expect(loadConfig(project).warnings ?? []).toEqual([]);
+  });
 
   it("an old commandAllowlist key loads with a warning, from either file", () => {
     writeUser(`${base}commandAllowlist: ["npm test"]\n`);
@@ -167,10 +232,10 @@ describe("loadConfig layering", () => {
   });
 
   it("deep-merges sections, takes min budgets, and never lets the project relax approvals", () => {
-    writeUser(`${base}routing: { minConfidence: 0.9, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
+    writeUser(`${base}routing: { maxTier: standard, maxEscalations: 3 }\nbudgets: { taskUsd: 5, dailyUsd: 100 }\nworkers: { ticketContextTokens: 50000, tokenBudget: 1000 }\n`);
     writeProject("routing: { maxEscalations: 1 }\nbudgets: { taskUsd: 50, dailyUsd: 10 }\nworkers: { ticketContextTokens: 60000 }\napprovals: { merge: manual }\n");
     const config = loadConfig(project);
-    expect(config.routing.minConfidence).toBe(0.9);
+    expect(config.routing.maxTier).toBe("standard");
     expect(config.routing.maxEscalations).toBe(1);
     expect(config.budgets.taskUsd).toBe(5);
     expect(config.budgets.dailyUsd).toBe(10);
@@ -203,7 +268,7 @@ describe("loadConfig layering", () => {
     writeUser("providers:\n  anthropic:\n    apiKeyFallback: true\n");
     // No project file: nothing is configured, as with no config at all.
     expect(loadConfig(project).providers).toEqual({});
-    writeProject("providers:\n  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }\nmodels: { classifier: anthropic, cheap: anthropic, standard: anthropic, premium: anthropic }\n");
+    writeProject("providers:\n  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }\nmodels: { cheap: anthropic, standard: anthropic, premium: anthropic }\n");
     expect(loadConfig(project).providers.anthropic).toMatchObject({ type: "anthropic", apiKeyFallback: true });
   });
 
@@ -229,7 +294,7 @@ describe("loadConfig layering", () => {
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, baseUrl: "https://ai-gateway.vercel.sh/v1", projectDir: "." }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: m }
   foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", deployments: { cheap: c, reasoning: r } }
-models: { classifier: local, cheap: local, standard: local, premium: local }
+models: { cheap: local, standard: local, premium: local }
 `);
     const config = loadConfig(project);
     expect(config.providers.vercel?.baseUrl).toBe("https://ai-gateway.vercel.sh/v1");

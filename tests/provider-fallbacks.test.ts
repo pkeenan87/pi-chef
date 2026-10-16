@@ -93,7 +93,7 @@ providers:
   anthropic: { type: anthropic, auth: account-login, model: claude-sonnet-5-5 }
   xai: { type: xai, auth: account-login }
   foundry: { type: azure-foundry, auth: azure-cli, endpointEnv: AZURE_AI_ENDPOINT }
-models: { classifier: openai, cheap: openai, standard: anthropic, premium: openai }
+models: { cheap: openai, standard: anthropic, premium: openai }
 tiers:
   standard:
     - { provider: anthropic, model: claude-sonnet-5-5 }
@@ -111,25 +111,25 @@ pricing:
     risk: "low",
     recommended_tier: "standard",
     required_capabilities: [],
-    confidence: 0.9,
     reason_codes: [],
-    source: "model",
-  } as never;
+    source: "planner",
+  };
   const availability = { anthropic: { ok: false, detail: "blocked: API key" }, foundry: { ok: false, detail: "missing: az login" }, openai: { ok: true } };
 
   it("skips a tier with no signed-in provider and moves up", () => {
-    const decision = decideRoute(classification, config, {}, { purpose: "implement", tierHint: "standard", availability, strictAvailability: true, rng: () => 0.5 });
-    expect(decision).toMatchObject({ tier: "premium", provider: "openai", model: "gpt-6.1-sol" });
-    expect(decision.reason.join(" ")).toContain("escalated_from_standard_unavailable");
+    const decision = decideRoute(classification, config, {}, { purpose: "implement", ticketTier: "ticketMedium", availability, strictAvailability: true, rng: () => 0.5 });
+    // This config lists no ticket tiers, so they fall back to standard and premium.
+    expect(decision).toMatchObject({ tier: "ticketHigh", provider: "openai", model: "gpt-6.1-sol" });
+    expect(decision.reason.join(" ")).toContain("escalated_from_ticketMedium_unavailable");
   });
 
   it("still falls back to an unavailable provider for interactive routing", () => {
-    const decision = decideRoute(classification, config, {}, { purpose: "implement", tierHint: "standard", availability, rng: () => 0.5 });
-    expect(decision.tier).toBe("standard");
+    const decision = decideRoute(classification, config, {}, { purpose: "implement", ticketTier: "ticketMedium", availability, rng: () => 0.5 });
+    expect(decision.tier).toBe("ticketMedium");
   });
 
   it("uses a provider the user allowed once it is signed in", () => {
-    const decision = decideRoute(classification, config, {}, { purpose: "implement", tierHint: "standard", availability: { ...availability, anthropic: { ok: true } }, strictAvailability: true, rng: () => 0.5 });
-    expect(decision).toMatchObject({ tier: "standard", provider: "anthropic" });
+    const decision = decideRoute(classification, config, {}, { purpose: "implement", ticketTier: "ticketMedium", availability: { ...availability, anthropic: { ok: true } }, strictAvailability: true, rng: () => 0.5 });
+    expect(decision).toMatchObject({ tier: "ticketMedium", provider: "anthropic" });
   });
 });

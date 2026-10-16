@@ -2,10 +2,8 @@ import type { WorkflowConfig } from "../config.js";
 import type { ProviderId } from "../domain.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
-import type { DecisionsClient } from "../providers/clients.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import type { CheckRunner } from "../review/review.js";
-import type { Classifier } from "../router/classify.js";
 import type { TaskStore } from "../storage/store.js";
 
 export interface WorkflowBinding {
@@ -51,15 +49,12 @@ export interface WorkflowOptions {
   now?: () => Date;
   id?: () => string;
   auth: AuthProbe;
-  classifier?: Classifier;
   git?: GitWorkspace;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
   progress?: (message: string) => void;
   report?: (markdown: string) => void;
   runner?: CheckRunner;
-  /** Decisions-API classifiers by provider (foundry, vercel). Preferred over `classifier` when the tier selects one. */
-  deciders?: Partial<Record<ProviderId, DecisionsClient>>;
   chat?: ChatFn;
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;

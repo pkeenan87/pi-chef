@@ -2,8 +2,10 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../orchestrator/service.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown } from "../orchestrator/tickets.js";
-import { TIERS, type Ticket } from "../domain.js";
+import { DIFFICULTIES, TIERS, type Ticket } from "../domain.js";
 import type { PlanReviewAction } from "../orchestrator/types.js";
+import { consultResultText } from "../orchestrator/plan-consult.js";
+import { isSecuritySensitive } from "../router/classify.js";
 import { reviewPlan } from "./plan-review.js";
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
@@ -30,6 +32,10 @@ export const PlanSpecParams = Type.Object({
   outOfScope: Type.Array(Type.String()),
   risks: Type.Array(Type.String()),
   verification: Type.Array(Type.String(), { description: "Tests to add and commands to run to prove the change works end to end" }),
+  complexity: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "How hard the whole task is" }),
+  risk: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "How much it could break production behavior" }),
+  securitySensitive: Type.Boolean({ description: "True when it touches authentication, authorization, secrets, credentials, permissions or production deployment. A keyword scan of the request and spec can raise this, never lower it." }),
+  classificationReason: Type.String({ description: "One short sentence on why you rated it this way" }),
 });
 
 export function createPlanSpecTool(getWorkflow: () => Workflow | undefined) {
@@ -37,14 +43,16 @@ export function createPlanSpecTool(getWorkflow: () => Workflow | undefined) {
     name: "plan_spec",
     label: "Plan Spec",
     description:
-      "Save the technical plan for the task being planned: summary, current context, approach (design, types, signatures), the files to change, what to reuse, decisions, assumptions, out of scope, risks, and verification. Call after the interview (again during ticket review to revise it). Only usable while /plan is running.",
+      "Save the technical plan for the task being planned: summary, current context, approach (design, types, signatures), the files to change, what to reuse, decisions, assumptions, out of scope, risks, verification, and your rating of the task (complexity, risk, securitySensitive, classificationReason). Call after the interview (again during ticket review to revise it). Only usable while /plan is running.",
     promptSnippet: "plan_spec: save the planning spec",
     parameters: PlanSpecParams,
     async execute(_id, params) {
       const workflow = getWorkflow();
       if (!workflow) throw new Error("The cost workflow is not available.");
       const saved = await workflow.savePlanSpec(params);
-      return text(`Spec saved to ${saved.file}. Now call plan_tickets.`, { file: saved.file });
+      const rated = saved.classification;
+      const rating = `Rated ${rated.complexity} complexity, ${rated.risk} risk${isSecuritySensitive(rated) ? ", security-sensitive" : ""}${saved.keywordRaised ? " (the keyword scan marked it security-sensitive; you cannot lower that)" : ""}.`;
+      return text(`Spec saved to ${saved.file}. ${rating} Now draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the answers, then call plan_tickets.`, { file: saved.file, classification: rated });
     },
   });
 }
@@ -61,13 +69,42 @@ export const PlanTicketsParams = Type.Object({
       }),
       acceptanceCriteria: Type.Array(Type.String(), { description: "At least one checkable criterion" }),
       blockedBy: Type.Array(Type.String(), { description: "Ids of tickets that must finish first" }),
-      suggestedTier: Type.Optional(Type.String({ description: `One of: ${TIERS.join(", ")}` })),
+      difficulty: Type.Optional(Type.String({ description: `One of: ${DIFFICULTIES.join(", ")}. Picks the model: low is mechanical or small and well specified; medium is typical feature work; high is cross-cutting, tricky logic, concurrency, security, or a large blast radius.` })),
+      suggestedTier: Type.Optional(Type.String({ description: `Old plans only; use difficulty. One of: ${TIERS.filter((tier) => tier !== "batch").join(", ")}` })),
       files: Type.Optional(Type.Array(Type.String(), { description: "Files this ticket touches (ownership hints; overlapping tickets run one after another)" })),
       estimatedContextTokens: Type.Number({ description: "Your estimate of the tokens one fresh context needs for this ticket" }),
       checks: Type.Optional(Type.Array(Type.String(), { description: "Shell command lines the parent runs after the ticket, one command per entry (for example \"npm test\"); destructive commands are refused. Not prose: verification steps that are not a command go in implementation." })),
     }),
   ),
+  advisorResolution: Type.Optional(
+    Type.String({ description: "After plan_consult: what you accepted from the advisors, what you rejected, and why. Required whenever advisors were consulted." }),
+  ),
+  reconsultWaived: Type.Optional(
+    Type.Boolean({ description: "Set true only when the tickets changed after plan_consult and the change needs no new advice; say why in advisorResolution." }),
+  ),
 });
+
+export const PlanConsultParams = Type.Object({
+  tickets: PlanTicketsParams.properties.tickets,
+  questions: Type.Array(Type.String(), { description: "2-3 specific questions about the riskiest parts of the draft, for the advisors" }),
+});
+
+export function createPlanConsultTool(getWorkflow: () => Workflow | undefined) {
+  return defineTool({
+    name: "plan_consult",
+    label: "Plan Consult",
+    description:
+      "Put the draft tickets and 2-3 specific questions about the riskiest parts of the plan to the advisors (every available one, in parallel). Returns their answers and concerns. Call once per draft (a changed draft may consult again, at most twice), after plan_spec and before plan_tickets. Only usable while /plan is running.",
+    promptSnippet: "plan_consult: ask the advisors about the draft tickets",
+    parameters: PlanConsultParams,
+    async execute(_id, params) {
+      const workflow = getWorkflow();
+      if (!workflow) throw new Error("The cost workflow is not available.");
+      const outcome = await workflow.consultPlan(params);
+      return text(consultResultText(outcome), { version: outcome.consult.version, repeat: outcome.repeat, advisors: outcome.consult.results.map((item) => ({ provider: item.provider, model: item.model, verdict: item.verdict, error: item.error })) });
+    },
+  });
+}
 
 const REVIEW_ACTIONS: PlanReviewAction[] = [
   { value: "approve", label: "Approve plan" },
@@ -90,13 +127,15 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
       workflow.requireTicketStage();
       let check = workflow.checkTickets(params.tickets);
       if (check.errors.length) throw new Error(`Tickets rejected. Fix these and call plan_tickets again:\n- ${check.errors.join("\n- ")}`);
+      // Advisors were consulted (or could not be): refuses until plan_consult ran and the resolution is written.
+      const advisorReview = await workflow.adviceForTickets(params.advisorResolution, check.tickets, params.reconsultWaived);
       let tickets: Ticket[] = check.tickets;
       let edited = false;
       let approve = false;
       if (ctx.hasUI) {
         // The person sees the whole plan (spec and tickets) before anything is saved.
         for (;;) {
-          const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets), actions: REVIEW_ACTIONS });
+          const choice = await reviewPlan(ctx, { title: `Review the plan · ${tickets.length} tickets`, markdown: workflow.previewPlan(tickets, advisorReview), actions: REVIEW_ACTIONS });
           // Closing the review (Esc) keeps the work: it saves the draft like "Save as draft".
           if (!choice || choice.value === "save") break;
           if (choice.value === "approve") {
@@ -104,8 +143,10 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
             break;
           }
           if (choice.value === "revise") {
+            // The revised draft is a new draft: it may consult the advisors again.
+            await workflow.clearConsult();
             return text(
-              `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_tickets with the full revised ticket list.`,
+              `The user reviewed the plan and asked for these changes. Nothing was saved.\n\n${choice.text ?? ""}\n\nApply them: call plan_spec again if the spec changes, then call plan_consult again for the revised draft and plan_tickets with the full revised ticket list and your advisorResolution.`,
             );
           }
           const changed = await ctx.ui.editor("Edit the tickets (titles, implementation, criteria, Blocked by)", renderTicketsMarkdown(tickets));
@@ -119,7 +160,7 @@ export function createPlanTicketsTool(getWorkflow: () => Workflow | undefined) {
           edited = true;
         }
       }
-      const { plan, files, markdown } = await workflow.commitTickets(tickets);
+      const { plan, files, markdown } = await workflow.commitTickets(tickets, advisorReview);
       // Also kept in the transcript (posted when this turn ends), so the plan stays visible.
       workflow.showMarkdown(markdown);
       const editNote = edited ? " The user edited the tickets before saving." : "";

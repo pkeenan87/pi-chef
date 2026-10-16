@@ -2,10 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { DecisionAnswer, DecisionsClient } from "../src/providers/clients.js";
 import type { ProviderId } from "../src/domain.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
-import { fallbackClassification } from "../src/router/classify.js";
 import { seededRng, singleTaskRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"]>> = {}) {
@@ -19,7 +17,6 @@ function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 const fence = "```";
-const mechanical = fallbackClassification("rename a typo in README");
 
 function fakeChat(reply: (provider: string, model: string) => string) {
   const calls: { provider: string; model: string; user: string; system: string }[] = [];
@@ -35,69 +32,17 @@ function fakeChat(reply: (provider: string, model: string) => string) {
   return { chat, calls };
 }
 
-describe("deterministic tier", () => {
-  it("routes to the local model when it is configured and reachable", async () => {
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith() });
-    const decision = await app.decide(mechanical, "implement");
-    expect(decision).toMatchObject({ tier: "deterministic", provider: "local", model: "qwen2.5-coder:7b" });
-    expect(decision.candidate?.provider).toBe("local");
-  });
-
-  it("falls back to the literal-edit path when the local server is down", async () => {
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith({ local: "unavailable" }) });
-    const decision = await app.decide(mechanical, "implement");
-    expect(decision).toMatchObject({ tier: "deterministic", provider: "none", model: "deterministic" });
-    expect(decision.blocked).toBeUndefined();
-    expect(decision.reason).toContain("local_unreachable");
-    expect(decision.selectionReason).toMatch(/literal edits/);
-  });
-
-});
-
-describe("classifier tier", () => {
-  const answers: DecisionAnswer[] = [
-    { type: "choice", name: "task_type", choice: "feature", confidence: 0.9 },
-    { type: "choice", name: "complexity", choice: "medium", confidence: 0.9 },
-    { type: "choice", name: "risk", choice: "low", confidence: 0.9 },
-    { type: "choice", name: "recommended_tier", choice: "standard", confidence: 0.9 },
-    { type: "predicate", name: "security_sensitive", probability: 0.01 },
-  ];
-  const client = (id: ProviderId, log: string[]): DecisionsClient => ({
-    id,
-    async decide(request) {
-      log.push(`${id}:${request.model}`);
-      return { model: request.model, answers, usage: { input: 50, output: 5, cacheRead: 0, cacheWrite: 0, requests: 1 }, provider: id };
-    },
-  });
-
-  it("classifies through the selected Decisions candidate, ledgers it, and learns success per model", async () => {
-    const log: string[] = [];
-    // vercel is signed out, so Foundry's Decision-1 is the only ready classifier.
-    const app = workflow(await tempRepo(), {
-      config: tieredConfig(),
-      auth: authWith({ vercel: "missing" }),
-      deciders: { foundry: client("foundry", log), vercel: client("vercel", log) },
-      rng: seededRng(1),
-    });
+describe("/route", () => {
+  it("uses the keyword scan only and says the planner sets complexity during /plan", async () => {
+    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), rng: seededRng(1) });
     const result = await app.route("add a feature to the exporter");
-    const data = result.data as { classification: { source: string; recommended_tier: string } };
-    expect(log).toEqual(["foundry:Microsoft-Decision-1"]);
-    expect(data.classification).toMatchObject({ source: "model", recommended_tier: "standard" });
-    expect(app.store.readLedger().some((r) => r.tier === "classifier" && r.provider === "foundry" && r.model === "Microsoft-Decision-1" && r.inputTokens === 50)).toBe(true);
-    expect(app.store.readMetrics().classification?.["model:classifier:foundry/Microsoft-Decision-1"]).toMatchObject({ success: 1, failure: 0 });
-  });
-
-  it("explores between decision models and falls back to keywords when none is available", async () => {
-    const log: string[] = [];
-    const config = tieredConfig();
-    for (let seed = 1; seed <= 12; seed++) {
-      const app = workflow(await tempRepo(), { config, auth: authWith(), deciders: { foundry: client("foundry", log), vercel: client("vercel", log) }, rng: seededRng(seed) });
-      await app.route("add a feature");
-    }
-    expect(new Set(log.map((entry) => entry.split(":")[0]))).toEqual(new Set(["foundry", "vercel"]));
-    const none = workflow(await tempRepo(), { config, auth: authWith() });
-    const fallback = (await none.route("rename a typo")).data as { classification: { source: string } };
-    expect(fallback.classification.source).toBe("fallback");
+    expect(result.ok, result.text).toBe(true);
+    const data = JSON.parse(result.text) as { note: string; classification: { source: string; recommended_tier: string; task_type: string } };
+    expect(data.classification).toMatchObject({ source: "keywords", task_type: "general", recommended_tier: "standard" });
+    expect(data.note).toMatch(/planner sets complexity and risk during \/plan/);
+    expect(app.store.readLedger().filter((record) => record.reason === "classify")).toEqual([]);
+    const secure = (await app.route("rotate the oauth credentials")).data as { classification: { source: string; risk: string } };
+    expect(secure.classification).toMatchObject({ source: "keywords", risk: "high" });
   });
 });
 

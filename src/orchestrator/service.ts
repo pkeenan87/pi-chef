@@ -1,19 +1,22 @@
 import path from "node:path";
 import { loadConfig, type WorkflowConfig } from "../config.js";
-import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type TokenUsage } from "../domain.js";
+import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
+import type { ChatFn } from "../providers/pi-chat.js";
 import { advisor } from "./advisor.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild } from "./build.js";
-import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
+import { budgetRemainingUsd, budgetState, checkBudget, quotaState, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
+import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import type { WorkflowContext } from "./context.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
+import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
-import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
+import { approveDraft, plan, route, showPlan } from "./planning.js";
 import { review } from "./review.js";
 import { auth, cost, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
@@ -44,9 +47,7 @@ export class Workflow {
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
       authProbe: options.auth,
-      classifier: options.classifier,
       rng: options.rng,
-      deciders: options.deciders ?? {},
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
       warned: new Set(),
@@ -68,12 +69,9 @@ export class Workflow {
   }
 
   /** Applies a reloaded config (and the providers built from it) without rebuilding the workflow. */
-  reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe; deciders: WorkflowOptions["deciders"] }): void {
+  reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe }): void {
     this.ctx.config = config;
-    if (providers) {
-      this.ctx.authProbe = providers.auth;
-      this.ctx.deciders = providers.deciders ?? {};
-    }
+    if (providers) this.ctx.authProbe = providers.auth;
   }
 
   /** Rebinds per-command UI hooks without rebuilding the workflow. */
@@ -121,7 +119,7 @@ export class Workflow {
   decide(
     classification: AcceptedClassification,
     purpose: "plan" | "implement" | "review" | "preview",
-    extra: { failedTier?: Tier; escalations?: number; taskId?: string; tierHint?: Tier } = {},
+    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier } = {},
   ): Promise<RoutingDecision> {
     return decide(this.ctx, classification, purpose, extra);
   }
@@ -182,17 +180,32 @@ export class Workflow {
     requireTicketStage(this.ctx);
   }
 
+  /** plan_consult: both advisors on the draft tickets, once per draft. */
+  consultPlan(input: Parameters<typeof consultPlan>[1]) {
+    return consultPlan(this.ctx, input);
+  }
+
+  /** What plan_tickets needs from the advisor consult (throws when it is missing), as the review to store on the plan. */
+  adviceForTickets(resolution: string | undefined, tickets: Ticket[], reconsultWaived?: boolean) {
+    return adviceForTickets(this.ctx, resolution, tickets, reconsultWaived);
+  }
+
+  /** The draft was sent back for changes: the revised draft may consult again. */
+  clearConsult() {
+    return clearConsult(this.ctx);
+  }
+
   checkTickets(input: unknown) {
     return checkTickets(this.ctx, input);
   }
 
-  commitTickets(tickets: Parameters<typeof commitTickets>[1]) {
-    return commitTickets(this.ctx, tickets);
+  commitTickets(tickets: Parameters<typeof commitTickets>[1], advisorReview?: Parameters<typeof commitTickets>[2]) {
+    return commitTickets(this.ctx, tickets, advisorReview);
   }
 
   /** The full plan these tickets would produce, for review before they are saved. */
-  previewPlan(tickets: Parameters<typeof previewPlan>[1]): string {
-    return previewPlan(this.ctx, tickets);
+  previewPlan(tickets: Parameters<typeof previewPlan>[1], advisorReview?: Parameters<typeof previewPlan>[2]): string {
+    return previewPlan(this.ctx, tickets, advisorReview);
   }
 
   /** Approves the active draft: freezes plan.vN.approved.json. The choice was made on a review screen. */
@@ -274,25 +287,24 @@ export class Workflow {
     return observeUsage(this.ctx, input);
   }
 
-  /** Classifies a chat message for the virtual model (Decisions classifier, else keywords) and ledgers the classifier call to the active task. */
-  async classifyChat(text: string): Promise<AcceptedClassification> {
-    const result = await classify(this.ctx, text);
-    const taskId = this.activeTaskId();
-    const state = taskId ? this.store.load(taskId) : undefined;
-    if (state) recordClassifier(this.ctx, state.taskId, state.phase, result.usage);
-    return result.classification;
+  /**
+   * A compaction summary from `session.compactionTier`, ledgered as `compaction`. Undefined when no model can write it
+   * (hard budget, nobody signed in, a failed call), so the caller lets Pi compact with the session model.
+   */
+  summarizeForCompaction(chat: ChatFn, input: CompactionInput): Promise<CompactionSummary | undefined> {
+    return summarizeForCompaction(this.ctx, chat, input);
   }
 
-  /** Counts a failed chat attempt against a model so the circuit breaker can open. */
-  async recordChatFailure(input: { taskType: string; tier: string; provider: string; model: string }): Promise<void> {
-    await this.store.bumpMetric(input.taskType, input.tier, false, this.ctx.now(), { provider: input.provider, model: input.model });
+  /** Task or daily budget state with no warning, for gates that decide for themselves what to say. */
+  budgetStatus(taskId?: string): BudgetStatus {
+    return budgetState(this.ctx, taskId).status;
   }
 
   now(): Date {
     return this.ctx.now();
   }
 
-  /** Budget state for callers outside the workflow (for example the virtual model route). Warns once on "soft". */
+  /** Budget state for callers outside the workflow (for example web_search). Warns once on "soft". */
   checkBudget(taskId?: string): "ok" | "soft" | "hard" {
     return checkBudget(this.ctx, taskId);
   }

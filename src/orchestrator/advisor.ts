@@ -1,6 +1,6 @@
 import { tierCandidates } from "../config.js";
 import { emptyUsage, WorkflowError, type CommandResult, type TaskState } from "../domain.js";
-import { truncateForClassifier } from "../router/classify.js";
+import { clipMiddle } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from "./budget.js";
@@ -12,7 +12,7 @@ async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined
   if (!state) return "No active task.";
   const parts = [
     `Phase: ${state.phase}`,
-    `Request: ${truncateForClassifier(state.request, 2000)}`,
+    `Request: ${clipMiddle(state.request, 2000)}`,
     state.classification ? `Classification: ${state.classification.task_type}, complexity ${state.classification.complexity}, risk ${state.classification.risk}` : "",
     state.plan ? `Plan v${state.plan.version}: ${state.plan.summary.slice(0, 600)}\nGroups: ${state.plan.groups.map((group) => `${group.id} (${group.files.join(", ")})`).join("; ")}\nRisks: ${state.plan.risks.join("; ")}` : "",
     state.blockedReason ? `Last failure: ${state.blockedReason.slice(0, 600)}` : "",
@@ -24,7 +24,7 @@ async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined
   } catch {
     /* the diff stat is optional */
   }
-  return truncateForClassifier(redact(parts.filter(Boolean).join("\n")), 8000);
+  return clipMiddle(redact(parts.filter(Boolean).join("\n")), 8000);
 }
 
 /**

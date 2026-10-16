@@ -25,18 +25,50 @@ export function isAccountProvider(value: string): value is AccountProvider {
 }
 export type ProviderId = (typeof PROVIDERS)[number];
 
-export const TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;
+/** The general ladder: cheapest to strongest. */
+export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as const;
+/** /build ticket tiers, by the difficulty the planner assigns. A failed ticket climbs low, medium, high, then premium. */
+export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
+export type TicketTier = (typeof TICKET_TIERS)[number];
+/**
+ * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
+ * diff clip cut). Not part of any ladder; a config without it runs them on `cheap`.
+ */
+export const BATCH_TIERS = ["batch"] as const;
+export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...BATCH_TIERS] as const;
 export type Tier = (typeof TIERS)[number];
+
+export const DIFFICULTIES = ["low", "medium", "high"] as const;
+export type Difficulty = (typeof DIFFICULTIES)[number];
+export function isDifficulty(value: string): value is Difficulty {
+  return (DIFFICULTIES as readonly string[]).includes(value);
+}
+/** The ticket tier a difficulty starts on. */
+export const DIFFICULTY_TIER: Record<Difficulty, TicketTier> = { low: "ticketLow", medium: "ticketMedium", high: "ticketHigh" };
+/** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
+export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
+  if (ticket.difficulty) return ticket.difficulty;
+  switch (ticket.suggestedTier) {
+    case "deterministic":
+    case "cheap":
+    case "ticketLow":
+      return "low";
+    case "premium":
+    case "ticketHigh":
+      return "high";
+    default:
+      return "medium";
+  }
+}
 
 /** Tiers a config can list candidates for. `advisor` is on-demand and never part of the escalation ladder. */
 export const TIER_KEYS = [...TIERS, "advisor"] as const;
 export type TierKey = (typeof TIER_KEYS)[number];
 
-/** One model that can serve a tier. `decisions` models answer structured questions instead of chatting. */
+/** One chat model that can serve a tier. */
 export interface TierCandidate {
   provider: ProviderId;
   model: string;
-  api: "chat" | "decisions";
   label?: string;
 }
 
@@ -58,19 +90,21 @@ export function modelMetricKey(tier: string, provider: string, model: string): s
 
 export type Complexity = "low" | "medium" | "high";
 
-/** Schema returned by the classifier. Never executed as instructions. */
+/**
+ * How a task is rated. `keywords`: the deterministic scan of the request text (before a spec exists). `planner`: the
+ * complexity, risk and security flag the planning model gave in plan_spec, with the keyword scan able to raise the flag.
+ */
 export interface Classification {
   task_type: string;
   complexity: Complexity;
   risk: Complexity;
   required_capabilities: string[];
   recommended_tier: Tier;
-  confidence: number;
   reason_codes: string[];
 }
 
 export interface AcceptedClassification extends Classification {
-  source: "model" | "fallback";
+  source: "keywords" | "planner";
 }
 
 export interface PlanEdit {
@@ -97,6 +131,9 @@ export interface Ticket {
   implementation?: string;
   acceptanceCriteria: string[];
   blockedBy: string[];
+  /** How hard the ticket is; picks the model tier for the first attempt. Wins over suggestedTier. */
+  difficulty?: Difficulty;
+  /** Read from old plans only; use ticketDifficulty(). */
   suggestedTier?: Tier;
   /** Ownership hints, not a hard allowlist. */
   files?: string[];
@@ -116,6 +153,8 @@ export interface PlanDocument {
   securitySensitive: boolean;
   /** Present when the plan came from the interview and ticket flow; each ticket is one group. */
   tickets?: Ticket[];
+  /** The advisors' review of the draft and the planning model's resolution. Advisory; approval stays with the user. */
+  advisorReview?: PlanAdvisorReview;
 }
 
 export interface RoutingDecision {
@@ -210,6 +249,26 @@ export interface ModelReviewPart {
   failures: string[];
 }
 
+/** A finding after the reviewer weighed the advisors' answers. */
+export interface ResolvedFinding extends ModelFinding {
+  status: "accepted" | "rejected";
+  /** Why the reviewer accepted or rejected it. */
+  rationale: string;
+  /** Who raised it: "opus" (the reviewer) or an advisor's model name. */
+  source: string;
+  /** The other advisors' model names (or "opus") that agree with it. */
+  agreedBy: string[];
+}
+
+/** The reviewer's final say on the findings after the advisors answered. */
+export interface ReviewResolution {
+  findings: ResolvedFinding[];
+  rationale?: string;
+  /** "provider/model" of the reviewer that resolved. */
+  by: string;
+  costUsd: number | null;
+}
+
 export interface ModelReview {
   /** The routed review model (the first candidate). `parts` says who actually reviewed each part. */
   provider: string;
@@ -224,6 +283,19 @@ export interface ModelReview {
   costUsd?: number | null;
   /** Why there are no or fewer model findings (budget, no model, failed parts, or unparseable output). */
   error?: string;
+  /** Which advisors the rule picked and why (for example "branch has a high ticket"), even when none was consulted. */
+  advisorRule?: { reason: string; planned: string[] };
+  /** The reviewer's questions for the advisors (at most 3). */
+  questions?: string[];
+  /** What each advisor answered. Advisory only. */
+  advisors?: AdvisorOpinion[];
+  /** Why the advisors were not consulted, when the rule picked some. */
+  advisorsSkipped?: string;
+  /** The reviewer's resolution of its findings and the advisors' concerns. Absent when the resolve call failed. */
+  resolution?: ReviewResolution;
+  /** Why the resolve call produced nothing (the findings and concerns then stand unresolved). */
+  resolutionError?: string;
+  costUsdAdvisors?: number | null;
 }
 
 export interface ReviewReport {
@@ -272,6 +344,34 @@ export interface PlanningProgress {
   noQuestions: boolean;
   /** The person's requested changes when a drafted plan was sent back from the plan review. */
   revision?: string;
+  /** The advisors' answers on the current draft (plan_consult). Cleared when the draft is sent back for changes. */
+  consult?: PlanConsult;
+}
+
+/** What the advisors said about a draft plan. One per draft; the packet was the spec, the draft tickets and the questions. */
+export interface PlanConsult {
+  /** The plan version of the draft consulted on. */
+  version: number;
+  questions: string[];
+  results: AdvisorOpinion[];
+  /** Why no advisor was called (budget, no connection). */
+  skipped?: string;
+  at: string;
+  /** sha256 of the spec and the canonical draft tickets that were consulted on. A different hash means the draft changed. */
+  hash?: string;
+  /** Consults paid for this draft version (a changed draft may consult again, up to `advisors.maxPlanConsults`). */
+  consults?: number;
+}
+
+/** The advisor review kept on a plan: what they said, and how the planning model resolved it. */
+export interface PlanAdvisorReview {
+  consult?: PlanConsult;
+  /** The planning model's account of what it accepted and rejected, and why. */
+  resolution?: string;
+  /** Why there was no consult (none available, budget). */
+  note?: string;
+  /** The tickets changed after the consult and the planning model said why no new advice was needed. */
+  reconsultWaived?: boolean;
 }
 
 /** Where one ticket stands during /build. */
@@ -300,6 +400,75 @@ export interface TicketRun {
   attemptLog?: TicketAttempt[];
   /** Commit that /build made for this ticket. */
   commit?: string;
+  difficulty?: Difficulty;
+  /** Why the ticket last failed, for /build: a review failure is not settled by running the checks again. */
+  failedBy?: "checks" | "unrunnable" | "setup" | "review";
+  /** Every per-ticket review, oldest first. */
+  reviews?: TicketReviewRecord[];
+  /** Known cost across attempts by who incurred it; null when any entry was unknown. `costUsd` is their sum. */
+  costSplit?: CostSplit;
+}
+
+export interface CostSplit {
+  implementer: number | null;
+  review: number | null;
+  advisors: number | null;
+}
+
+/** One concern an advisor raised. */
+export interface AdvisorConcern {
+  severity: "high" | "medium" | "low";
+  file?: string;
+  issue: string;
+  suggestion?: string;
+}
+
+export interface AdvisorAnswer {
+  question: string;
+  answer: string;
+}
+
+/** One advisor's outcome. Either an opinion (`verdict`, `answers`, `concerns`) or `error`; never both. */
+export interface AdvisorOpinion {
+  provider: ProviderId;
+  model: string;
+  verdict?: "agree" | "disagree" | "unsure";
+  answers: AdvisorAnswer[];
+  concerns: AdvisorConcern[];
+  error?: string;
+  /** Known cost of this call; null when unknown (a failed call may still have been billed). */
+  costUsd: number | null;
+}
+
+/** One finding of the per-ticket review. */
+export interface TicketReviewFinding {
+  severity: "high" | "medium" | "low";
+  file?: string;
+  issue: string;
+}
+
+/**
+ * One review of a ticket's diff during /build, after its checks passed. `unavailable`: the review call failed twice, so
+ * the ticket was committed without it. The review model's final verdict is the only one that counts; advisors advise.
+ */
+export interface TicketReviewRecord {
+  /** The ticket's attempt (one per tier tried). */
+  attempt: number;
+  /** 1 for the first review of the attempt, 2 after a fix. */
+  round: number;
+  tier: Tier;
+  /** "provider/model" of the implementer. */
+  implementer: string;
+  /** "provider/model" that gave the verdict; absent when unavailable. */
+  reviewer?: string;
+  verdict: "pass" | "fail" | "unavailable";
+  findings: TicketReviewFinding[];
+  advisors: AdvisorOpinion[];
+  /** Why advisors were not consulted, when they should have been. */
+  advisorsSkipped?: string;
+  /** The reviewer's reasoning (after the advisors, when any answered), or why the review was unavailable. */
+  rationale: string;
+  costUsd: { review: number | null; advisors: number | null };
 }
 
 /** Where /build works: one branch in the main checkout. */
@@ -327,6 +496,9 @@ export interface TicketAttempt {
   turns: number;
   costUsd: number | null;
   outcome: "success" | "failure";
+  failedBy?: TicketRun["failedBy"];
+  /** What this attempt cost by who incurred it. */
+  costSplit?: CostSplit;
   error?: string;
 }
 

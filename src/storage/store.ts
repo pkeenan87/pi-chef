@@ -464,6 +464,14 @@ export class TaskStore {
     appendFileSync(file, `${JSON.stringify(clean)}\n`);
   }
 
+  /** Appends one line to `metrics/tickets.jsonl`, the per-ticket log of /build. Append-only: never rewritten or truncated. */
+  appendTicketLog(entry: Record<string, unknown>): void {
+    const file = path.join(this.root, "metrics", "tickets.jsonl");
+    mkdirSync(path.dirname(file), { recursive: true });
+    repairTail(file);
+    appendFileSync(file, `${JSON.stringify(redactUnknown(entry))}\n`);
+  }
+
   readLedger(): CostRecord[] {
     const file = path.join(this.root, "cost", "ledger.jsonl");
     const sig = fileSig(file);

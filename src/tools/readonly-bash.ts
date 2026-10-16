@@ -152,6 +152,6 @@ export function isReadOnlyCommand(command: string, root: string = process.cwd())
 
 /** Built-in write tools that are disabled while planning. */
 export const PLANNING_DISABLED_TOOLS = ["edit", "write"];
-/** Tools the planning turns rely on: read-only exploration, web lookup, and the three plan tools. */
-export const PLANNING_TOOLS = ["read", "bash", "grep", "find", "ls", "web_search", "web_fetch", "plan_questions", "plan_spec", "plan_tickets"];
-export const PLAN_TOOL_NAMES = ["plan_questions", "plan_spec", "plan_tickets"];
+/** Tools the planning turns rely on: read-only exploration, web lookup, and the plan tools. */
+export const PLANNING_TOOLS = ["read", "bash", "grep", "find", "ls", "web_search", "web_fetch", "plan_questions", "plan_spec", "plan_consult", "plan_tickets"];
+export const PLAN_TOOL_NAMES = ["plan_questions", "plan_spec", "plan_consult", "plan_tickets"];

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
-import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
+import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
 
 export interface ProviderConfig {
   type: string;
@@ -21,8 +21,6 @@ export interface ProviderConfig {
   endpoint?: string;
   /** Foundry: "v1" uses `<endpoint>/openai/v1/...` (no api-version); "deployments" is the legacy route. Defaults to deployments when apiVersion is set, else v1. */
   routeStyle?: "v1" | "deployments";
-  /** Path of the Decisions API under the provider base URL. Defaults to /decisions. */
-  decisionsPath?: string;
   /** Vercel: directory that has been `vercel link`ed (relative paths resolve from the project root). */
   projectDir?: string;
   /** Vercel: env file `vercel env pull` writes. Defaults to .env.local. */
@@ -96,21 +94,52 @@ export interface CheckConfig {
   args: string[];
 }
 
+/** Tiers a session, direct, or review job can be pinned to. */
+export type ChatTierName = "cheap" | "standard" | "premium";
+const CHAT_TIER_NAMES: readonly string[] = ["cheap", "standard", "premium"];
+
+export interface SessionConfig {
+  /** The main session's model as `provider/id`. */
+  model: string;
+  /** Switch the session to `model` at session start. False leaves the model the user picked. */
+  pin: boolean;
+  /** Tier that writes compaction summaries (session_before_compact). Pi compacts on the session model when none can. */
+  compactionTier: ChatTierName;
+}
+
+export const DEFAULT_SESSION: SessionConfig = { model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "cheap" };
+
+/** Splits `provider/id` at the first slash. Undefined when either part is empty. */
+export function parseModelRef(value: string): { provider: string; id: string } | undefined {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1 || /\s/.test(value)) return undefined;
+  return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+}
+
 export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
   providers: Partial<Record<ProviderId, ProviderConfig>>;
   /** Legacy one-provider-per-tier map. Used for any tier that `tiers` does not list. */
-  models: Record<"classifier" | "cheap" | "standard" | "premium", ProviderId>;
+  models: Record<"cheap" | "standard" | "premium", ProviderId>;
   /** Candidate models per tier, in preference order for ties. Overrides `models` for the tiers it lists. */
   tiers: Partial<Record<TierKey, TierCandidate[]>>;
   routing: {
-    minConfidence: number;
     maxEscalations: number;
     maxTier: Tier;
+    /** Tier the /review model pass routes to. */
+    reviewTier: ChatTierName;
     requirePremiumReviewFor: string[];
     circuitBreakerFailures: number;
+    /**
+     * Ranking-only USD added to every candidate's price before dividing by its success rate: the time and retry
+     * cost of a failed attempt, so a $0 subscription model with a poor record does not always win. Like the quota
+     * shadow price it never reaches the ledger, budgets, the over-budget filter, or expectedUsd.
+     */
+    attemptOverheadUsd: number;
   };
+  /** The main chat session: a normal Pi model, pinned at session start, with compaction on a cheap tier. */
+  session: SessionConfig;
   workers: {
     /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
@@ -119,7 +148,16 @@ export interface WorkflowConfig {
   };
   /** /build names the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
   branchPrefix: string;
-  budgets: { taskUsd: number; dailyUsd: number; softWarningRatio: number };
+  budgets: {
+    taskUsd: number;
+    dailyUsd: number;
+    softWarningRatio: number;
+    /**
+     * Budget math only: what one ledger entry with unknown cost and nothing to price it from (no token counts, or no
+     * pricing row) counts as. The ledger keeps `actualUsd: null`. A project can only raise it (the higher value wins).
+     */
+    unknownCallUsd: number;
+  };
   approvals: {
     plan: "required";
     merge: "manual";
@@ -130,6 +168,14 @@ export interface WorkflowConfig {
   setup: CheckConfig[];
   /** The model pass of /review: a review-tier model reads the branch diff and lists advisory findings. */
   review: { model: boolean; maxDiffChars: number; maxChunks: number; timeoutMs: number };
+  /**
+   * Second opinions during /build: after a ticket's checks pass, the review tier reads its diff and, by difficulty,
+   * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off; `plan: false` skips the
+   * advisor consult on every plan (plan_consult). `adHocMinLines`: an ad-hoc branch (no plan) with more changed lines
+   * than this gets one advisor in /review. `summarizeCut`: when a diff is clipped for an
+   * advisor packet or a review part, the batch tier writes a one-line summary of each cut file.
+   */
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -139,29 +185,35 @@ export interface WorkflowConfig {
   warnings?: string[];
 }
 
+/** Default for `budgets.unknownCallUsd`. */
+export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
+
 const DEFAULTS: WorkflowConfig = {
   schemaVersion: 1,
   workspaceDir: ".pi-workflows",
   providers: {},
-  models: { classifier: "local", cheap: "foundry", standard: "anthropic", premium: "openai" },
+  models: { cheap: "foundry", standard: "anthropic", premium: "openai" },
   tiers: {},
   routing: {
-    minConfidence: 0.75,
-    maxEscalations: 2,
+    maxEscalations: 3,
     maxTier: "premium",
+    reviewTier: "premium",
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
+    attemptOverheadUsd: 0.02,
   },
+  session: DEFAULT_SESSION,
   workers: {
     tokenBudget: 8000,
     ticketContextTokens: 150000,
   },
   branchPrefix: "cost",
-  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 },
+  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2 },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -317,9 +369,77 @@ function isLoopbackHttpUrl(value: string): boolean {
   return !!url && url.protocol === "http:" && url.username === "" && url.password === "" && isLoopbackHost(url.hostname);
 }
 
+/** Adds a load note once, however many files carry the same old key. */
+function warnOnce(warnings: string[], message: string): void {
+  if (!warnings.includes(message)) warnings.push(message);
+}
+
+/**
+ * Removes settings from earlier versions, each with one warning, so an old file still loads. The cost-opt/auto
+ * virtual model, its router settings, and the Decisions classifier are gone.
+ */
+function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw };
+  if (isRecord(out.providers)) {
+    const providers: Record<string, unknown> = {};
+    for (const [name, provider] of Object.entries(out.providers)) {
+      if (isRecord(provider) && "decisionsPath" in provider) {
+        warnOnce(warnings, `providers.${name}.decisionsPath is no longer used; the Decisions classifier is gone.`);
+        const { decisionsPath: _gone, ...rest } = provider;
+        providers[name] = rest;
+      } else providers[name] = provider;
+    }
+    out.providers = providers;
+  }
+  if (isRecord(out.models) && "classifier" in out.models) {
+    warnOnce(warnings, "models.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).");
+    const { classifier: _gone, ...rest } = out.models;
+    out.models = rest;
+  }
+  if (isRecord(out.tiers)) {
+    const tiers: Record<string, unknown> = {};
+    for (const [key, list] of Object.entries(out.tiers)) {
+      if (key === "classifier") {
+        warnOnce(warnings, "tiers.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).");
+        continue;
+      }
+      if (!Array.isArray(list)) {
+        tiers[key] = list;
+        continue;
+      }
+      // A Decisions model cannot chat, so it is dropped; a tier left with nothing is dropped too.
+      const kept = list.filter((item) => {
+        if (!isRecord(item) || item.api !== "decisions") return true;
+        warnOnce(warnings, `tiers.${key}: dropped ${String(item.provider)}/${String(item.model)} (api: decisions is no longer supported).`);
+        return false;
+      });
+      if (kept.length > 0 || list.length === 0) tiers[key] = kept;
+    }
+    out.tiers = tiers;
+  }
+  if (isRecord(out.routing)) {
+    const routing = { ...out.routing };
+    if ("minConfidence" in routing) {
+      warnOnce(warnings, "routing.minConfidence is no longer used; nothing is classified by a model.");
+      delete routing.minConfidence;
+    }
+    if ("sessionTier" in routing) {
+      warnOnce(warnings, "routing.sessionTier is no longer used; the main session is a normal Pi model (set session.model).");
+      delete routing.sessionTier;
+    }
+    if ("directTier" in routing) {
+      warnOnce(warnings, "routing.directTier is no longer used; compaction runs on session.compactionTier.");
+      delete routing.directTier;
+    }
+    out.routing = routing;
+  }
+  return out;
+}
+
 /** Validates and normalizes one raw YAML document. Returns a shallow copy with normalized fields. */
-function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
-  if (!isRecord(raw)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
+function normalizeRaw(input: unknown, where: string, warnings: string[] = []): Record<string, unknown> {
+  if (!isRecord(input)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
+  const raw = dropLegacy(input, warnings);
   assertNoSecrets(raw, where);
   const out: Record<string, unknown> = { ...raw };
 
@@ -348,7 +468,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     if (name === "vercel" && provider.auth && provider.auth !== "vercel-cli") {
       throw new WorkflowError("CONFIG_INVALID", "Vercel auth must be vercel-cli.");
     }
-    for (const key of ["endpoint", "decisionsPath", "projectDir", "envFile", "baseUrl", "model"] as const) {
+    for (const key of ["endpoint", "projectDir", "envFile", "baseUrl", "model"] as const) {
       if (provider[key] !== undefined && (typeof provider[key] !== "string" || provider[key] === "")) {
         invalid(where, `providers.${name}.${key}`, "must be a non-empty string");
       }
@@ -364,9 +484,6 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     }
     if (provider.routeStyle !== undefined && provider.routeStyle !== "v1" && provider.routeStyle !== "deployments") {
       invalid(where, `providers.${name}.routeStyle`, 'must be "v1" or "deployments"');
-    }
-    if (typeof provider.decisionsPath === "string" && !provider.decisionsPath.startsWith("/")) {
-      invalid(where, `providers.${name}.decisionsPath`, 'must start with "/"');
     }
     if (typeof provider.envFile === "string" && (provider.envFile.startsWith("-") || provider.envFile.includes(".."))) {
       invalid(where, `providers.${name}.envFile`, "must be a plain file name or relative path without ..");
@@ -402,8 +519,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
           invalid(where, `${field}.provider`, `must be one of ${PROVIDERS.join(", ")}`);
         }
         if (typeof item.model !== "string" || item.model.trim() === "") invalid(where, `${field}.model`, "must be a non-empty string");
-        if (item.api !== undefined && item.api !== "chat" && item.api !== "decisions") invalid(where, `${field}.api`, 'must be "chat" or "decisions"');
-        if (item.api === "decisions" && key !== "classifier") invalid(where, `${field}.api`, '"decisions" models can only serve the classifier tier');
+        if (item.api !== undefined && item.api !== "chat") invalid(where, `${field}.api`, 'must be "chat"');
         if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
       });
     }
@@ -411,13 +527,24 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
 
   const routing = section(raw, "routing", where);
   if (routing) {
-    checkNumber(routing, "minConfidence", where, { min: 0, max: 1 }, "routing");
     checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
     checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
-    if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier))) {
-      invalid(where, "routing.maxTier", `must be one of ${TIERS.join(", ")}`);
+    checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
+    if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier) || routing.maxTier === "batch")) {
+      invalid(where, "routing.maxTier", `must be one of ${TIERS.filter((tier) => tier !== "batch").join(", ")}`);
+    }
+    if (routing.reviewTier !== undefined && (typeof routing.reviewTier !== "string" || !CHAT_TIER_NAMES.includes(routing.reviewTier))) {
+      invalid(where, "routing.reviewTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
     }
     if (routing.requirePremiumReviewFor !== undefined) stringArray(routing.requirePremiumReviewFor, "routing.requirePremiumReviewFor", where);
+  }
+  const session = section(raw, "session", where);
+  if (session) {
+    if (session.model !== undefined && (typeof session.model !== "string" || !parseModelRef(session.model))) invalid(where, "session.model", "must be provider/id, for example anthropic/claude-opus-5-5");
+    if (session.pin !== undefined && typeof session.pin !== "boolean") invalid(where, "session.pin", "must be true or false");
+    if (session.compactionTier !== undefined && (typeof session.compactionTier !== "string" || !CHAT_TIER_NAMES.includes(session.compactionTier))) {
+      invalid(where, "session.compactionTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
+    }
   }
   const workers = section(raw, "workers", where);
   if (workers) {
@@ -431,6 +558,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   if (budgets) {
     for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
     checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
+    checkNumber(budgets, "unknownCallUsd", where, { min: 0 }, "budgets");
   }
   for (const key of ["checks", "setup"] as const) {
     const list = raw[key];
@@ -452,6 +580,17 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(raw.review, "maxChunks", where, { min: 1, integer: true }, "review");
     checkNumber(raw.review, "timeoutMs", where, { min: 1000, integer: true }, "review");
   }
+  if (raw.advisors !== undefined) {
+    if (!isRecord(raw.advisors)) invalid(where, "advisors", "must be a mapping");
+    if (raw.advisors.tickets !== undefined && typeof raw.advisors.tickets !== "boolean") invalid(where, "advisors.tickets", "must be a boolean");
+    if (raw.advisors.plan !== undefined && typeof raw.advisors.plan !== "boolean") invalid(where, "advisors.plan", "must be a boolean");
+    if (raw.advisors.summarizeCut !== undefined && typeof raw.advisors.summarizeCut !== "boolean") invalid(where, "advisors.summarizeCut", "must be a boolean");
+    checkNumber(raw.advisors, "timeoutMs", where, { min: 1000, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxDiffChars", where, { min: 1000, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
+    checkNumber(raw.advisors, "adHocMinLines", where, { min: 0, integer: true }, "advisors");
+    checkNumber(raw.advisors, "maxPlanConsults", where, { min: 1, integer: true }, "advisors");
+  }
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
     for (const id of list) if (!isProviderId(id)) invalid(where, "orgProviderAllowlist", `contains unknown provider ${id}`);
@@ -465,7 +604,7 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
   return out;
 }
 
-const MODEL_KEYS = ["classifier", "cheap", "standard", "premium"] as const;
+const MODEL_KEYS = ["cheap", "standard", "premium"] as const;
 
 /**
  * Cross-checks a resolved config: tier models must reference configured providers, and each
@@ -503,6 +642,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     models: { ...DEFAULTS.models, ...obj("models") } as WorkflowConfig["models"],
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
+    session: { ...DEFAULTS.session, ...obj("session") } as WorkflowConfig["session"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
@@ -518,6 +658,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
       : DEFAULTS.checks,
     setup: Array.isArray(norm.setup) ? (norm.setup as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] })) : DEFAULTS.setup,
     review: { ...DEFAULTS.review, ...obj("review") } as WorkflowConfig["review"],
+    advisors: { ...DEFAULTS.advisors, ...obj("advisors") } as WorkflowConfig["advisors"],
     orgProviderAllowlist: Array.isArray(norm.orgProviderAllowlist) ? (norm.orgProviderAllowlist as ProviderId[]) : [],
     proprietaryCode: norm.proprietaryCode === true,
     pricing: Array.isArray(norm.pricing) ? (norm.pricing as PricingRow[]) : [],
@@ -541,7 +682,6 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
       const candidate: TierCandidate = {
         provider: entry.provider as ProviderId,
         model: String(entry.model),
-        api: entry.api === "decisions" ? "decisions" : "chat",
       };
       if (typeof entry.label === "string") candidate.label = entry.label;
       return candidate;
@@ -550,8 +690,8 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
   return out;
 }
 
-function mergeConfig(raw: unknown, where: string): WorkflowConfig {
-  const norm = normalizeRaw(raw, where);
+function mergeConfig(raw: unknown, where: string, warnings: string[] = []): WorkflowConfig {
+  const norm = normalizeRaw(raw, where, warnings);
   const config = build(norm);
   // A standalone document that spells out both providers and models must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
@@ -563,7 +703,10 @@ function mergeConfig(raw: unknown, where: string): WorkflowConfig {
 
 export function parseConfig(text: string, where = "config"): WorkflowConfig {
   const raw = parse(text);
-  return mergeConfig(raw, where);
+  const warnings: string[] = [];
+  const config = mergeConfig(raw, where, warnings);
+  if (warnings.length > 0) config.warnings = warnings;
+  return config;
 }
 
 function mergeSection(user: unknown, project: unknown): Record<string, unknown> | undefined {
@@ -576,13 +719,12 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  * untrusted (it ships with a cloned repo), so these come from the user config only. The one exception
  * is a provider the user did not define, where a project may repeat the built-in default.
  */
-const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "decisionsPath"] as const;
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (field === "baseUrl") return provider === "vercel" ? value === DEFAULT_VERCEL_GATEWAY_URL : provider === "local" && isLoopbackHttpUrl(value);
   if (field === "audience") return provider === "foundry" && value === DEFAULT_FOUNDRY_AUDIENCE;
-  if (field === "decisionsPath") return value === "/decisions";
   if (field === "projectDir") return provider === "vercel" && value === ".";
   if (field === "envFile") return provider === "vercel" && value === ".env.local";
   return false;
@@ -611,6 +753,46 @@ function restrictProject(name: string, user: unknown, project: unknown, warnings
 }
 
 /**
+ * Advisor settings a project may only tighten: switches can only be turned off; limits that raise cost or the data
+ * sent take the lower value (the default when the user sets none); a higher ad-hoc threshold means fewer advisor calls.
+ */
+function restrictAdvisors(user: unknown, project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const u = isRecord(user) ? user : {};
+  const out: Record<string, unknown> = { ...project };
+  const drop = (key: string, why: string) => {
+    warnings.push(`Ignored project advisors.${key}: ${why}.`);
+    delete out[key];
+  };
+  for (const key of ["tickets", "plan", "summarizeCut"] as const) {
+    if (!(key in out)) continue;
+    if (out[key] === true) drop(key, "a project can only turn advisors off");
+  }
+  const base = DEFAULTS.advisors as unknown as Record<string, number>;
+  for (const key of ["maxDiffChars", "maxOutputTokens", "timeoutMs", "maxPlanConsults"] as const) {
+    if (typeof out[key] !== "number") continue;
+    const limit = typeof u[key] === "number" ? u[key] : base[key]!;
+    if (out[key] > limit) drop(key, `a project can only lower it (limit ${limit})`);
+  }
+  if (typeof out.adHocMinLines === "number") {
+    const limit = typeof u.adHocMinLines === "number" ? u.adHocMinLines : DEFAULTS.advisors.adHocMinLines;
+    if (out.adHocMinLines < limit) drop("adHocMinLines", `a project can only raise it (limit ${limit})`);
+  }
+  return out;
+}
+
+/** The session model and compaction tier are user-config-only; a project may only unpin (`pin: false`). */
+function restrictSession(project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(project)) {
+    if (key === "pin" && value === false) out.pin = false;
+    else warnings.push(`Ignored project session.${key}: ${key === "pin" ? "a project can only set pin: false" : "session settings are read from the user config (~/.pi/agent/cost-workflow.yaml) only"}.`);
+  }
+  return out;
+}
+
+/**
  * Layers a project document over a user document. Policy fields follow "user wins / most
  * restrictive"; everything else is merged field-wise with the project overriding.
  */
@@ -623,8 +805,9 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers"]) {
-    const value = mergeSection(user[key], project[key]);
+  for (const key of ["models", "tiers", "routing", "session", "workers", "advisors"]) {
+    const projectSection = key === "advisors" ? restrictAdvisors(user.advisors, project.advisors, warnings) : key === "session" ? restrictSession(project.session, warnings) : project[key];
+    const value = mergeSection(user[key], projectSection);
     if (value) merged[key] = value;
     else delete merged[key];
   }
@@ -648,12 +831,19 @@ export function layerConfigs(
   if (isRecord(user.budgets) || isRecord(project.budgets)) {
     const budgets: Record<string, unknown> = { ...ub, ...pb };
     for (const key of Object.keys(budgets)) {
-      if (key === "softWarningRatio") continue;
-      if (typeof ub[key] === "number" && typeof pb[key] === "number") budgets[key] = Math.min(ub[key], pb[key]);
+      if (key === "softWarningRatio" || key === "unknownCallUsd") continue;
+      // A project value is compared with the user's, or the default when the user sets none: it can only tighten.
+      const base = typeof ub[key] === "number" ? ub[key] : (DEFAULTS.budgets as unknown as Record<string, unknown>)[key];
+      if (typeof pb[key] === "number" && typeof base === "number") budgets[key] = Math.min(base, pb[key]);
+    }
+    // A lower estimate for an unknown-cost call would loosen the budget, so a project can only raise it. A project
+    // value is compared with the user's, or the default when the user sets none.
+    if (typeof pb.unknownCallUsd === "number") {
+      budgets.unknownCallUsd = Math.max(typeof ub.unknownCallUsd === "number" ? ub.unknownCallUsd : DEFAULT_UNKNOWN_CALL_USD, pb.unknownCallUsd);
     }
     // A lower ratio warns earlier, which is the more restrictive choice.
-    if (typeof ub.softWarningRatio === "number" && typeof pb.softWarningRatio === "number") {
-      budgets.softWarningRatio = Math.min(ub.softWarningRatio, pb.softWarningRatio);
+    if (typeof pb.softWarningRatio === "number") {
+      budgets.softWarningRatio = Math.min(typeof ub.softWarningRatio === "number" ? ub.softWarningRatio : DEFAULTS.budgets.softWarningRatio, pb.softWarningRatio);
     }
     merged.budgets = budgets;
   }
@@ -741,13 +931,20 @@ export function configPaths(cwd: string): { projectPath: string; userPath: strin
 
 export function loadConfig(cwd: string): WorkflowConfig {
   const { projectPath, userPath } = configPaths(cwd);
-  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath) : undefined;
-  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath) : undefined;
+  const warnings: string[] = [];
+  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;
+  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
   const where = projectRaw ? projectPath : userPath;
-  const warnings: string[] = [];
   const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
   validateResolvedConfig(config, where);
+  // An old config lists tiers but no ticket tiers: /build then runs low, medium and high tickets on cheap, standard and premium.
+  if (Object.keys(config.tiers).length > 0) {
+    const missing = TICKET_TIERS.filter((tier) => !config.tiers[tier]);
+    if (missing.length > 0) {
+      warnings.push(`tiers.${missing.join("/")} not set: /build uses cheap, standard and premium for low, medium and high tickets. Add ticketLow, ticketMedium and ticketHigh under tiers to pick the models.`);
+    }
+  }
   if (warnings.length > 0) config.warnings = warnings;
   if (config.proprietaryCode && config.orgProviderAllowlist.length === 0) {
     throw new WorkflowError(
@@ -853,15 +1050,21 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
   const explicit = config.tiers[tier];
   if (explicit) return explicit;
   if (tier === "deterministic" || tier === "advisor") return [];
+  // Standalone jobs run on the direct tier's models when the config has no batch list.
+  if (tier === "batch") return tierCandidates(config, "cheap");
+  // Ticket tiers missing from an older config run on the general tier of the same strength.
+  if (tier === "ticketLow" || tier === "ticketMedium" || tier === "ticketHigh") {
+    return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+  }
   const provider = config.models[tier];
-  return [{ provider, model: modelNameFor(config, provider, tier), api: "chat" }];
+  return [{ provider, model: modelNameFor(config, provider, tier) }];
 }
 
 /** Model id used for pricing lookup. Missing ids stay unresolved so the charge is unknown. */
 export function modelNameFor(config: WorkflowConfig, provider: ProviderId, tier: Tier): string {
   if (provider === "foundry") {
     const deployments = config.providers.foundry?.deployments;
-    if (tier === "classifier" || tier === "cheap" || tier === "deterministic") {
+    if (tier === "cheap" || tier === "deterministic") {
       return deployments?.cheap ?? deployments?.classifier ?? "";
     }
     return deployments?.reasoning ?? "";

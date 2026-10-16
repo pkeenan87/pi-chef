@@ -23,7 +23,6 @@ providers:
     routeStyle: v1                   # <endpoint>/openai/v1/..., deployment name in `model`, no api-version
     audience: https://ai.azure.com   # az account get-access-token --resource https://ai.azure.com
     api: openai-completions
-    # decisionsPath: /decisions      # UNVERIFIED for Microsoft-Decision-1 in Foundry; change if your deployment differs
   vercel:
     type: vercel-ai-gateway
     auth: vercel-cli
@@ -39,43 +38,79 @@ providers:
 # (Thompson sampling over per-model successes and failures), breaking ties by the order here.
 # A candidate is skipped when its provider is not signed in, an org allowlist excludes it,
 # its circuit is open, or its expected cost exceeds the remaining budget.
+# Who does what:
+#   the main chat session       session.model (Opus 5.5), a normal Pi model pinned at session start
+#   compaction summaries        session.compactionTier (cheap: Haiku 5.5), through session_before_compact
+#   standalone batch jobs       batch (Luna): one-line summaries of files a diff clip cut
+#   /build tickets              ticketLow / ticketMedium / ticketHigh by the ticket's difficulty; a failure
+#                               climbs ticketLow -> ticketMedium -> ticketHigh -> premium
+#   /review model pass          routing.reviewTier (premium: Opus 5.5)
+#   /plan and previews          standard (premium for high complexity or security-sensitive work)
 # Foundry `model` values are YOUR deployment names. The names below are placeholders.
-# `api: decisions` models answer structured questions; they are not chat models.
+# Nothing classifies by model: the planner (Opus) rates complexity, risk and security in plan_spec, and a keyword scan
+# can raise the security flag. Foundry and Vercel serve chat models such as the Astra deployment below.
 tiers:
   deterministic:        # used only when the local server answers; otherwise the plan's literal edits apply
     - { provider: local, model: "qwen2.5-coder:7b" }
-  classifier:
-    - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
-    - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
-  cheap:
-    - { provider: openai, model: gpt-6-luna }
+  cheap:                # compaction summaries (session.compactionTier)
     - { provider: anthropic, model: claude-haiku-5-5 }
-  standard:
+  batch:                # standalone jobs the extension runs by itself, outside any conversation (cut-file summaries)
+    - { provider: openai, model: gpt-6-luna }
+  standard:             # /plan and preview routes
     - { provider: anthropic, model: claude-sonnet-5-5 }
-    - { provider: xai, model: grok-4.7, label: "Grok 4.7 (SuperGrok)" }
-    - { provider: foundry, model: grok-4-7, label: "Grok 4.7 (Foundry)" }
-  premium:
+    - { provider: openai, model: "gpt-6.1-sol" }
+  premium:              # the last rung of the ticket ladder and /review
     - { provider: anthropic, model: claude-opus-5-5 }
+  ticketLow:            # difficulty: low (mechanical or small and well specified)
+    - { provider: xai, model: grok-4.7, label: "Grok 4.7 (SuperGrok)" }
+  ticketMedium:         # difficulty: medium (typical feature work)
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+  ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
   advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
-    - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: openai, model: gpt-6-astra }
+    - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
 
 routing:
-  minConfidence: 0.75
-  maxEscalations: 2
+  maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium
   maxTier: premium
+  reviewTier: premium   # the /review model pass; a failed part falls back to standard
   requirePremiumReviewFor:
     - auth
     - permissions
     - secrets
     - security-sensitive
   circuitBreakerFailures: 3
+  # Ranking only (never billed, never in a budget): USD added to every candidate's price before dividing by its
+  # success rate. It stands for the time and retry cost of a failed attempt, so a $0 subscription model with a
+  # poor record does not always win. 0 turns it off.
+  attemptOverheadUsd: 0.02
+
+# The main chat session is a normal Pi model, not a router. Compaction summaries come from a cheap model.
+# session.model / session.compactionTier are user-config-only (~/.pi/agent/cost-workflow.yaml); a project may only set
+# session.pin: false. Defaults: anthropic/claude-opus-5-5, pinned at session start, compaction on the cheap tier.
 
 workers:
   tokenBudget: 8000
   ticketContextTokens: 150000
+
+# Second opinions. Advisors advise; the Opus session or review model resolves, and approval stays yours.
+#   /plan     plan_consult puts the draft tickets and 2-3 questions to every advisor (one per provider), once per
+#             plan version; plan_tickets then needs Opus's advisorResolution.
+#   /build    after a ticket's checks pass, Opus reads the ticket and its own diff and may put 2-3 questions to the
+#             advisor tier. Medium tickets consult one advisor from another provider than the implementer; high
+#             tickets consult every advisor in parallel; low tickets none. Opus gives the final verdict.
+#   /review   by the branch's highest ticket difficulty: high both, medium one from another vendor than the reviewer,
+#             low none. With no plan: Astra above adHocMinLines changed lines. Opus resolves the findings.
+# Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed per token on
+# an API key (see the api-key pricing rows).
+advisors:
+  # tickets / plan / summarizeCut default to true; a project can only turn them off (false), never on.
+  adHocMinLines: 400    # /review on a branch with no plan: Astra only above this many changed lines
+  timeoutMs: 180000     # per advisor or review call
+  maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
+  maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)
 
 branchPrefix: cost
 
@@ -83,6 +118,9 @@ budgets:
   taskUsd: 20
   dailyUsd: 75
   softWarningRatio: 0.8
+  # Budget math only: what one ledger entry with unknown cost and nothing to price it from (for example a
+  # call whose usage was lost) counts as. The ledger keeps it as unknown. A project can only raise it.
+  unknownCallUsd: 0.05
 
 approvals:
   plan: required
@@ -101,15 +139,13 @@ proprietaryCode: false
 # bill extra usage, which this file cannot see.
 pricing:
   - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
-  # Decisions models (placeholders)
-  - { provider: foundry, model: Microsoft-Decision-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
-  - { provider: vercel, model: "typesafe-ai/jev", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.10 }
   # Subscription-backed (0 marginal; placeholder)
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-opus-4-8, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-fable-5-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: openai, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: xai, model: grok-4.7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
@@ -119,6 +155,7 @@ pricing:
   - { provider: anthropic, model: claude-haiku-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.50, cacheReadPerMillionUsd: 0.01, cacheWritePerMillionUsd: 0.125 }
   - { provider: anthropic, model: claude-sonnet-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 10, cacheReadPerMillionUsd: 0.20, cacheWritePerMillionUsd: 2.5 }
   - { provider: anthropic, model: claude-opus-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 4, outputPerMillionUsd: 20, cacheReadPerMillionUsd: 0.20, cacheWritePerMillionUsd: 5 }
+  - { provider: anthropic, model: claude-opus-4-8, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25, cacheReadPerMillionUsd: 0.50, cacheWritePerMillionUsd: 6.25 }
   - { provider: anthropic, model: claude-fable-5-1, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50, cacheReadPerMillionUsd: 0.25, cacheWritePerMillionUsd: 12.5 }
   - { provider: xai, model: grok-4.7, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 6, cacheReadPerMillionUsd: 0.5, cacheWritePerMillionUsd: 0 }
   # Per-token Foundry deployments (placeholders)

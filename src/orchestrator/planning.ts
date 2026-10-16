@@ -1,62 +1,13 @@
 import path from "node:path";
 import type { AcceptedClassification, CommandResult, PlanDocument, TaskState } from "../domain.js";
-import { classifyTaskWithUsage, type ClassifierUsage, type Decider } from "../router/classify.js";
-import { selectCandidate } from "../router/select.js";
+import { classifyKeywords } from "../router/classify.js";
 import { redact } from "../redact.js";
-import { budgetRemainingUsd, budgetState, recordClassifier, remember } from "./budget.js";
+import { budgetState, remember } from "./budget.js";
 import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireActive, transition, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
-import { announce, availability, decide, suggestAdvisor } from "./routing.js";
-
-/** Classifies with the tier's Decisions model when one is selected and reachable, else the chat classifier, else keywords. */
-export async function classify(ctx: WorkflowContext, text: string): Promise<{ classification: AcceptedClassification; usage?: ClassifierUsage }> {
-  const minConfidence = ctx.config.routing.minConfidence;
-  const selection = selectCandidate({
-    tier: "classifier",
-    taskType: "classification",
-    config: ctx.config,
-    table: ctx.store.readMetrics(),
-    availability: await availability(ctx),
-    budgetRemainingUsd: budgetRemainingUsd(ctx, ctx.store.readActive()),
-    rng: ctx.rng,
-    at: ctx.now(),
-    api: "decisions",
-    // A classifier call to a provider that is not signed in cannot succeed; the keyword fallback is cheaper than a billed failure.
-    strictAvailability: true,
-  });
-  const candidate = selection.candidate;
-  const client = candidate ? ctx.deciders[candidate.provider] : undefined;
-  if (!candidate || !client) return classifyTaskWithUsage(text, { minConfidence, classifier: ctx.classifier });
-  await announce(ctx, undefined, "classify", { tier: "classifier", provider: candidate.provider, model: candidate.model, selectionReason: selection.reason, considered: selection.considered });
-  let threw = false;
-  const decider: Decider = {
-    async decide(input, questions, signal) {
-      try {
-        const result = await client.decide({ model: candidate.model, input, questions, signal });
-        return { answers: result.answers, usage: result.usage, provider: candidate.provider, model: candidate.model };
-      } catch (error) {
-        threw = true;
-        throw error;
-      }
-    },
-  };
-  const result = await classifyTaskWithUsage(text, { minConfidence, decider });
-  // Only a model answer counts as a success, and only an error, invalid output, or refusal counts as a
-  // failure. A low-confidence answer is neither: it says the request was vague, not that the model broke.
-  const codes = result.classification.reason_codes;
-  if (result.classification.source === "model") {
-    await ctx.store.bumpMetric("classification", "classifier", true, ctx.now(), candidate);
-  } else if (!codes.includes("low_confidence")) {
-    await ctx.store.bumpMetric("classification", "classifier", false, ctx.now(), candidate);
-  }
-  // A call that threw or timed out may still have been billed: ledger it as unknown cost, never as zero.
-  if (threw && !result.usage) {
-    return { ...result, usage: { usage: { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 1 }, provider: candidate.provider, model: candidate.model } };
-  }
-  return result;
-}
+import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
 
 export function blank(taskId: string, request: string, at: string): TaskState {
   return {
@@ -99,7 +50,6 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
   return guard(async () => {
     const safe = redact(request);
     const at = iso(ctx);
-    // Classifying costs money, so an exhausted budget stops here rather than after the charge.
     if (budgetState(ctx, ctx.store.readActive()).status === "hard") {
       return fail("BUDGET", "Task or daily budget is exhausted. /plan was not run. Run /cost for details.");
     }
@@ -107,17 +57,9 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     assertGraph(parsed.groups);
     const current = await closeFinished(ctx, active(ctx));
     const terminal = !current || current.phase === "COMPLETE" || current.phase === "FAILED" || current.phase === "IDLE";
-    // Reuse the stored classification when the request text is unchanged (no second classifier charge).
+    // Keep the stored classification (possibly the planner's) when the request text is unchanged.
     const reused = !terminal && current?.request === safe ? current.classification : undefined;
-    let classification: AcceptedClassification;
-    let classifierUsage: ClassifierUsage | undefined;
-    if (reused) {
-      classification = reused;
-    } else {
-      const result = await classify(ctx, safe);
-      classification = result.classification;
-      classifierUsage = result.usage;
-    }
+    const classification: AcceptedClassification = reused ?? classifyKeywords(safe);
     const routing = await decide(ctx, classification, "plan", { taskId: current?.taskId });
     let state: TaskState;
     if (terminal) {
@@ -126,7 +68,6 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     } else {
       state = current!;
     }
-    recordClassifier(ctx, state.taskId, state.phase, classifierUsage);
     const draft: PlanDocument = {
       version: state.approvedVersion ? state.approvedVersion + 1 : state.plan?.version ?? 1,
       createdAt: at,
@@ -225,14 +166,15 @@ export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
   });
 }
 
-/** Previews the classification and route for a task without changing its state. */
+/** Previews the keyword classification and route for a task without changing its state. The planner sets complexity during /plan. */
 export function route(ctx: WorkflowContext, task: string): Promise<CommandResult> {
   return guard(async () => {
-    const { classification, usage } = await classify(ctx, redact(task));
+    const classification = classifyKeywords(redact(task));
     const current = active(ctx);
-    recordClassifier(ctx, current?.taskId ?? "route", current?.phase ?? "IDLE", usage);
     const decision = await decide(ctx, classification, "preview", { taskId: current?.taskId });
     await announce(ctx, current?.taskId, "preview", decision);
-    return done(JSON.stringify({ classification, decision }, null, 2), { classification, decision });
+    const routing = routingSummary(ctx);
+    const note = "Keyword scan only: security keywords raise risk, and the planner sets complexity and risk during /plan (plan_spec).";
+    return done(JSON.stringify({ note, classification, decision, routing }, null, 2), { classification, decision, routing });
   });
 }

@@ -86,20 +86,20 @@ describe("/build order and routing", () => {
     expect(d.sends.map((item) => item.ticket)).toEqual(["01", "02"]);
   });
 
-  it("routes each ticket by its tier hint and puts the rules, spec, and blocker summary in the prompt", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" }), ticket("02", { suggestedTier: "standard", blockedBy: ["01"] })] });
+  it("routes each ticket by its difficulty and puts the rules, spec, and blocker summary in the prompt", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })] });
     const d = fakeDriver(t.cwd, (send) => {
       d.write(`f${send.ticket}.txt`);
       return { lastText: `Added the retry loop in ticket ${send.ticket}.\n- [x] retry works\nFiles changed: f${send.ticket}.txt` };
     });
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends.map((item) => `${item.model.provider}/${item.model.id}`)).toEqual(["openai/gpt-6-luna", "foundry/grok-4-7"]);
+    expect(d.sends.map((item) => `${item.model.provider}/${item.model.id}`)).toEqual(["xai/grok-4.7", "anthropic/claude-sonnet-5-5"]);
     expect(d.sends[0]!.text.startsWith(BUILD_CHUNK_RULES)).toBe(true);
     expect(d.sends[0]!.text).toContain("Retry failed ingests.");
     expect(d.sends[0]!.text).toContain("Do not commit, push, merge, or switch branches");
     expect(d.sends[1]!.text).toContain("### 01: Ticket 01");
     expect(d.sends[1]!.text).toContain("Added the retry loop in ticket 01.");
-    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "standard", provider: "foundry", model: "grok-4-7", attempts: 1 });
+    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "ticketMedium", provider: "anthropic", model: "claude-sonnet-5-5", attempts: 1 });
   });
 });
 
@@ -123,26 +123,26 @@ describe("/build commits", () => {
     const file = readFileSync(path.join(t.app.store.taskDir(t.taskId), "tickets", "01-t01.md"), "utf8");
     expect(file).toContain("## Status: done");
     expect(file).toContain("- [x] retry works");
-    expect(t.app.store.readMetrics().general?.standard ?? t.app.store.readMetrics().general?.cheap).toBeDefined();
+    expect(t.app.store.readMetrics().general?.ticketMedium ?? t.app.store.readMetrics().general?.ticketLow).toBeDefined();
     expect(d.state.finished).toBe(1);
   });
 
   it("posts a progress line per ticket and a final table", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "standard" })] });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })] });
     const d = fakeDriver(t.cwd, (send) => {
       d.write("f.txt");
       // The main-session turn is ledgered as that ticket's spend.
-      t.app.observeUsage({ provider: "foundry", model: "grok-4-7", usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } });
+      t.app.observeUsage({ provider: "anthropic", model: "claude-sonnet-5-5", usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } });
       expect(send.ticket).toBe("01");
     });
     expect((await t.run(d.driver)).ok).toBe(true);
     const sha = (await git(t.cwd, "rev-parse", "--short=7", "HEAD")).slice(0, 7);
-    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toMatch(new RegExp(`^Ticket 01 · foundry/grok-4-7 · \\d+\\.\\ds · \\$0\\.0050 · checks passed · committed ${sha}$`));
+    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toMatch(new RegExp(`^Ticket 01 · medium · anthropic/claude-sonnet-5-5 · \\d+\\.\\ds · \\$0\\.0180 · checks passed · committed ${sha}$`));
     const ledger = t.app.store.readLedger().filter((item) => item.reason.includes("observed assistant usage"));
     expect(ledger).toHaveLength(1);
     expect(ledger[0]!.reason).toBe("observed assistant usage · ticket 01");
     expect(t.reports).toHaveLength(1);
-    expect(t.reports[0]).toContain("| 01 | Ticket 01 | foundry/grok-4-7 |");
+    expect(t.reports[0]).toContain("| 01 | Ticket 01 | medium | anthropic/claude-sonnet-5-5 |");
     expect(t.reports[0]).toContain(`done ${sha}`);
     expect(t.reports[0]).toContain("Next: /review");
   });
@@ -160,7 +160,7 @@ describe("/build commits", () => {
 
 describe("/build failures", () => {
   it("sends the failing output once, then stops and marks the ticket failed with a metric strike", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" }), ticket("02", { blockedBy: ["01"] })] });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { blockedBy: ["01"] })] });
     t.passing.ok = false;
     const d = fakeDriver(t.cwd, () => d.write("f.txt"));
     const result = await t.run(d.driver);
@@ -172,10 +172,10 @@ describe("/build failures", () => {
     expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed" });
     expect(t.load().ticketRuns!["02"]).toBeUndefined();
     expect(t.load().build!.currentTicket).toBeUndefined();
-    expect(t.app.store.readMetrics().general?.cheap).toMatchObject({ failure: 1 });
+    expect(t.app.store.readMetrics().general?.ticketLow).toMatchObject({ failure: 1 });
     expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
     expect(d.state.finished).toBe(1);
-    expect(t.reports[0]).toContain("| 01 | Ticket 01 | openai/gpt-6-luna |");
+    expect(t.reports[0]).toContain("| 01 | Ticket 01 | low | xai/grok-4.7 |");
     expect(t.reports[0]).toContain("failed");
   });
 
@@ -213,25 +213,62 @@ describe("/build failures", () => {
   });
 
   it("sends a ticket that is still failing to the next tier up", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" })] });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
     t.passing.ok = false;
     const first = fakeDriver(t.cwd, () => first.write("f.txt"));
     await t.run(first.driver);
-    expect(first.sends[0]!.model).toEqual({ provider: "openai", id: "gpt-6-luna" });
+    expect(first.sends[0]!.model).toEqual({ provider: "xai", id: "grok-4.7" });
     const second = fakeDriver(t.cwd, () => {
       t.passing.ok = true;
     });
     const result = await t.run(second.driver);
     // The checks still fail on the tree as it is, so the ticket goes to a model again, one tier up.
-    expect(second.sends[0]!.model).toEqual({ provider: "foundry", id: "grok-4-7" });
+    expect(second.sends[0]!.model).toEqual({ provider: "anthropic", id: "claude-sonnet-5-5" });
     expect(second.sends[0]!.text).toContain("AssertionError: expected 1");
     expect(result.ok, result.text).toBe(true);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", attempts: 2, tier: "standard" });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", attempts: 2, tier: "ticketMedium" });
+  });
+
+  it("starts low, medium and high tickets on grok, sonnet and sol", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium" }), ticket("03", { difficulty: "high" })] });
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends.map((item) => `${item.model.provider}/${item.model.id}`)).toEqual(["xai/grok-4.7", "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"]);
+    expect(["01", "02", "03"].map((id) => t.load().ticketRuns![id]!.tier)).toEqual(["ticketLow", "ticketMedium", "ticketHigh"]);
+  });
+
+  it("maps old suggestedTier-only tickets and prefers difficulty when both are set", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "deterministic" }), ticket("02", { suggestedTier: "standard" }), ticket("03", { suggestedTier: "premium" }), ticket("04", { suggestedTier: "premium", difficulty: "low" }), ticket("05")] });
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends.map((item) => item.model.id)).toEqual(["grok-4.7", "claude-sonnet-5-5", "gpt-6.1-sol", "grok-4.7", "claude-sonnet-5-5"]);
+  });
+
+  it("escalates grok, sonnet, sol, opus on repeated failures", async () => {
+    // As in the sample config, premium lists Opus alone.
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]) });
+    t.passing.ok = false;
+    const used: string[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
+      await t.run(d.driver);
+      used.push(d.sends[0]!.model.id);
+    }
+    expect(used).toEqual(["grok-4.7", "claude-sonnet-5-5", "gpt-6.1-sol", "claude-opus-5-5"]);
+    expect(t.load().ticketRuns!["01"]!.tier).toBe("premium");
+  });
+
+  it("starts a security-sensitive plan's tickets at ticketHigh at least", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], approve: true });
+    await t.app.store.update(t.taskId, "test", (state) => ({ ...state, plan: { ...state.plan!, securitySensitive: true } }));
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends[0]!.model.id).toBe("gpt-6.1-sol");
   });
 
   it("does not strike the model when a check cannot run", async () => {
     const t = await buildTask({
-      tickets: [ticket("01", { suggestedTier: "cheap" })],
+      tickets: [ticket("01", { difficulty: "low" })],
       mutate: (config) => {
         config.checks = [{ name: "wipe", command: "rm", args: ["-rf", "/"] }];
       },
@@ -242,7 +279,7 @@ describe("/build failures", () => {
     expect(result.code).toBe("CHECKS_UNRUNNABLE");
     expect(d.sends).toHaveLength(1);
     expect(t.load().ticketRuns!["01"]!.status).toBe("failed");
-    expect(t.app.store.readMetrics().general?.cheap).toBeUndefined();
+    expect(t.app.store.readMetrics().general?.ticketLow).toBeUndefined();
   });
 
   it("passes with a warning when no checks exist at all", async () => {
@@ -274,7 +311,7 @@ describe("/build failures", () => {
 
 describe("/build stops", () => {
   it("leaves an aborted ticket in progress and starts nothing else", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" }), ticket("02", { blockedBy: ["01"] })] });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { blockedBy: ["01"] })] });
     const d = fakeDriver(t.cwd, () => ({ aborted: true }));
     const result = await t.run(d.driver);
     expect(result.ok).toBe(false);
@@ -288,12 +325,12 @@ describe("/build stops", () => {
     // An interruption is not a failure: the resumed ticket stays on the same tier.
     const again = fakeDriver(t.cwd, (send) => again.write(`f${send.ticket}.txt`));
     expect((await t.run(again.driver)).ok).toBe(true);
-    expect(again.sends[0]!.model).toEqual({ provider: "openai", id: "gpt-6-luna" });
+    expect(again.sends[0]!.model).toEqual({ provider: "xai", id: "grok-4.7" });
     expect(again.sends[0]!.text).toContain("interrupted");
   });
 
   it("does not auto-commit an interrupted ticket's leftovers: it goes to a model again on the same tier", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "cheap" })] });
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
     const first = fakeDriver(t.cwd, () => {
       first.write("partial.txt");
       return { aborted: true };
@@ -303,7 +340,7 @@ describe("/build stops", () => {
     const result = await t.run(again.driver);
     expect(result.ok, result.text).toBe(true);
     expect(again.sends).toHaveLength(1);
-    expect(again.sends[0]!.model).toEqual({ provider: "openai", id: "gpt-6-luna" });
+    expect(again.sends[0]!.model).toEqual({ provider: "xai", id: "grok-4.7" });
     expect(again.sends[0]!.text).toContain("Uncommitted changes from an interrupted attempt are in the working tree");
     expect(t.progress.some((line) => line.includes("on your changes"))).toBe(false);
   });

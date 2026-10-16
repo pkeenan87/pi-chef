@@ -118,14 +118,14 @@ describe("model review retries", () => {
   it("orders the review tier: routed candidate, then another provider, then by score; excluded ones are left out", () => {
     const config = tieredConfig();
     config.tiers.standard = [
-      { provider: "anthropic", model: "claude-sonnet-5-5", api: "chat" },
-      { provider: "anthropic", model: "claude-haiku-5-5", api: "chat" },
-      { provider: "foundry", model: "grok-4-7", api: "chat" },
-      { provider: "openai", model: "gpt-6-luna", api: "chat" },
+      { provider: "anthropic", model: "claude-sonnet-5-5" },
+      { provider: "anthropic", model: "claude-haiku-5-5" },
+      { provider: "foundry", model: "grok-4-7" },
+      { provider: "openai", model: "gpt-6-luna" },
     ];
     const decision = {
       tier: "standard",
-      candidate: { provider: "anthropic", model: "claude-sonnet-5-5", api: "chat" },
+      candidate: { provider: "anthropic", model: "claude-sonnet-5-5" },
       considered: [
         { provider: "anthropic", model: "claude-sonnet-5-5", score: 0.01 },
         { provider: "anthropic", model: "claude-haiku-5-5", score: 0.001 },
@@ -176,5 +176,48 @@ describe("/review model review after a failed call", () => {
     const byProvider = (provider: string) => cells.find(([key]) => key.includes(`:${provider}/`))![1];
     expect(byProvider(calls[0]!.provider)).toMatchObject({ success: 0, failure: 1 });
     expect(byProvider(calls[1]!.provider)).toMatchObject({ success: 1, failure: 0 });
+  });
+});
+
+describe("/review model pass routing", () => {
+  const opusOnly = () => {
+    const config = tieredConfig();
+    config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }];
+    return config;
+  };
+  const chatFor = (fail: (model: string) => boolean) => {
+    const models: string[] = [];
+    const chat: ChatFn = async (candidate) => {
+      models.push(candidate.model);
+      if (fail(candidate.model)) throw new Error("boom");
+      return { text: "[]", usage, provider: candidate.provider, model: candidate.model };
+    };
+    return { chat, models };
+  };
+  const changed = async (config: ReturnType<typeof tieredConfig>, chat: ChatFn) => {
+    const cwd = await tempRepo();
+    const app = workflow(cwd, { config, chat });
+    mkdirSync(path.join(cwd, "src"), { recursive: true });
+    writeFileSync(path.join(cwd, "src", "ingest.ts"), "export const ingest = 1;\n");
+    return app;
+  };
+
+  it("routes to Opus and records the outcome under review:<type>", async () => {
+    const { chat, models } = chatFor(() => false);
+    const app = await changed(opusOnly(), chat);
+    expect((await app.review()).ok).toBe(true);
+    expect(models).toEqual(["claude-opus-5-5"]);
+    const metrics = app.store.readMetrics();
+    expect(Object.keys(metrics).length).toBeGreaterThan(0);
+    expect(Object.keys(metrics).every((type) => type.startsWith("review:"))).toBe(true);
+    expect(Object.values(metrics).flatMap((row) => Object.keys(row))).toContain("premium");
+  });
+
+  it("falls back to the standard tier when Opus fails", async () => {
+    const { chat, models } = chatFor((model) => model === "claude-opus-5-5");
+    const app = await changed(opusOnly(), chat);
+    expect((await app.review()).ok).toBe(true);
+    // The first standard candidate on another provider than Opus (the test config lists Sonnet, then Foundry Grok).
+    expect(models).toEqual(["claude-opus-5-5", "grok-4-7"]);
   });
 });

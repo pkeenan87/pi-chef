@@ -1,4 +1,4 @@
-import { WorkflowError, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
+import { WorkflowError, type PlanAdvisorReview, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
 import { remember } from "./budget.js";
 import { iso, knownZero, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
@@ -25,15 +25,20 @@ function specSummary(ctx: WorkflowContext, taskId: string, fallback: string): st
   return (match?.[1]?.trim() || fallback).slice(0, 400);
 }
 
+/** The plan version the draft being written will have. */
+export function draftVersion(task: TaskState): number {
+  return task.approvedVersion ? task.approvedVersion + 1 : task.plan?.version ?? 1;
+}
+
 /** The draft plan document for these tickets, built from the active planning task without saving anything. */
-function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: string): PlanDocument {
+function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: string, advisorReview?: PlanAdvisorReview): PlanDocument {
   const parsed = applyOverlap(ticketsToGroups(tickets));
   assertGraph(parsed.groups);
   const classification = task.classification;
   const routing = task.routing;
   const ticketCriteria = tickets.flatMap((ticket) => ticket.acceptanceCriteria.map((item) => `${ticket.id}: ${item}`));
   return {
-    version: task.approvedVersion ? task.approvedVersion + 1 : task.plan?.version ?? 1,
+    version: draftVersion(task),
     createdAt: at,
     summary: specSummary(ctx, task.taskId, task.request),
     risks: classification?.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Plan approval stays required."],
@@ -43,25 +48,26 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
     overlap: parsed.overlap,
     securitySensitive: routing?.requireHumanApproval ?? false,
     tickets,
+    ...(advisorReview ? { advisorReview } : {}),
   };
 }
 
 /** The full plan (spec and tickets) as the person will review it, before anything is saved. */
-export function previewPlan(ctx: WorkflowContext, tickets: Ticket[]): string {
+export function previewPlan(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): string {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
-  return renderPlanReview(draftFor(ctx, task, tickets, iso(ctx)), ctx.store.readText(task.taskId, SPEC_FILE));
+  return renderPlanReview(draftFor(ctx, task, tickets, iso(ctx), advisorReview), ctx.store.readText(task.taskId, SPEC_FILE));
 }
 
 /**
  * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
  * Plan approval is still required before /build.
  */
-export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<{ plan: PlanDocument; files: string[]; markdown: string }> {
+export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): Promise<{ plan: PlanDocument; files: string[]; markdown: string }> {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
   const at = iso(ctx);
-  const draft = draftFor(ctx, task, tickets, at);
+  const draft = draftFor(ctx, task, tickets, at, advisorReview);
   const routing = task.routing;
   const state = await ctx.store.update(task.taskId, "tickets drafted", (current) =>
     move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),

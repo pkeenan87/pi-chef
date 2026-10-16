@@ -7,8 +7,8 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
-import { builtWorkflow, permissiveRegistry, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { builtWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 describe("pi extension surface", () => {
@@ -21,7 +21,6 @@ describe("pi extension surface", () => {
       },
       on() { return () => undefined; },
       appendEntry() {},
-      registerVirtualModel() {},
       setModel: async () => false,
     };
     registerWorkflow(pi as unknown as ExtensionAPI);
@@ -52,7 +51,6 @@ describe("pi extension surface", () => {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     const setModelCalls: { provider: string; id: string }[] = [];
     const onSetModel: { run?: (model: { provider: string; id: string }) => void } = {};
-    let virtual: { route: (request: unknown, ctx: unknown) => Promise<{ model: { provider: string; id: string } }> } | undefined;
     const pi = {
       registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
         commands.set(name, options);
@@ -62,9 +60,6 @@ describe("pi extension surface", () => {
         return () => undefined;
       },
       appendEntry() {},
-      registerVirtualModel(model: typeof virtual) {
-        virtual = model;
-      },
       async setModel(model: { provider: string; id: string }) {
         setModelCalls.push(model);
         onSetModel.run?.(model);
@@ -72,11 +67,8 @@ describe("pi extension surface", () => {
       },
     };
     registerWorkflow(pi as unknown as ExtensionAPI);
-    return { commands, handlers, route: () => virtual!, setModelCalls, onSetModel };
+    return { commands, handlers, setModelCalls, onSetModel };
   }
-
-  const registry = permissiveRegistry();
-  const user = (content: string) => ({ role: "user", content });
 
   it("keeps one workflow across commands", async () => {
     const { app, cwd } = await builtWorkflow();
@@ -96,59 +88,12 @@ describe("pi extension surface", () => {
     bindWorkflow(undefined);
   });
 
-  it("routes the virtual model on the latest user message only", async () => {
-    const cwd = await tempRepo();
-    const { handlers, route } = fakePi();
-    handlers.get("session_start")!({}, { cwd });
-    const ctx = { modelRegistry: registry };
-    const old = "change auth and permissions for production secrets";
-    const latest = "add a retry counter to the parser";
-    const only = await route().route({ reason: "user", messages: [user(latest)] }, ctx);
-    const mixed = await route().route({ reason: "user", messages: [user(old), { role: "assistant", content: "ok" }, user(latest)] }, ctx);
-    expect(mixed.model).toEqual(only.model);
-    const security = await route().route({ reason: "user", messages: [user(old)] }, ctx);
-    expect(only.model.provider).toBe("anthropic");
-    expect(security.model.provider).toBe("openai");
-    bindWorkflow(undefined);
-  });
-
-  it("reloads config when the file changes and refuses to route once the budget is exhausted", async () => {
-    const { app, cwd } = await builtWorkflow();
-    const { handlers, route } = fakePi();
-    bindWorkflow(app);
-    handlers.get("session_start")!({}, { cwd });
-    const ctx = { modelRegistry: registry };
-    const first = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
-    expect(first.model.provider).toBe("anthropic");
-    mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
-    writeFileSync(
-      path.join(cwd, ".pi-workflows", "config.yaml"),
-      [
-        "providers:",
-        "  openai: { type: openai, auth: account-login, model: gpt-5.4 }",
-        "  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet }",
-        "  foundry: { type: azure-foundry, auth: azure-cli, endpointEnv: X, deployments: { classifier: c, reasoning: r, cheap: c } }",
-        "  local: { type: openai-compatible, baseUrl: 'http://127.0.0.1:1/v1', model: m }",
-        "models: { classifier: local, cheap: local, standard: local, premium: openai }",
-        "",
-      ].join("\n"),
-    );
-    const second = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
-    expect(second.model.provider).toBe("local");
-    app.store.appendLedger({
-      id: "big", at: new Date().toISOString(), taskId: app.activeTaskId()!, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
-    });
-    await expect(route().route({ reason: "user", messages: [user("add a retry counter")] }, ctx)).rejects.toThrow(/budget/i);
-    bindWorkflow(undefined);
-  });
-
   it("drives /build through fresh sessions: model slot, newSession on the live ctx, last text, and the user's model put back", async () => {
     const { cwd, app } = await ticketWorkflow([sampleTicket("01", { suggestedTier: "standard" }), sampleTicket("02", { suggestedTier: "standard", blockedBy: ["01"] })]);
     const { commands, handlers, setModelCalls, onSetModel } = fakePi();
     bindWorkflow(app);
     const slot = Symbol.for("pi-cost-router.restore-model");
-    const original = { provider: "cost-opt", id: "auto" };
+    const original = { provider: "openai", id: "gpt-user" };
     const registryFor = { find: (provider: string, id: string) => ({ provider, id }), isUsingOAuth: () => true, getAvailable: () => [] };
     const log: string[] = [];
     const notices: string[] = [];
@@ -171,7 +116,7 @@ describe("pi extension surface", () => {
           expect(await bashHook("git switch main")).toMatchObject({ block: true });
           expect(await bashHook("npm test")).toBeUndefined();
           writeFileSync(path.join(cwd, `f${ticket}.txt`), "x\n");
-          handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `Done ${ticket}.\n- [x] retry works` }], provider: "foundry", model: "grok-4-7", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, {});
+          handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `Done ${ticket}.\n- [x] retry works` }], provider: "anthropic", model: "claude-sonnet-5-5", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, {});
         },
         async waitForIdle() {
           log.push("idle");
@@ -184,7 +129,7 @@ describe("pi extension surface", () => {
           onSetModel.run = (model) => {
             next.model = model;
           };
-          expect((globalThis as Record<symbol, unknown>)[slot]).toMatchObject({ provider: "foundry", id: "grok-4-7" });
+          expect((globalThis as Record<symbol, unknown>)[slot]).toMatchObject({ provider: "anthropic", id: "claude-sonnet-5-5" });
           handlers.get("session_start")!({}, next);
           current = next;
           await options?.withSession?.(next);
@@ -197,10 +142,11 @@ describe("pi extension surface", () => {
     const first = sessionCtx("command");
     first.model = original;
     await commands.get("build")!.handler("", first);
-    expect(log).toEqual(["send 01 on grok-4-7 via session 1", "idle", "send 02 on grok-4-7 via session 2", "idle"]);
+    expect(log).toEqual(["send 01 on claude-sonnet-5-5 via session 1", "idle", "send 02 on claude-sonnet-5-5 via session 2", "idle"]);
     expect(sessions).toBe(2);
-    expect(setModelCalls.map((model) => model.id)).toEqual(["grok-4-7", "grok-4-7", "auto"]);
-    expect(current!.model).toEqual(original);
+    // Pinning is on by default: finish() puts the session on session.model, not on the model the command started on.
+    expect(setModelCalls.map((model) => model.id)).toEqual(["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
+    expect(current!.model).toEqual({ provider: "anthropic", id: "claude-opus-5-5" });
     expect((globalThis as Record<symbol, unknown>)[slot]).toBeUndefined();
     const state = app.store.load(app.activeTaskId()!)!;
     expect(Object.values(state.ticketRuns!).map((run) => run.status)).toEqual(["done", "done"]);
@@ -220,7 +166,7 @@ describe("pi extension surface", () => {
     await commands.get("build")!.handler("", {
       cwd,
       hasUI: true,
-      model: { provider: "cost-opt", id: "auto" },
+      model: { provider: "openai", id: "gpt-user" },
       modelRegistry: { find: () => undefined },
       ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
       newSession: async () => ({ cancelled: true }),
@@ -238,7 +184,7 @@ describe("pi extension surface", () => {
     const make = (): Record<string, unknown> => ({
       cwd,
       hasUI: true,
-      model: { provider: "foundry", id: "grok-4-7" },
+      model: { provider: "anthropic", id: "claude-sonnet-5-5" },
       modelRegistry: { find: () => undefined },
       ui: { notify() {}, setStatus() {}, confirm: async () => true },
       async sendMessage() {},
@@ -303,9 +249,9 @@ describe("web tools", () => {
 
   it("registers the web and plan tools from the extension factory", () => {
     const registered = new Map<string, unknown>();
-    const pi = { registerCommand() {}, on() { return () => undefined; }, appendEntry() {}, registerVirtualModel() {}, registerTool: (tool: { name: string }) => void registered.set(tool.name, tool) };
+    const pi = { registerCommand() {}, on() { return () => undefined; }, appendEntry() {}, registerTool: (tool: { name: string }) => void registered.set(tool.name, tool) };
     extension(pi as unknown as ExtensionAPI);
-    expect([...registered.keys()].sort()).toEqual(["plan_questions", "plan_spec", "plan_tickets", "web_fetch", "web_search"]);
+    expect([...registered.keys()].sort()).toEqual(["plan_consult", "plan_questions", "plan_spec", "plan_tickets", "web_fetch", "web_search"]);
   });
 
   it("ledgers search usage without the query text and shows the route status", async () => {

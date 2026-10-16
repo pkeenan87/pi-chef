@@ -289,6 +289,64 @@ describe("plan_tickets", () => {
     expect(spec).toContain("- Metrics");
   });
 
+  describe("the planner's rating", () => {
+    const rating = { complexity: "low", risk: "low", securitySensitive: false, classificationReason: "one parser wrapper" };
+
+    it("starts with the keyword classification and replaces it with the planner's rating from plan_spec", async () => {
+      const { app, spec } = await planning();
+      const before = app.store.load(app.activeTaskId()!)!.classification!;
+      expect(before).toMatchObject({ source: "keywords", complexity: "medium", task_type: "general" });
+      const result = await call(spec, { ...specParams, ...rating }, headless);
+      expect(textOf(result)).toContain("Rated low complexity, low risk.");
+      const after = app.store.load(app.activeTaskId()!)!;
+      expect(after.classification).toMatchObject({ source: "planner", complexity: "low", risk: "low", task_type: "general", recommended_tier: "cheap", required_capabilities: [] });
+      expect(after.classification!.reason_codes).toContain("reason: one parser wrapper");
+      expect(after.routing?.tier).toBe("cheap");
+      const status = (await app.status()).text;
+      expect(status).toContain("Rating (planner): low complexity, low risk · one parser wrapper");
+    });
+
+    it("raises risk and the flag when the planner says security-sensitive", async () => {
+      const { app, spec } = await planning();
+      await call(spec, { ...specParams, ...rating, securitySensitive: true, risk: "medium" }, headless);
+      const task = app.store.load(app.activeTaskId()!)!;
+      expect(task.classification).toMatchObject({ task_type: "security", risk: "high", recommended_tier: "premium", source: "planner" });
+      expect(task.classification!.required_capabilities).toContain("security-sensitive");
+      expect(task.routing?.requireHumanApproval).toBe(true);
+    });
+
+    it("does not let the planner lower a keyword hit in the request", async () => {
+      const { app, spec } = await planning({ request: "Rotate the oauth credentials the ingest job uses" });
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "security", risk: "high", source: "keywords" });
+      const result = await call(spec, { ...specParams, ...rating }, headless);
+      expect(textOf(result)).toContain("security-sensitive (the keyword scan marked it security-sensitive; you cannot lower that)");
+      const task = app.store.load(app.activeTaskId()!)!;
+      expect(task.classification).toMatchObject({ task_type: "security", risk: "high", complexity: "low", source: "planner" });
+      expect(task.classification!.reason_codes).toContain("security_keyword_override");
+    });
+
+    it("also scans the spec: a plain request whose spec changes authentication is security-sensitive", async () => {
+      const { app, spec } = await planning();
+      await call(spec, { ...specParams, ...rating, changes: [{ path: "src/auth.ts", change: "check the password hash before parsing" }] }, headless);
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "security", risk: "high" });
+    });
+
+    it("keeps the classification it has when the spec carries no rating, and rejects a malformed one", async () => {
+      const { app, spec } = await planning();
+      await call(spec, specParams, headless);
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ source: "keywords" });
+      await expect(call(spec, { ...specParams, complexity: "huge" }, headless)).rejects.toThrow(/complexity must be one of low, medium, high/);
+      await expect(call(spec, { ...specParams, securitySensitive: "yes" }, headless)).rejects.toThrow(/securitySensitive must be true or false/);
+    });
+
+    it("keeps an earlier security flag when a revised spec leaves the field out", async () => {
+      const { app, spec } = await planning();
+      await call(spec, { ...specParams, ...rating, securitySensitive: true }, headless);
+      await call(spec, { ...specParams, complexity: "medium" }, headless);
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "security", complexity: "medium", risk: "high" });
+    });
+  });
+
   it("rejects cycles, missing blockers, duplicates, and tickets with no criterion", async () => {
     const { tickets } = await atTicketStage();
     await expect(call(tickets, { tickets: [ticket("01", { blockedBy: ["02"] }), ticket("02", { blockedBy: ["01"] })] }, headless)).rejects.toThrow(/cycle/i);
@@ -456,7 +514,7 @@ function testYaml(): string {
   return `
 providers:
   openai: { type: openai, auth: account-login, model: gpt-5.4 }
-models: { classifier: openai, cheap: openai, standard: openai, premium: openai }
+models: { cheap: openai, standard: openai, premium: openai }
 `;
 }
 
@@ -471,7 +529,6 @@ describe("extension wiring", () => {
         return () => undefined;
       },
       appendEntry() {},
-      registerVirtualModel() {},
       registerTool() {},
       getActiveTools: () => active,
       setActiveTools: (names: string[]) => {

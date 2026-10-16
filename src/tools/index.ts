@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../orchestrator/service.js";
-import { createPlanSpecTool, createPlanTicketsTool } from "./plan-flow.js";
+import { createPlanConsultTool, createPlanSpecTool, createPlanTicketsTool } from "./plan-flow.js";
 import { createPlanQuestionsTool } from "./plan-questions.js";
 import { createWebFetchTool, type WebFetchDeps } from "./web-fetch.js";
 import { createWebSearchTool, getAnthropicOAuth, type SearchUsageRecord, type SearchTransport, type SearchAuth } from "./web-search.js";
@@ -23,10 +23,11 @@ export function registerWebTools(pi: Pick<ExtensionAPI, "registerTool">, deps: W
   pi.registerTool(createWebFetchTool(deps.fetch));
 }
 
-/** Registers plan_questions, plan_spec, and plan_tickets. They only work while /plan is running. */
+/** Registers plan_questions, plan_spec, plan_consult, and plan_tickets. They only work while /plan is running. */
 export function registerPlanTools(pi: Pick<ExtensionAPI, "registerTool">, getWorkflow: () => Workflow | undefined): void {
   pi.registerTool(createPlanQuestionsTool(getWorkflow));
   pi.registerTool(createPlanSpecTool(getWorkflow));
+  pi.registerTool(createPlanConsultTool(getWorkflow));
   pi.registerTool(createPlanTicketsTool(getWorkflow));
 }
 

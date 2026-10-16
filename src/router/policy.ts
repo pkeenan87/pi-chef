@@ -1,19 +1,26 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
-import { modelMetricKey, TIERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
+import { BASE_TIERS, modelMetricKey, TICKET_TIERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { selectCandidate, type Availability, type Selection } from "./select.js";
 import type { QuotaUsage } from "../cost/quota.js";
-import { circuitOpenFor, rankingCost, rate, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
+import { circuitOpenFor, rankingCost, rate, reviewMetricType, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
 
 export { circuitOpenFor, DEFAULT_CIRCUIT_WINDOW_MS, EXPECTED_INPUT_SHARE, SUCCESS_PRIOR } from "./stats.js";
 export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
 
-const ORDER: Tier[] = [...TIERS];
+const ORDER: Tier[] = [...BASE_TIERS];
+/** The /build ladder: a ticket starts on its difficulty tier and moves one step up after each failure. */
+export const TICKET_LADDER: Tier[] = [...TICKET_TIERS, "premium"];
+
+/** Strength of a tier for the maxTier cap. The ticket tiers sit between standard and premium. */
+function capRank(tier: Tier): number {
+  return (TICKET_TIERS as readonly string[]).includes(tier) ? ORDER.indexOf("standard") : ORDER.indexOf(tier);
+}
 
 export function nextTier(tier: Tier, maxTier: Tier): Tier | undefined {
-  const index = ORDER.indexOf(tier);
-  const cap = ORDER.indexOf(maxTier);
-  if (index < 0 || index >= cap) return undefined;
-  return ORDER[index + 1];
+  const ladder = TICKET_LADDER.includes(tier) ? TICKET_LADDER : ORDER;
+  const index = ladder.indexOf(tier);
+  const next = index < 0 ? undefined : ladder[index + 1];
+  return next && capRank(next) <= capRank(maxTier) ? next : undefined;
 }
 
 /** Tiers that share the same candidate list would repeat identical work when escalated between. */
@@ -34,8 +41,9 @@ export interface RouteOptions {
   budgetRemainingUsd?: number;
   /** Subscription quota use for shadow-price ranking. Never affects budgets. */
   quota?: QuotaUsage;
-  /** Planner's suggested tier for this unit of work. Ignored for sensitive work, after a failure, and above routing.maxTier. */
-  tierHint?: Tier;
+  /** The ticket's difficulty tier (implement purpose): where its first attempt starts. Sensitive work starts at ticketHigh at least. Ignored after a failure. */
+  /** The tier to implement on: a ticket's difficulty tier, or the tier an interrupted attempt was on. */
+  ticketTier?: Tier;
   /** Uniform [0, 1) for exploration. Defaults to Math.random. */
   rng?: () => number;
   /**
@@ -60,12 +68,14 @@ export function decideRoute(
     classification.required_capabilities.some((cap) => categories.includes(cap)) || categories.includes(classification.task_type);
   // Human approval additionally covers any high-risk task.
   const sensitive = premiumReview || classification.risk === "high";
+  // The /review model pass keeps its own record (reviewMetricType), so review picks never read implementation cells.
+  const metricType = purpose === "review" ? reviewMetricType(classification.task_type) : classification.task_type;
   const breaker = (tier: Tier) =>
-    circuitOpenFor(table, classification.task_type, tier, config.routing.circuitBreakerFailures, at, options.circuitWindowMs);
+    circuitOpenFor(table, metricType, tier, config.routing.circuitBreakerFailures, at, options.circuitWindowMs);
   const select = (tier: Tier, rng: (() => number) | undefined = options.rng): Selection =>
     selectCandidate({
       tier,
-      taskType: classification.task_type,
+      taskType: metricType,
       config,
       table,
       availability: options.availability,
@@ -84,9 +94,19 @@ export function decideRoute(
   if (options.failedTier) {
     tier = escalateImplementation(options.failedTier, cap, config);
   } else if (purpose === "review") {
-    tier = premiumReview ? "premium" : "standard";
+    tier = premiumReview ? "premium" : config.routing.reviewTier;
   } else if (purpose === "plan") {
     tier = classification.complexity === "high" || sensitive ? "premium" : classification.recommended_tier;
+  } else if (purpose === "implement" && options.ticketTier) {
+    // Deterministic: the difficulty tier, raised to ticketHigh for security-sensitive work. Unavailable or blocked tiers
+    // move up the same ladder below. The proven-tier shortcut does not apply: it could only pick another tier.
+    tier = sensitive && TICKET_LADDER.includes(options.ticketTier) && TICKET_LADDER.indexOf(options.ticketTier) < TICKET_LADDER.indexOf("ticketHigh") ? "ticketHigh" : options.ticketTier;
+    if (sensitive && tier !== options.ticketTier) reasons.push("ticket_sensitive_floor");
+    if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
+      const escalated = escalateImplementation(tier, cap, config);
+      if (escalated !== tier) reasons.push(`circuit_escalated_from_${tier}`);
+      tier = escalated;
+    }
   } else if (purpose === "implement") {
     const proven = ORDER.filter((candidate) => {
       const stat = rate(table, classification.task_type, candidate);
@@ -98,14 +118,9 @@ export function decideRoute(
         .sort((a, b) => a.expected - b.expected)[0]!.candidate;
     } else if (sensitive) {
       tier = "standard";
-    } else if (classification.recommended_tier === "deterministic" || classification.task_type === "mechanical") {
-      // Only explicitly mechanical work skips a premium model.
-      tier = "deterministic";
     } else {
       tier = "cheap";
     }
-    // Security-sensitive work keeps the policy tier; otherwise the planner's hint decides (the cap is applied below).
-    if (options.tierHint && options.tierHint !== "classifier" && !sensitive) tier = options.tierHint;
     if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
       const escalated = escalateImplementation(tier, cap, config);
       if (escalated !== tier) reasons.push(`circuit_escalated_from_${tier}`);
@@ -114,7 +129,7 @@ export function decideRoute(
   } else {
     tier = classification.recommended_tier;
   }
-  if (ORDER.indexOf(tier) > ORDER.indexOf(cap)) tier = cap;
+  if (capRank(tier) > capRank(cap)) tier = cap;
   let selection = probe(tier);
   // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
   const movable = (code: string) => code === "excluded" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
@@ -145,8 +160,9 @@ export function decideRoute(
   const model = candidate ? candidate.model : blocked ? "blocked" : "deterministic";
   const cost = blocked ? null : candidate ? tierCost(config.pricing, candidate.provider, candidate.model, at, config.workers.tokenBudget) : 0;
   const rateUsdPerMillion = cost === null ? null : config.workers.tokenBudget > 0 ? (cost / config.workers.tokenBudget) * 1_000_000 : 0;
-  const modelStat = candidate ? rate(table, classification.task_type, modelMetricKey(tier, candidate.provider, candidate.model)) : undefined;
-  const stat = modelStat && modelStat.samples > 0 ? modelStat : rate(table, classification.task_type, tier);
+  const modelStat = candidate ? rate(table, metricType, modelMetricKey(tier, candidate.provider, candidate.model)) : undefined;
+  const stat = modelStat && modelStat.samples > 0 ? modelStat : rate(table, metricType, tier);
+  // Real price only: the quota shadow and the attempt overhead rank, they never count as spend.
   const expectedUsd = cost === null ? null : cost / Math.max(stat.rate, 0.05);
   if (stat.samples === 0) reasons.push(`success_prior_${SUCCESS_PRIOR}`);
   else reasons.push(`success_rate_${stat.rate.toFixed(2)}`);
@@ -177,13 +193,13 @@ function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig)
   const from = signature(config, failed);
   let cursor: Tier | undefined = nextTier(failed, cap);
   while (cursor) {
-    if (cursor !== "classifier" && signature(config, cursor) !== from) return cursor;
+    if (signature(config, cursor) !== from) return cursor;
     cursor = nextTier(cursor, cap);
   }
   return failed;
 }
 
-/** Cheapest expected ranking cost (real plus quota shadow) among a tier's priced candidates; unpriced tiers rank last. */
+/** Cheapest expected ranking cost (real plus quota shadow plus attempt overhead) among a tier's priced candidates; unpriced tiers rank last. */
 function expectedFor(candidate: Tier, config: WorkflowConfig, table: SuccessTable, taskType: string, at: Date, quota?: QuotaUsage): number {
   const candidates = tierCandidates(config, candidate);
   if (candidates.length === 0) return 0;

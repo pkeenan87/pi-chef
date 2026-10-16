@@ -1,5 +1,5 @@
 import { containsSecret } from "../redact.js";
-import { WorkflowError, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
+import { WorkflowError, type AdvisorOpinion, type PlanAdvisorReview, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
 
 /** The human-readable plan in the task folder: the document shown for review and approval. */
 export const PLAN_FILE = "plan.md";
@@ -99,6 +99,26 @@ export function renderPlan(plan: PlanDocument): string {
   return `${lines.join("\n")}\n`;
 }
 
+function opinionLines(opinion: AdvisorOpinion): string[] {
+  if (opinion.error) return [`- ${opinion.provider}/${opinion.model}: did not answer (${opinion.error})`];
+  return [
+    `- ${opinion.provider}/${opinion.model}: ${opinion.verdict ?? "unsure"}`,
+    ...opinion.concerns.map((item) => `  - ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.issue}${item.suggestion ? ` (suggestion: ${item.suggestion})` : ""}`),
+  ];
+}
+
+/** The "Advisor review" section at the top of the plan: each advisor's verdict and concerns, errors, then the resolution. */
+export function advisorReviewLines(review: PlanAdvisorReview | undefined): string[] {
+  if (!review) return [];
+  const lines = ["## Advisor review", ""];
+  if (review.note) lines.push(review.note);
+  for (const opinion of review.consult?.results ?? []) lines.push(...opinionLines(opinion));
+  if (review.reconsultWaived) lines.push("", "The tickets changed after the advisors were consulted; the planning model waived a new consult (see its resolution).");
+  if (review.resolution) lines.push("", `Opus resolution: ${review.resolution}`);
+  lines.push("", "Advisors advise; approval is yours.", "");
+  return lines;
+}
+
 /**
  * The full plan a person reviews before approval: the technical spec, then every ticket with its implementation
  * notes, acceptance criteria, and dependencies, then the execution order. Plans without tickets use `renderPlan`.
@@ -113,13 +133,14 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined): 
     `${tickets.length} tickets · estimated charge ${plan.estimatedUsd === null ? "unknown" : `$${plan.estimatedUsd}`} · security sensitive: ${plan.securitySensitive ? "yes" : "no"}`,
     "",
   ];
+  lines.push(...advisorReviewLines(plan.advisorReview));
   // The spec's own title is replaced by the plan title; its sections follow as they are.
   const body = (spec ?? "").replace(/^# Spec\s*\n/, "").trim();
   lines.push(body ? `## Summary\n\n${body}` : `## Summary\n\n${plan.summary}`, "", "## Tickets");
   for (const ticket of tickets) {
     const meta = [
       `Blocked by: ${ticket.blockedBy.join(", ") || "none"}`,
-      ...(ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
+      ...(ticket.difficulty ? [`difficulty: ${ticket.difficulty}`] : ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
       `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`,
     ];
     lines.push("", `### ${ticket.id}: ${ticket.title}`, "", meta.join(" · "));

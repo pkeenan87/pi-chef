@@ -1,7 +1,6 @@
 import type { CommandResult, CostRecord, Phase, TaskState, TokenUsage } from "../domain.js";
 import { budgetStatusFor, buildCostRecord, recordsForDay, summarize, type SpendSummary } from "../cost/ledger.js";
 import { quotaUsage, type QuotaUsage } from "../cost/quota.js";
-import type { ClassifierUsage } from "../router/classify.js";
 import { active, fail, type WorkflowContext } from "./context.js";
 
 /** Pseudo task id for interactive turns that happen with no active task. */
@@ -17,9 +16,9 @@ export interface BudgetState {
 
 export function budgetState(ctx: WorkflowContext, taskId?: string, records = ctx.store.readLedger()): BudgetState {
   const pricing = ctx.config.pricing;
-  const { dailyUsd, taskUsd, softWarningRatio } = ctx.config.budgets;
-  const daily = summarize(recordsForDay(records, ctx.now()), { pricing });
-  const task = summarize(taskId ? records.filter((record) => record.taskId === taskId) : [], { pricing });
+  const { dailyUsd, taskUsd, softWarningRatio, unknownCallUsd } = ctx.config.budgets;
+  const daily = summarize(recordsForDay(records, ctx.now()), { pricing, unknownCallUsd });
+  const task = summarize(taskId ? records.filter((record) => record.taskId === taskId) : [], { pricing, unknownCallUsd });
   const statuses = [budgetStatusFor(daily, dailyUsd, softWarningRatio), budgetStatusFor(task, taskUsd, softWarningRatio)];
   return { status: statuses.includes("hard") ? "hard" : statuses.includes("soft") ? "soft" : "ok", daily, task };
 }
@@ -54,7 +53,7 @@ export function gateBudget(ctx: WorkflowContext, taskId: string): CommandResult 
   return undefined;
 }
 
-/** Budget state for callers outside the workflow (for example the virtual model route). Warns once on "soft". */
+/** Budget state for callers outside the workflow (for example web_search). Warns once on "soft". */
 export function checkBudget(ctx: WorkflowContext, taskId?: string): BudgetStatus {
   const { status } = budgetState(ctx, taskId);
   if (status === "soft") warnSoft(ctx, taskId ?? "daily");
@@ -98,11 +97,6 @@ export function remember(
   reason: string,
 ): CostRecord {
   return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason, state.routing?.estimatedUsd ?? null);
-}
-
-export function recordClassifier(ctx: WorkflowContext, taskId: string, phase: Phase, usage: ClassifierUsage | undefined): void {
-  if (!usage) return;
-  record(ctx, taskId, phase, "classifier", usage.provider, usage.model, usage.usage, "success", 0, "classify");
 }
 
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
