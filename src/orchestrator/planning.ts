@@ -3,13 +3,13 @@ import type { AcceptedClassification, CommandResult, PlanDocument, TaskState } f
 import { classifyKeywords } from "../router/classify.js";
 import { redact } from "../redact.js";
 import { budgetState, remember } from "./budget.js";
-import { active, done, fail, guard, iso, knownZero, requireActive, type WorkflowContext } from "./context.js";
+import { active, done, fail, guard, iso, knownZero, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { acceptanceCriteria, applyOverlap, assertGraph, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
 import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
 import { taskState } from "./state-label.js";
-import { closeTask, displayName, isFinished, nameForNewTask } from "./tasks.js";
+import { activeTask, closeTask, displayName, isFinished, lastSeenBranch, nameForNewTask, requireActiveTask } from "./tasks.js";
 
 export function blank(taskId: string, request: string, at: string, name?: string): TaskState {
   return {
@@ -55,7 +55,9 @@ export async function retireCurrent(ctx: WorkflowContext, task: TaskState | unde
 export function announceParked(ctx: WorkflowContext, parked: TaskState | undefined): void {
   if (!parked) return;
   const name = displayName(parked);
-  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.`);
+  // The active task follows the checked-out branch, so a task parked while you sit on its branch comes back on the next command.
+  const onIt = parked.build?.branch !== undefined && parked.build.branch === lastSeenBranch(ctx);
+  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.${onIt ? ` You are on its branch ${parked.build!.branch}, so it becomes active again on the next command; switch branches first to work on the new task.` : ""}`);
 }
 
 /** Starts a new task for a literal ```tasks request and drafts its plan. The old active task is closed if finished, else parked. */
@@ -68,7 +70,7 @@ export function plan(ctx: WorkflowContext, request: string): Promise<CommandResu
     }
     const parsed = applyOverlap(parseGroups(safe));
     assertGraph(parsed.groups);
-    const parked = await retireCurrent(ctx, active(ctx));
+    const parked = await retireCurrent(ctx, await activeTask(ctx));
     const classification: AcceptedClassification = classifyKeywords(safe);
     const routing = await decide(ctx, classification, "plan", {});
     let state = await ctx.store.create(newTask(ctx, safe, at));
@@ -112,7 +114,7 @@ export async function freezeApproval(ctx: WorkflowContext, state: TaskState): Pr
 /** Approves the active draft (the choice was already made on a review screen). */
 export function approveDraft(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
-    const current = requireActive(ctx);
+    const current = await requireActiveTask(ctx);
     if (current.phase !== "AWAITING_PLAN_APPROVAL" || !current.plan) {
       return fail("APPROVAL_REQUIRED", "There is no draft waiting for approval.");
     }
@@ -127,7 +129,7 @@ export function approveDraft(ctx: WorkflowContext): Promise<CommandResult> {
 /** Posts the active task's plan in the chat. A draft opens the review screen, so it can be approved from here. */
 export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
-    const current = requireActive(ctx);
+    const current = await requireActiveTask(ctx);
     if (!current.plan) return fail("NO_PLAN", "The active task has no plan yet. Run /plan <request>.");
     const markdown = planMarkdown(ctx, current);
     const version = current.plan.version;
@@ -162,7 +164,7 @@ export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
 export function route(ctx: WorkflowContext, task: string): Promise<CommandResult> {
   return guard(async () => {
     const classification = classifyKeywords(redact(task));
-    const current = active(ctx);
+    const current = await activeTask(ctx);
     const decision = await decide(ctx, classification, "preview", { taskId: current?.taskId });
     await announce(ctx, current?.taskId, "preview", decision);
     const routing = routingSummary(ctx);

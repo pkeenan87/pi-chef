@@ -4,7 +4,8 @@ import { clipMiddle } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from "./budget.js";
-import { active, done, fail, guard, type WorkflowContext } from "./context.js";
+import { done, fail, guard, type WorkflowContext } from "./context.js";
+import { activeTask } from "./tasks.js";
 import { announce, availability, candidateCheck } from "./routing.js";
 
 /** Redacted, size-capped task context for the advisor: request, plan, classification, last failure, diff stat. */
@@ -37,7 +38,7 @@ export function advisor(ctx: WorkflowContext, question: string): Promise<Command
     if (!ask) return fail("USAGE", "Use /advisor <question>.");
     if (tierCandidates(ctx.config, "advisor").length === 0) return fail("NO_ADVISOR", "No advisor models are configured. Add an `advisor` list under tiers in the config.");
     if (!ctx.chat) return fail("NO_CHAT", "The advisor needs a model connection, which is only available inside a Pi session.");
-    const state = active(ctx);
+    const state = await activeTask(ctx);
     const taskId = state?.taskId;
     const budget = budgetState(ctx, taskId);
     if (budget.status === "hard") return fail("BUDGET", "Task or daily budget is exhausted. The advisor was not called. Run /cost for details.");

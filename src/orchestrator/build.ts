@@ -7,6 +7,7 @@ import { assertCommandSafe } from "../sandbox.js";
 import { TICKET_LADDER } from "../router/policy.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
 import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
+import { displayName, requireActiveTask } from "./tasks.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
@@ -105,7 +106,7 @@ async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
 /** Starts or resumes a build: approval, git, budget, security confirm, the branch, and the build record. */
 export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
   return guard(async () => {
-    let state = requireActive(ctx);
+    let state = await requireActiveTask(ctx);
     if (!state.plan || !state.approvedVersion || state.approvedVersion !== state.plan.version) {
       return fail("APPROVAL_REQUIRED", "/build refused: the plan is not approved. Approve it on the /plan review screen or with /show-plan.");
     }
@@ -145,7 +146,15 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
     let build: BuildRecord;
     if (state.build) {
       if (current !== state.build.branch) {
-        return fail("WRONG_BRANCH", `This build is on branch ${state.build.branch}, but you are on ${current}. Run \`git switch ${state.build.branch}\`, then /build again.`);
+        const target = state.build.branch;
+        if (!(await ctx.git.branchExists(target))) {
+          return fail("WRONG_BRANCH", `This build is on branch ${target}, which no longer exists (you are on ${current}). Recreate it with \`git switch -c ${target}\` at the commit you want, then /build again.`);
+        }
+        if ((await dirtyPaths(ctx)).length > 0) {
+          return fail("DIRTY_TREE", `This build is on branch ${target}, but you are on ${current} with uncommitted changes. Commit or stash them; /build then switches to ${target} itself.`);
+        }
+        await ctx.git.switchTo(target);
+        ctx.progress?.(`Switched from ${current} to ${target} to resume ${displayName(state)}.`);
       }
       build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined };
     } else {

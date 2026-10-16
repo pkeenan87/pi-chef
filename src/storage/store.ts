@@ -335,6 +335,11 @@ export class TaskStore {
     atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify({ taskId }, null, 2));
   }
 
+  /** No active task (the file stays, with no id). */
+  clearActive(): void {
+    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify({}, null, 2));
+  }
+
   /** Number of corrupt (non-tail) lines in a task's event log. */
   corruptEventLines(taskId: string): number {
     return readEvents(path.join(this.taskDir(taskId), "events.jsonl")).corrupt;

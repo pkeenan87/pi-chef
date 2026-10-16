@@ -8,7 +8,7 @@ import { announceParked, newTask, plan, retireCurrent } from "./planning.js";
 import { INTERVIEW_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
-import { displayName } from "./tasks.js";
+import { activeTask, displayName } from "./tasks.js";
 
 export interface InterviewOption {
   value: string;
@@ -134,7 +134,7 @@ function resumeMessage(request: string): string {
  */
 export function startPlan(ctx: WorkflowContext, request: string, options: { noQuestions?: boolean } = {}): Promise<CommandResult> {
   return guard(async () => {
-    const current = active(ctx);
+    const current = await activeTask(ctx);
     const text = request.trim();
     if (!text && !current?.planning) return fail("USAGE", "Usage: /plan [--no-questions] <request>");
     if (text && (/```tasks/.test(text) || !ctx.startTurn)) return plan(ctx, request);

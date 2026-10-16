@@ -143,6 +143,20 @@ export class GitWorkspace {
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not create ${branch}`);
   }
 
+  /** True when a local branch of this name exists. */
+  async branchExists(branch: string): Promise<boolean> {
+    return (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0;
+  }
+
+  /** Switches to an existing local branch. Fails (git refuses) rather than carrying conflicting changes along. */
+  async switchTo(branch: string): Promise<void> {
+    if (branch.startsWith("-") || (await this.git(["check-ref-format", "--branch", branch])).code !== 0) {
+      throw new WorkflowError("GIT", `Not a valid branch name: ${branch}`);
+    }
+    const result = await this.git(["switch", "--", branch]);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not switch to ${branch}`);
+  }
+
   /** The commit where HEAD left `base`. */
   async mergeBase(base: string): Promise<string> {
     const result = await this.git(["merge-base", "HEAD", base]);

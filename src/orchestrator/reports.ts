@@ -9,7 +9,8 @@ import { availability, candidateCheck, routingSummary } from "./routing.js";
 import { clock, reviewOutOfDate, taskState, type GitFacts } from "./state-label.js";
 import { reviewRows } from "./review-report.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
-import { active, done, fail, guard, type WorkflowContext } from "./context.js";
+import { done, fail, guard, type WorkflowContext } from "./context.js";
+import { activeTask } from "./tasks.js";
 import { isSecuritySensitive } from "../router/classify.js";
 import { costLabel, reviewLabel } from "./build.js";
 import { cell, formatUsdShort } from "./format.js";
@@ -64,7 +65,7 @@ export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> 
 
 async function costReport(ctx: WorkflowContext, format: string): Promise<CommandResult> {
   const records = ctx.store.readLedger();
-  const task = active(ctx);
+  const task = await activeTask(ctx);
   const summary = summarize(records, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd });
   const budget = budgetState(ctx, task?.taskId, records);
   const quota = quotaState(ctx, records);
@@ -217,7 +218,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
 
 async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandResult> {
   if (arg !== "" && arg !== "foundry") return fail("USAGE", "Use /status or /status foundry.");
-  const state = active(ctx);
+  const state = await activeTask(ctx);
   const auth = await Promise.all(PROVIDERS.map((provider) => ctx.authProbe.inspect(provider)));
   const { markdown: base, stateLine } = await statusMarkdown(ctx, state, auth);
   const markdown = arg === "foundry" ? [base, "", ...(await foundrySection(ctx))].join("\n") : base;
