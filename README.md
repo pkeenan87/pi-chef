@@ -1,8 +1,8 @@
-# Pi Cost-Optimized Coding Agent
+# pi-chef
 
-Local Pi extension and TypeScript modules that keep a coding task cheap without dropping the review. A deterministic policy picks the provider, the budget, and the next phase. Models only advise. State stays in the workspace under `.pi-workflows/`. There is no hosted coordinator and no database.
+A Pi extension that plans, builds and reviews coding work with the right model for each job: `/plan` → `/build` → `/review`. A deterministic policy picks the provider, the budget, and the next phase. Models only advise. State stays in the workspace under `.pi-workflows/`. There is no hosted coordinator and no database.
 
-The workload this is shaped for is maintenance of Neo, a security-operations agent: plan, build, review. You plan and approve once, each ticket is built in its own fresh session on a routed model, and `/review` checks the result and fixes what it finds. You push and open the pull request yourself. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
+Routing is by role. Opus leads the session and writes the plan. Each ticket is built in its own fresh session on a model chosen by the ticket's difficulty: grok for low, Sonnet for medium, Sol for high. Astra and Fable advise on the plan and the review. Cost-awareness stays a feature: spend is tracked per phase, provider and model against budgets, and the selector ranks models by cost per success. You plan and approve once, and `/review` checks the result and fixes what it finds. You push and open the pull request yourself. OpenAI and Anthropic are used through Pi account login in the same session. Azure AI Foundry uses the Azure CLI. Vercel AI Gateway uses the Vercel CLI. A local OpenAI-compatible server is optional.
 
 ## Supported Pi version
 
@@ -30,12 +30,12 @@ Host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `type
 From the project directory:
 
 ```bash
-npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init
+npx github:pkeenan87/pi-chef init
 ```
 
-`init` (the `pi-cost-init` bin) does three things:
+`init` (the `pi-chef-init` bin) does three things:
 
-1. Runs `pi install -l git:origin.cursor.com/pkeenan/pi-cost-router`. The source comes from `repository` in `package.json`.
+1. Runs `pi install -l git:github.com/pkeenan87/pi-chef`. The source comes from `repository` in `package.json`.
 2. Copies the sample config to `.pi-workflows/config.yaml`. It keeps an existing file unless you pass `--force`.
 3. Adds any missing workflow-state lines to `.gitignore`. Lines already there are not added twice.
 
@@ -45,31 +45,31 @@ Variations:
 
 ```bash
 # Pin a tag: once for the script npx fetches, once for what Pi installs
-npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git#v0.1.0 init --ref v0.1.0
+npx github:pkeenan87/pi-chef#v0.1.0 init --ref v0.1.0
 
 # Over SSH
-npx git+ssh://git@origin.cursor.com/pkeenan/pi-cost-router.git init
+npx git+ssh://git@github.com/pkeenan87/pi-chef.git init
 
-# From a GitHub mirror (--source, or Pi still installs from origin)
-npx github:<owner>/pi-cost-router init --source git:github.com/<owner>/pi-cost-router
+# From a fork (--source, or Pi still installs from pkeenan87/pi-chef)
+npx github:<owner>/pi-chef init --source git:github.com/<owner>/pi-chef
 
 # From a local checkout (no network)
-node ~/src/pi-cost-router/bin/init.mjs --source ~/src/pi-cost-router
+node ~/src/pi-chef/bin/init.mjs --source ~/src/pi-chef
 
 # After an npm publish
-npx pi-cost-optimized-agent init --source npm:pi-cost-optimized-agent
+npx pi-chef init --source npm:pi-chef
 
 # Personal install for every project, instead of this project only
-npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --global
+npx github:pkeenan87/pi-chef init --global
 
 # Only write the config and .gitignore; skip pi install
-npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --no-install
+npx github:pkeenan87/pi-chef init --no-install
 
 # Show what would change
-npx git+https://origin.cursor.com/pkeenan/pi-cost-router.git init --dry-run
+npx github:pkeenan87/pi-chef init --dry-run
 ```
 
-Other flags: `--dir <path>` targets another project directory, and `--help` lists them all. npm's `github:` shorthand only works for GitHub, GitLab, and Bitbucket. Other hosts need the full `git+https://` or `git+ssh://` URL. `npx` and `pi install` both run `git clone`, so a private repo needs git credentials on the machine.
+Other flags: `--dir <path>` targets another project directory, and `--help` lists them all. npm's `github:` shorthand only works for GitHub, GitLab, and Bitbucket. Other hosts need the full `git+https://` or `git+ssh://` URL. `npx` and `pi install` both run `git clone`, so a private fork needs git credentials on the machine.
 
 The sections below do the same steps by hand.
 
@@ -82,41 +82,41 @@ The sections below do the same steps by hand.
 
 Run the commands below from the project directory when you use `-l`. Commit `.pi/settings.json` if the whole team should get the package.
 
-### Install from origin (git over HTTPS)
+### Install from GitHub
 
 ```bash
-pi install -l git:origin.cursor.com/pkeenan/pi-cost-router
+pi install -l git:github.com/pkeenan87/pi-chef
 ```
 
 Pin a tag or commit so updates do not move under you:
 
 ```bash
-pi install -l git:origin.cursor.com/pkeenan/pi-cost-router@<tag-or-commit>
+pi install -l git:github.com/pkeenan87/pi-chef@<tag-or-commit>
 ```
 
 Pi also accepts the plain URL and treats it as a git source:
 
 ```bash
-pi install -l https://origin.cursor.com/pkeenan/pi-cost-router
+pi install -l https://github.com/pkeenan87/pi-chef
 ```
 
-Pi clones with `git`, so the machine needs git credentials for `origin.cursor.com` (a credential helper or a token). Pi does not ask for them. Pi installs `dependencies` (`yaml`) for git sources.
+Pi clones with `git`, so the machine needs git access to `github.com`. The repository is public, so no credentials are needed. A read-only mirror exists at origin.cursor.com/pkeenan/pi-chef. Pi installs `dependencies` (`yaml`) for git sources.
 
 ### Install from another git host
 
-Any git host works with the same form. For a GitHub mirror:
+Any git host works with the same form. For a fork:
 
 ```bash
-pi install -l git:github.com/<owner>/pi-cost-router@<tag-or-commit>
+pi install -l git:github.com/<owner>/pi-chef@<tag-or-commit>
 ```
 
 ### Install from a local checkout
 
 ```bash
-git clone https://origin.cursor.com/pkeenan/pi-cost-router.git ~/src/pi-cost-router
-cd ~/src/pi-cost-router && npm install
+git clone https://github.com/pkeenan87/pi-chef.git ~/src/pi-chef
+cd ~/src/pi-chef && npm install
 cd /path/to/your/project
-pi install -l ~/src/pi-cost-router
+pi install -l ~/src/pi-chef
 ```
 
 Pi loads a local path in place without copying it, and it does not install that package's dependencies. Run `npm install` in the checkout first. A relative path resolves from the settings file that contains it.
@@ -126,13 +126,13 @@ Pi loads a local path in place without copying it, and it does not install that 
 Not published yet. `package.json` is `"private": true`. After a publish, the command is:
 
 ```bash
-pi install -l npm:pi-cost-optimized-agent@<version>
+pi install -l npm:pi-chef@<version>
 ```
 
 ### Try it once without installing
 
 ```bash
-pi -e git:origin.cursor.com/pkeenan/pi-cost-router
+pi -e git:github.com/pkeenan87/pi-chef
 ```
 
 `-e` loads the package for one run and writes nothing to settings.
@@ -143,7 +143,7 @@ pi -e git:origin.cursor.com/pkeenan/pi-cost-router
 
 ```bash
 mkdir -p .pi-workflows
-cp ~/src/pi-cost-router/.pi-workflows/config.yaml .pi-workflows/config.yaml
+cp ~/src/pi-chef/.pi-workflows/config.yaml .pi-workflows/config.yaml
 ```
 
 Then add these lines to the project's `.gitignore`:
@@ -158,7 +158,7 @@ Then add these lines to the project's `.gitignore`:
 .pi-workflows/*.local.yaml
 ```
 
-A user-level file at `~/.pi/agent/cost-workflow.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
+A user-level file at `~/.pi/agent/chef.yaml` is the base, and the project file layers on top of it. Keep machine-specific values (endpoints, base URLs, env-var names) in the user file, not the committed project file. The YAML must not contain secrets, API keys, or tokens. `approvals.merge` stays `manual` and a config that sets it otherwise is rejected. Plan approval stays required. Set `checks:` before you expect `/review` to pass (see [Sample workflow](#sample-workflow)).
 
 Task files, the cost ledger, metrics, and reports are gitignored. The config file is not.
 
@@ -166,12 +166,12 @@ Task files, the cost ledger, metrics, and reports are gitignored. The config fil
 
 ```bash
 pi list
-pi update git:origin.cursor.com/pkeenan/pi-cost-router
+pi update git:github.com/pkeenan87/pi-chef
 pi update --extensions
-pi remove -l git:origin.cursor.com/pkeenan/pi-cost-router
+pi remove -l git:github.com/pkeenan87/pi-chef
 ```
 
-`pi update` without a target updates Pi itself, not this package. Inside Pi, `/cost-help` lists the commands and `/auth status` checks logins. `-a` / `--approve` trusts project-local files for one command.
+`pi update` without a target updates Pi itself, not this package. Inside Pi, `/chef` lists the commands and `/auth status` checks logins. `-a` / `--approve` trusts project-local files for one command.
 
 ### Develop this repo
 
@@ -183,7 +183,7 @@ npm run typecheck
 
 ## Configuration
 
-**Layering.** `~/.pi/agent/cost-workflow.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
+**Layering.** `~/.pi/agent/chef.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning, and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
 
 **User-config-only fields.** `baseUrl`, `endpoint`, `apiKeyEnv`, `audience`, `projectDir`, and `envFile` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`. Only `local.baseUrl` may be `http`, and only for a loopback address.
 
@@ -204,7 +204,7 @@ The YAML must not contain secrets, API keys, or tokens.
 
 | Key | Meaning |
 |---|---|
-| `branchPrefix` (default `cost`) | `/build` names the branch `<branchPrefix>/<task-id>` when they start from the default branch |
+| `branchPrefix` (default `chef`) | `/build` names the branch `<branchPrefix>/<task-id>` when they start from the default branch |
 | `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused |
 | `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
 | `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
@@ -240,7 +240,7 @@ This extension does not implement OAuth. It uses Pi's account login, and uses a 
 If you can only sign in to a provider with an API key (saved through Pi's `/login`), allow it in your user config. A project config cannot turn this on.
 
 ```yaml
-# ~/.pi/agent/cost-workflow.yaml
+# ~/.pi/agent/chef.yaml
 providers:
   anthropic:
     apiKeyFallback: true
@@ -438,7 +438,7 @@ checks:
 Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused. There is no allowlist.
 
 ```text
-/plan Harden Neo ingest: reject empty events. AC: empty input throws
+/plan Harden the ingest parser: reject empty events. AC: empty input throws
 /build
 /review
 # then push and open the PR yourself:
@@ -466,7 +466,7 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 `/build` runs the approved tickets one at a time. It refuses a plan that is not approved, a plan with no tickets, a budget that is already spent, and (for a security-sensitive plan) asks you to confirm first. It does not run in the background: it holds the Pi command until it finishes or stops.
 
-**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build with uncommitted changes (outside `.pi-workflows/`) lists them and asks whether to commit them first as a separate "Changes before /build" commit on the build branch, so they do not land in ticket 01's commit. Answer no (or run without a UI) and it refuses with `DIRTY_TREE`. Commits are authored with your git identity; `pi-cost <pi-cost@localhost>` is used only when git has no name or email configured. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
+**Branch.** On the default branch (`origin/HEAD`, else `main` or `master`) it creates `<branchPrefix>/<task-id>` and switches to it. On any other branch it builds there. The branch, base, and base SHA are recorded in the task. A fresh build with uncommitted changes (outside `.pi-workflows/`) lists them and asks whether to commit them first as a separate "Changes before /build" commit on the build branch, so they do not land in ticket 01's commit. Answer no (or run without a UI) and it refuses with `DIRTY_TREE`. Commits are authored with your git identity; `pi-chef <pi-chef@localhost>` is used only when git has no name or email configured. Running `/build` from a different branch than the recorded one is refused with the `git switch` to run.
 
 **Per ticket**, in dependency order (`blockedBy`):
 
@@ -569,7 +569,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/cost [json\|csv]` | Ledger versus budgets |
 | `/status` | Phase, build progress, auth, budget |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
-| `/cost-help` | List the commands |
+| `/chef` | List the commands |
 
 `help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, and `/plan`.
 

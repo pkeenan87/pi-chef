@@ -13,7 +13,7 @@ export const FETCH_MAX_REDIRECTS = 5;
 export const FETCH_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_MAX_CHARS = 20_000;
 const MAX_CHARS_CAP = 100_000;
-const USER_AGENT = "pi-cost-router-web-fetch/1.0 (+https://github.com/earendil-works/pi; read-only agent fetch)";
+const USER_AGENT = "pi-chef-web-fetch/1.0 (+https://github.com/earendil-works/pi; read-only agent fetch)";
 
 export class WebFetchError extends Error {}
 

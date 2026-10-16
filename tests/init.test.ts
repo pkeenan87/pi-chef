@@ -10,12 +10,12 @@ const script = path.resolve("bin/init.mjs");
 const GITIGNORE_COUNT = 7;
 
 function project(): string {
-  return mkdtempSync(path.join(tmpdir(), "pi-cost-init-"));
+  return mkdtempSync(path.join(tmpdir(), "pi-chef-init-"));
 }
 
 // A stand-in `pi` that records its arguments and exits with the given code.
 function fakePi(exitCode = 0): { bin: string; log: string } {
-  const dir = mkdtempSync(path.join(tmpdir(), "pi-cost-fakepi-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "pi-chef-fakepi-"));
   const log = path.join(dir, "calls.log");
   const bin = path.join(dir, "pi");
   writeFileSync(bin, `#!/bin/sh\necho "$PWD|$*" >> "${log}"\nexit ${exitCode}\n`);
@@ -34,7 +34,7 @@ async function init(args: string[], cwd: string, pathDir?: string) {
   }
 }
 
-describe("pi-cost-init", () => {
+describe("pi-chef-init", () => {
   it("installs locally from package.json's repository, writes config and .gitignore", async () => {
     const cwd = project();
     const pi = fakePi();
@@ -42,7 +42,7 @@ describe("pi-cost-init", () => {
 
     expect(result.code).toBe(0);
     const [ranIn, args] = readFileSync(pi.log, "utf8").trim().split("|");
-    expect(args).toBe("install -l git:origin.cursor.com/pkeenan/pi-cost-router");
+    expect(args).toBe("install -l git:github.com/pkeenan87/pi-chef");
     expect(path.basename(ranIn)).toBe(path.basename(cwd));
     expect(readFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "utf8")).toBe(readFileSync(".pi-workflows/config.yaml", "utf8"));
     const ignore = readFileSync(path.join(cwd, ".gitignore"), "utf8");
@@ -56,13 +56,13 @@ describe("pi-cost-init", () => {
     expect(existsSync(pi.log)).toBe(false);
 
     await init(["--ref", "v0.1.0"], project(), pi.bin);
-    await init(["--global", "--source", "git:github.com/acme/pi-cost-router@v2"], project(), pi.bin);
-    await init(["--source", "../pi-cost-router"], project(), pi.bin);
+    await init(["--global", "--source", "git:github.com/acme/pi-chef@v2"], project(), pi.bin);
+    await init(["--source", "../pi-chef"], project(), pi.bin);
     const calls = readFileSync(pi.log, "utf8").trim().split("\n").map((line) => line.split("|")[1]);
     expect(calls).toEqual([
-      "install -l git:origin.cursor.com/pkeenan/pi-cost-router@v0.1.0",
-      "install git:github.com/acme/pi-cost-router@v2",
-      "install -l ../pi-cost-router",
+      "install -l git:github.com/pkeenan87/pi-chef@v0.1.0",
+      "install git:github.com/acme/pi-chef@v2",
+      "install -l ../pi-chef",
     ]);
   });
 
@@ -89,7 +89,7 @@ describe("pi-cost-init", () => {
     const pi = fakePi();
     const result = await init(["--dry-run", "--ref", "v1"], cwd, pi.bin);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("pi install -l git:origin.cursor.com/pkeenan/pi-cost-router@v1");
+    expect(result.stdout).toContain("pi install -l git:github.com/pkeenan87/pi-chef@v1");
     expect(existsSync(pi.log)).toBe(false);
     expect(existsSync(path.join(cwd, ".pi-workflows"))).toBe(false);
     expect(existsSync(path.join(cwd, ".gitignore"))).toBe(false);

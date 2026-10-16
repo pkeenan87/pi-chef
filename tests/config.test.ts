@@ -127,7 +127,7 @@ describe("loadConfig layering", () => {
 
   const writeUser = (yaml: string) => {
     mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), yaml);
+    writeFileSync(path.join(home, ".pi", "agent", "chef.yaml"), yaml);
   };
   const writeProject = (yaml: string) => {
     mkdirSync(path.join(project, ".pi-workflows"), { recursive: true });
@@ -171,6 +171,23 @@ describe("loadConfig layering", () => {
     expect(set.warnings?.join("\n")).not.toMatch(/not set/);
   });
 
+  it("reads a legacy cost-workflow.yaml with a rename warning when it is the only user file", () => {
+    mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), `${base}branchPrefix: legacyfile\n`);
+    const config = loadConfig(project);
+    expect(config.branchPrefix).toBe("legacyfile");
+    expect(config.warnings).toContain("Rename ~/.pi/agent/cost-workflow.yaml to chef.yaml");
+  });
+
+  it("uses chef.yaml and warns that the legacy file is ignored when both exist", () => {
+    mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+    writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), `${base}branchPrefix: legacyfile\n`);
+    writeUser(`${base}branchPrefix: newfile\n`);
+    const config = loadConfig(project);
+    expect(config.branchPrefix).toBe("newfile");
+    expect(config.warnings?.join("\n")).toMatch(/cost-workflow\.yaml is ignored/);
+  });
+
   it("an old commandAllowlist key loads with a warning, from either file", () => {
     writeUser(`${base}commandAllowlist: ["npm test"]\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
@@ -201,7 +218,7 @@ describe("loadConfig layering", () => {
     expect(config.warnings?.find((item) => item.startsWith("workers."))).toBe("workers.concurrency/deadlineMs/isolatedWorktrees/preserveUntilReviewed are no longer used (only workers.tokenBudget and workers.ticketContextTokens remain).");
     expect(config.workers).toEqual({ tokenBudget: 1000, ticketContextTokens: 150000 });
     expect("worktrees" in config).toBe(false);
-    expect(config.branchPrefix).toBe("cost");
+    expect(config.branchPrefix).toBe("chef");
   });
 
   it("branchPrefix is a top-level key; an old worktrees.branchPrefix is honored only while it is unset", () => {

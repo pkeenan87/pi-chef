@@ -1,4 +1,4 @@
-# Operator config for the cost-optimized Pi workflow.
+# Operator config for the chef workflow.
 # No secrets belong in this file. Prices below are placeholders with an
 # effective date — replace them from your provider's current rate card.
 # The runtime never falls back to a price baked into source code.
@@ -12,7 +12,7 @@ providers:
     type: anthropic
     auth: account-login   # Claude Pro/Max sign-in through Pi /login anthropic
     # To use a key saved with Pi's /login anthropic instead, set apiKeyFallback: true for anthropic in
-    # ~/.pi/agent/cost-workflow.yaml (ignored here). It is billed per token (see the api-key pricing rows).
+    # ~/.pi/agent/chef.yaml (ignored here). It is billed per token (see the api-key pricing rows).
   xai:
     type: xai
     auth: account-login   # SuperGrok / X Premium sign-in through Pi /login xai
@@ -88,7 +88,7 @@ routing:
   attemptOverheadUsd: 0.02
 
 # The main chat session is a normal Pi model, not a router. Compaction summaries come from a cheap model.
-# session.model / session.compactionTier are user-config-only (~/.pi/agent/cost-workflow.yaml); a project may only set
+# session.model / session.compactionTier are user-config-only (~/.pi/agent/chef.yaml); a project may only set
 # session.pin: false. Defaults: anthropic/claude-opus-5-5, pinned at session start, compaction on the cheap tier.
 
 workers:
@@ -112,7 +112,7 @@ advisors:
   maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
   maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)
 
-branchPrefix: cost
+branchPrefix: chef
 
 budgets:
   taskUsd: 20

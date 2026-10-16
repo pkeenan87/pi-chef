@@ -25,7 +25,7 @@ let piRef: Pick<ExtensionAPI, "registerProvider" | "sendUserMessage"> | undefine
 let loaded: { root: string; key: string; config: WorkflowConfig } | undefined;
 /** Active tools before /plan restricted them, so they can be restored when planning ends. */
 let toolsBeforePlan: string[] | undefined;
-const TOOLS_ENTRY = "cost-workflow-tools";
+const TOOLS_ENTRY = "chef-tools";
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
 /** Signature of the provider and tier settings last registered with Pi. */
 let registeredSignature: string | undefined;
@@ -57,8 +57,8 @@ function stamp(file: string): string {
  * files are invalid; the previous good config is kept so a later fix applies without a restart.
  */
 function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
-  const { projectPath, userPath } = configPaths(root);
-  const key = `${stamp(projectPath)}|${stamp(userPath)}`;
+  const { projectPath, userPath, legacyUserPath } = configPaths(root);
+  const key = `${stamp(projectPath)}|${stamp(userPath)}|${stamp(legacyUserPath)}`;
   if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
   const config = loadConfig(root);
   const changed = !!loaded && loaded.root === root;
@@ -110,15 +110,15 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
     active.bind({
       chat: registry ? createRegistryChat(registry, apiKeyFallback) : undefined,
-      status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-router", text) : undefined,
-      planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("cost-plan", text) : undefined,
+      status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef", text) : undefined,
+      planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef-plan", text) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
-      report: (markdown) => showPlanMessage(ctx, markdown, "cost-report"),
+      report: (markdown) => showPlanMessage(ctx, markdown, "chef-report"),
       // The live ctx's widget slot above the editor; a replaced session's ctx is swapped out by the next bind.
-      indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("cost-progress", line === undefined ? undefined : [line]) } : undefined,
+      indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("chef-progress", line === undefined ? undefined : [line]) } : undefined,
       review: ctx.hasUI && typeof ctx.ui.custom === "function" ? (input) => reviewPlan(ctx, input) : undefined,
       show: (text) => showPlanMessage(ctx, text),
     });
@@ -141,7 +141,7 @@ type CommandContext = ExtensionContext & {
 let replacementCtx: CommandContext | undefined;
 
 /** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
-function showPlanMessage(ctx: CommandContext, text: string, customType = "cost-plan"): void {
+function showPlanMessage(ctx: CommandContext, text: string, customType = "chef-plan"): void {
   const message = { customType, content: text, display: true };
   try {
     if (typeof ctx.sendMessage === "function") void ctx.sendMessage(message, { triggerTurn: false });
@@ -155,22 +155,22 @@ function showPlanMessage(ctx: CommandContext, text: string, customType = "cost-p
  * The model /build wants a fresh session to start on (Pi starts it on the default model). Kept on globalThis because the
  * new session may load a fresh copy of this module.
  */
-const RESTORE_MODEL = Symbol.for("pi-cost-router.restore-model");
+const RESTORE_MODEL = Symbol.for("pi-chef.restore-model");
 type ModelRef = { provider: string; id: string };
 
 /**
  * Resolves when the model restore started by this session's `session_start` has finished (the driver waits for it before
  * sending to a fresh /build session). On globalThis for the same reason as RESTORE_MODEL.
  */
-const RESTORE_DONE = Symbol.for("pi-cost-router.restore-done");
+const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
 /**
  * `setModel` of the newest extension instance, refreshed by every `session_start`. A command's own `pi` and ctx are dead
  * after /build opens a session, and the replacement ctx has no setModel (only `pi` has), so /build puts the user's model
  * back through this, which always belongs to the live session.
  */
-const SET_MODEL = Symbol.for("pi-cost-router.set-model");
+const SET_MODEL = Symbol.for("pi-chef.set-model");
 /** The last assistant text and abort flag of the run /build is waiting on, filled by the message_end and agent_settled handlers. */
-const TURN = Symbol.for("pi-cost-router.turn");
+const TURN = Symbol.for("pi-chef.turn");
 const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [TURN]?: { lastText: string; aborted: boolean } };
 
 /** Re-selects the model the replaced session was using, when the new session started on a different one. */
@@ -461,7 +461,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
         try {
           if (!replaced) syncPlanTools(pi);
           if (live.hasUI) {
-            live.ui.setStatus("cost-workflow", result.ok ? result.text.split("\n")[0] : undefined);
+            live.ui.setStatus("chef-workflow", result.ok ? result.text.split("\n")[0] : undefined);
             live.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
           }
         } catch {
@@ -470,8 +470,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       },
     });
   }
-  pi.registerCommand("cost-help", {
-    description: "List cost-workflow commands.",
+  pi.registerCommand("chef", {
+    description: "List the chef commands.",
     handler: async (_args, ctx) => {
       if (ctx.hasUI) ctx.ui.notify(helpText(), "info");
     },
@@ -485,15 +485,15 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       for (const warning of workflow.config.warnings ?? []) if (ctx.hasUI) ctx.ui.notify(warning, "warning");
     } catch (error) {
       // The router and tools still register; each command reports the config error when it runs.
-      if (ctx.hasUI) ctx.ui.notify(`Cost workflow config problem: ${asResult(error).text}`, "warning");
+      if (ctx.hasUI) ctx.ui.notify(`Chef config problem: ${asResult(error).text}`, "warning");
     }
-    pi.appendEntry("cost-workflow", { cwd: ctx.cwd });
+    pi.appendEntry("chef-workflow", { cwd: ctx.cwd });
     // A /plan that was running before a restart resumes with its tools and progress line.
     toolsBeforePlan = undefined;
     restoreToolsBeforePlan(ctx);
     syncPlanTools(pi);
     const progress = active?.planningStatus();
-    if (progress && ctx.hasUI) ctx.ui.setStatus("cost-plan", progress);
+    if (progress && ctx.hasUI) ctx.ui.setStatus("chef-plan", progress);
     softBudgetShown = false;
     try {
       // Foundry, Vercel, and local models must be in Pi's registry before anything can select them.

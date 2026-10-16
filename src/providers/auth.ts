@@ -50,7 +50,7 @@ export function viewFromCredential(
       provider,
       status: "blocked",
       method: "api-key",
-      detail: `API key credentials are rejected. Sign in with the ${provider} account, or allow the key with providers.${provider}.apiKeyFallback: true in ~/.pi/agent/cost-workflow.yaml (billed per token).`,
+      detail: `API key credentials are rejected. Sign in with the ${provider} account, or allow the key with providers.${provider}.apiKeyFallback: true in ~/.pi/agent/chef.yaml (billed per token).`,
     };
   }
   if (credential.type !== "oauth") {

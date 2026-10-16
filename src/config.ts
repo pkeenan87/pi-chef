@@ -230,7 +230,7 @@ const DEFAULTS: WorkflowConfig = {
     tokenBudget: 8000,
     ticketContextTokens: 150000,
   },
-  branchPrefix: "cost",
+  branchPrefix: "chef",
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
   checks: [],
@@ -575,7 +575,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     checkNumber(workers, "ticketContextTokens", where, { min: 20000, integer: true }, "workers");
   }
   if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
-    invalid(where, "branchPrefix", "must be a plain branch-name prefix such as cost");
+    invalid(where, "branchPrefix", "must be a plain branch-name prefix such as chef");
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
@@ -758,7 +758,7 @@ function restrictProject(name: string, user: unknown, project: unknown, warnings
   const out: Record<string, unknown> = { ...project };
   // Accepting an API key loosens the sign-in policy, so only the user can turn it on.
   if ("apiKeyFallback" in out) {
-    if (out.apiKeyFallback === true) warnings.push(`Ignored project providers.${name}.apiKeyFallback: only the user config (~/.pi/agent/cost-workflow.yaml) can allow an API key.`);
+    if (out.apiKeyFallback === true) warnings.push(`Ignored project providers.${name}.apiKeyFallback: only the user config (~/.pi/agent/chef.yaml) can allow an API key.`);
     delete out.apiKeyFallback;
   }
   for (const field of USER_ONLY_PROVIDER_FIELDS) {
@@ -768,7 +768,7 @@ function restrictProject(name: string, user: unknown, project: unknown, warnings
     if (harmless) continue;
     // A user-defined provider that already matches the built-in default needs no warning.
     if (!(userDefines && name !== "local" && isBuiltinDefault(name, field, out[field]))) {
-      warnings.push(`Ignored project providers.${name}.${field}: credential and location settings are read from the user config (~/.pi/agent/cost-workflow.yaml) only.`);
+      warnings.push(`Ignored project providers.${name}.${field}: credential and location settings are read from the user config (~/.pi/agent/chef.yaml) only.`);
     }
     delete out[field];
   }
@@ -810,7 +810,7 @@ function restrictSession(project: unknown, warnings: string[]): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(project)) {
     if (key === "pin" && value === false) out.pin = false;
-    else warnings.push(`Ignored project session.${key}: ${key === "pin" ? "a project can only set pin: false" : "session settings are read from the user config (~/.pi/agent/cost-workflow.yaml) only"}.`);
+    else warnings.push(`Ignored project session.${key}: ${key === "pin" ? "a project can only set pin: false" : "session settings are read from the user config (~/.pi/agent/chef.yaml) only"}.`);
   }
   return out;
 }
@@ -945,16 +945,26 @@ export function layerConfigs(
 }
 
 /** Config files that loadConfig reads, so callers can watch them for changes. */
-export function configPaths(cwd: string): { projectPath: string; userPath: string } {
+export function configPaths(cwd: string): { projectPath: string; userPath: string; legacyUserPath: string } {
   return {
     projectPath: path.join(cwd, ".pi-workflows", "config.yaml"),
-    userPath: path.join(homedir(), ".pi", "agent", "cost-workflow.yaml"),
+    userPath: path.join(homedir(), ".pi", "agent", "chef.yaml"),
+    legacyUserPath: path.join(homedir(), ".pi", "agent", "cost-workflow.yaml"),
   };
 }
 
 export function loadConfig(cwd: string): WorkflowConfig {
-  const { projectPath, userPath } = configPaths(cwd);
+  const { projectPath, userPath: newUserPath, legacyUserPath } = configPaths(cwd);
   const warnings: string[] = [];
+  // The user file used to be cost-workflow.yaml: still read when it is the only one, and say to rename it.
+  let userPath = newUserPath;
+  if (existsSync(legacyUserPath)) {
+    if (existsSync(newUserPath)) warnings.push("~/.pi/agent/cost-workflow.yaml is ignored because ~/.pi/agent/chef.yaml exists; delete the old file.");
+    else {
+      userPath = legacyUserPath;
+      warnings.push("Rename ~/.pi/agent/cost-workflow.yaml to chef.yaml");
+    }
+  }
   const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;
   const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
