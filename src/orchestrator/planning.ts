@@ -8,7 +8,7 @@ import { active, done, fail, guard, iso, knownZero, PUBLISHED_PHASES, requireAct
 import { move } from "./machine.js";
 import { acceptanceCriteria, applyOverlap, assertGraph, forNewPlan, materialChange, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
-import { announce, availability, decide, suggestAdvisor } from "./routing.js";
+import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
 
 /** Classifies with the tier's Decisions model when one is selected and reachable, else the chat classifier, else keywords. */
 export async function classify(ctx: WorkflowContext, text: string): Promise<{ classification: AcceptedClassification; usage?: ClassifierUsage }> {
@@ -249,6 +249,7 @@ export function route(ctx: WorkflowContext, task: string): Promise<CommandResult
     recordClassifier(ctx, current?.taskId ?? "route", current?.phase ?? "IDLE", usage);
     const decision = await decide(ctx, classification, "preview", { taskId: current?.taskId });
     await announce(ctx, current?.taskId, "preview", decision);
-    return done(JSON.stringify({ classification, decision }, null, 2), { classification, decision });
+    const routing = routingSummary(ctx);
+    return done(JSON.stringify({ classification, decision, routing }, null, 2), { classification, decision, routing });
   });
 }

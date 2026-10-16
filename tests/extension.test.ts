@@ -96,7 +96,7 @@ describe("pi extension surface", () => {
     bindWorkflow(undefined);
   });
 
-  it("routes the virtual model on the latest user message only", async () => {
+  it("routes every virtual-model request to the session tier, whatever the message says", async () => {
     const cwd = await tempRepo();
     const { handlers, route } = fakePi();
     handlers.get("session_start")!({}, { cwd });
@@ -107,8 +107,9 @@ describe("pi extension surface", () => {
     const mixed = await route().route({ reason: "user", messages: [user(old), { role: "assistant", content: "ok" }, user(latest)] }, ctx);
     expect(mixed.model).toEqual(only.model);
     const security = await route().route({ reason: "user", messages: [user(old)] }, ctx);
-    expect(only.model.provider).toBe("anthropic");
-    expect(security.model.provider).toBe("openai");
+    // routing.sessionTier defaults to premium, which these configs map to openai; nothing is classified.
+    expect(only.model.provider).toBe("openai");
+    expect(security.model).toEqual(only.model);
     bindWorkflow(undefined);
   });
 
@@ -119,7 +120,7 @@ describe("pi extension surface", () => {
     handlers.get("session_start")!({}, { cwd });
     const ctx = { modelRegistry: registry };
     const first = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
-    expect(first.model.provider).toBe("anthropic");
+    expect(first.model.provider).toBe("openai");
     mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
     writeFileSync(
       path.join(cwd, ".pi-workflows", "config.yaml"),
@@ -130,6 +131,7 @@ describe("pi extension surface", () => {
         "  foundry: { type: azure-foundry, auth: azure-cli, endpointEnv: X, deployments: { classifier: c, reasoning: r, cheap: c } }",
         "  local: { type: openai-compatible, baseUrl: 'http://127.0.0.1:1/v1', model: m }",
         "models: { classifier: local, cheap: local, standard: local, premium: openai }",
+        "routing: { sessionTier: standard }",
         "",
       ].join("\n"),
     );
@@ -171,7 +173,7 @@ describe("pi extension surface", () => {
           expect(await bashHook("git switch main")).toMatchObject({ block: true });
           expect(await bashHook("npm test")).toBeUndefined();
           writeFileSync(path.join(cwd, `f${ticket}.txt`), "x\n");
-          handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `Done ${ticket}.\n- [x] retry works` }], provider: "foundry", model: "grok-4-7", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, {});
+          handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: `Done ${ticket}.\n- [x] retry works` }], provider: "anthropic", model: "claude-sonnet-5-5", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, {});
         },
         async waitForIdle() {
           log.push("idle");
@@ -184,7 +186,7 @@ describe("pi extension surface", () => {
           onSetModel.run = (model) => {
             next.model = model;
           };
-          expect((globalThis as Record<symbol, unknown>)[slot]).toMatchObject({ provider: "foundry", id: "grok-4-7" });
+          expect((globalThis as Record<symbol, unknown>)[slot]).toMatchObject({ provider: "anthropic", id: "claude-sonnet-5-5" });
           handlers.get("session_start")!({}, next);
           current = next;
           await options?.withSession?.(next);
@@ -197,9 +199,9 @@ describe("pi extension surface", () => {
     const first = sessionCtx("command");
     first.model = original;
     await commands.get("build")!.handler("", first);
-    expect(log).toEqual(["send 01 on grok-4-7 via session 1", "idle", "send 02 on grok-4-7 via session 2", "idle"]);
+    expect(log).toEqual(["send 01 on claude-sonnet-5-5 via session 1", "idle", "send 02 on claude-sonnet-5-5 via session 2", "idle"]);
     expect(sessions).toBe(2);
-    expect(setModelCalls.map((model) => model.id)).toEqual(["grok-4-7", "grok-4-7", "auto"]);
+    expect(setModelCalls.map((model) => model.id)).toEqual(["claude-sonnet-5-5", "claude-sonnet-5-5", "auto"]);
     expect(current!.model).toEqual(original);
     expect((globalThis as Record<symbol, unknown>)[slot]).toBeUndefined();
     const state = app.store.load(app.activeTaskId()!)!;
@@ -238,7 +240,7 @@ describe("pi extension surface", () => {
     const make = (): Record<string, unknown> => ({
       cwd,
       hasUI: true,
-      model: { provider: "foundry", id: "grok-4-7" },
+      model: { provider: "anthropic", id: "claude-sonnet-5-5" },
       modelRegistry: { find: () => undefined },
       ui: { notify() {}, setStatus() {}, confirm: async () => true },
       async sendMessage() {},

@@ -1,5 +1,5 @@
 import { tierCandidates } from "../config.js";
-import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
+import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { decideRoute } from "../router/policy.js";
 import type { Availability } from "../router/select.js";
 import { redact } from "../redact.js";
@@ -27,14 +27,14 @@ export async function decide(
   ctx: WorkflowContext,
   classification: AcceptedClassification,
   purpose: "plan" | "implement" | "review" | "preview",
-  extra: { failedTier?: Tier; escalations?: number; taskId?: string; tierHint?: Tier; strictAvailability?: boolean } = {},
+  extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
 ): Promise<RoutingDecision> {
   return decideRoute(classification, ctx.config, ctx.store.readMetrics(), {
     purpose,
     at: ctx.now(),
     failedTier: extra.failedTier,
     escalations: extra.escalations,
-    tierHint: extra.tierHint,
+    ticketTier: extra.ticketTier,
     strictAvailability: extra.strictAvailability,
     availability: await availability(ctx),
     budgetRemainingUsd: budgetRemainingUsd(ctx, extra.taskId),
@@ -59,6 +59,18 @@ export async function announce(
     (item) => `${item.provider}/${item.model}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
   );
   await ctx.store.appendRoute(taskId, { purpose, tier: decision.tier, provider: decision.provider, model: decision.model, reason: why, considered }, iso(ctx));
+}
+
+/** Who does what under the current config: the tiers for chat, direct jobs, review, and tickets, with their chat models. */
+export function routingSummary(ctx: WorkflowContext): { chat: string; direct: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
+  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).filter((item) => item.api === "chat").map((item) => `${item.provider}/${item.model}`);
+  const { sessionTier, directTier, reviewTier } = ctx.config.routing;
+  return {
+    chat: sessionTier ? `${sessionTier}: ${models(sessionTier).join(", ")}` : "classified per session",
+    direct: `${directTier}: ${models(directTier).join(", ")}`,
+    review: `${reviewTier}: ${models(reviewTier).join(", ")}`,
+    tickets: { low: models("ticketLow"), medium: models("ticketMedium"), high: models("ticketHigh"), then: models("premium") },
+  };
 }
 
 /** Tells the user the advisor exists, once per reason per task. Never calls it. */

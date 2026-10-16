@@ -4,6 +4,7 @@ import { type AcceptedClassification, type CommandResult, type ModelReview, type
 import { modelReviewLines, runModelReview } from "../review/model-review.js";
 import { reviewDiff } from "../review/review.js";
 import { fallbackClassification } from "../router/classify.js";
+import { reviewMetricType } from "../router/stats.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
@@ -76,7 +77,8 @@ export function reviewMarkdown(report: ReviewReport, options: { setupConfigured:
 
 /**
  * The review tier in the order the model pass tries it: the routed candidate, then the other usable candidates of the
- * same tier (not excluded by policy, circuit, budget, or availability), another provider first, then by score.
+ * same tier (not excluded by policy, circuit, budget, or availability), another provider first, then by score, and
+ * last the standard tier.
  */
 export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision): TierCandidate[] {
   const primary = decision.candidate;
@@ -94,7 +96,14 @@ export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision
     if (a.score !== undefined && b.score !== undefined && a.score !== b.score) return a.score - b.score;
     return a.order - b.order;
   });
-  return [primary, ...rest.map((row) => row.candidate)];
+  const ordered = [primary, ...rest.map((row) => row.candidate)];
+  // A failed part stays within the review tier first; when none is left, standard-tier models take over.
+  if (decision.tier !== "standard") {
+    const standard = tierCandidates(ctx.config, "standard").filter((candidate) => candidate.api === "chat" && !ordered.some((item) => key(item) === key(candidate)));
+    // Another provider first: a failed part is usually a provider problem.
+    ordered.push(...standard.filter((item) => item.provider !== primary.provider), ...standard.filter((item) => item.provider === primary.provider));
+  }
+  return ordered;
 }
 
 /**
@@ -131,7 +140,7 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
         const entry = record(ctx, taskId, "REVIEWING", decision.tier, call.candidate.provider, call.candidate.model, call.usage, call.outcome === "success" ? "success" : "failure", call.retry, "model review");
         micro = micro === null || entry.actualUsd === null ? null : micro + toMicroUsd(entry.actualUsd);
         // Only model-attributable outcomes count, and only against the candidate that made the call.
-        if (call.outcome !== "stopped") await ctx.store.bumpMetric(taskType, decision.tier, call.outcome === "success", ctx.now(), call.candidate);
+        if (call.outcome !== "stopped") await ctx.store.bumpMetric(reviewMetricType(taskType), decision.tier, call.outcome === "success", ctx.now(), call.candidate);
       },
     });
   } catch (error) {

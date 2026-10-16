@@ -1,6 +1,7 @@
 import { PROVIDERS, type CommandResult, type CostRecord, type RoutingDecision, type TaskState } from "../domain.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
+import { routingSummary } from "./routing.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
 import { formatDuration } from "./format.js";
@@ -33,6 +34,15 @@ function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.
   return [...rows.entries()].map(
     ([key, v]) => `${key}: ${v.calls} call(s), $${v.usd.toFixed(4)} known${v.unknown ? ` (+${v.unknown} unknown)` : ""}, ${v.wins} success / ${v.losses} failure`,
   );
+}
+
+function routingLines(ctx: WorkflowContext): string[] {
+  const summary = routingSummary(ctx);
+  const list = (models: string[]) => models.join(" | ") || "none";
+  return [
+    `Routing: chat ${summary.chat} · direct ${summary.direct} · review ${summary.review}`,
+    `Ticket models: low ${list(summary.tickets.low)} · medium ${list(summary.tickets.medium)} · high ${list(summary.tickets.high)} · then ${list(summary.tickets.then)} (up to ${ctx.config.routing.maxEscalations} escalation(s))`,
+  ];
 }
 
 function routeLine(routing: RoutingDecision): string {
@@ -105,6 +115,7 @@ async function statusReport(ctx: WorkflowContext): Promise<CommandResult> {
     ...buildLines(state),
     ...ticketLines(state),
     `Budget: ${budget}`,
+    ...routingLines(ctx),
     ...(ctx.config.warnings ?? []).map((warning) => `Config warning: ${warning}`),
     state?.routing ? `Model: ${routeLine(state.routing)}` : "",
     ...modelBreakdown(ctx).map((line) => `Model stats: ${line}`),

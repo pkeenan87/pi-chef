@@ -36,7 +36,7 @@ The spec is saved. Break the work into tickets and call plan_tickets once.
 - whatToBuild states the end-to-end behavior. implementation is the technical how: the files to create or change, the functions, types and signatures to add (with names), how they wire into existing code, and the tests to write. Name real paths and symbols from the code you read.
 - List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
-- suggestedTier is optional: deterministic, cheap, standard or premium.
+- difficulty (low, medium or high) picks the model that builds the ticket: low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting, tricky logic, concurrency, security, or a large blast radius. Set it on every ticket. A failed ticket is retried on the next stronger model.
 - checks is optional: shell command lines /build runs in the repo root after the ticket (one command per entry, no prose). Destructive commands are refused. Verification steps that are not a command belong in implementation.
 plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves on the review screen (or later with /show-plan) and then runs /build. Do not implement anything.`;
 

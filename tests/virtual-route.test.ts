@@ -61,15 +61,15 @@ describe("virtual model route with tiers", () => {
     handlers.get("session_start")!({}, { cwd });
     const statuses: [string, string | undefined][] = [];
     const ctx = { modelRegistry: registry, ui: { setStatus: (key: string, text: string | undefined) => statuses.push([key, text]) } };
-    // equal sampled success odds, so the cheaper Foundry Grok wins on cost per success
+    // the session tier is premium; sol is the cheaper premium candidate in this test config
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const picked = await route().route({ reason: "user", messages: [user("add a retry counter to the parser")] }, ctx);
-    expect(picked.model).toEqual({ provider: "foundry", id: "grok-4-7" });
+    expect(picked.model).toEqual({ provider: "openai", id: "gpt-6.1-sol" });
     // the Pi footer shows the routed model; chat turns set no status line of their own
     expect(statuses).toHaveLength(0);
-    expect((picked as { state?: { tier: string; model: string } }).state).toMatchObject({ v: 1, tier: "standard", model: "grok-4-7", switches: 0 });
+    expect((picked as { state?: { tier: string; model: string } }).state).toMatchObject({ v: 1, tier: "premium", model: "gpt-6.1-sol", switches: 0 });
     const events = readFileSync(path.join(app.store.root, "tasks", app.activeTaskId()!, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(events.filter((event) => event.type === "route").at(-1).route).toMatchObject({ purpose: "user", tier: "standard", provider: "foundry", model: "grok-4-7" });
+    expect(events.filter((event) => event.type === "route").at(-1).route).toMatchObject({ purpose: "user", tier: "premium", provider: "openai", model: "gpt-6.1-sol" });
     // chat models were registered with Pi at session start, with command-based credentials
     expect(Object.keys(providers).sort()).toEqual(["foundry", "local"]);
     expect((providers.foundry as { apiKey: string }).apiKey).toMatch(/^!az account get-access-token --resource 'https:\/\/ai\.azure\.com'/);

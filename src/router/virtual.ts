@@ -7,11 +7,17 @@ import { selectCandidate, type Availability } from "./select.js";
 import { shadowCost, tierCost, type SuccessTable } from "./stats.js";
 
 /**
- * The cost-opt/auto virtual model. Stateful and cache-aware: the first user request is classified once,
- * the chosen model then stays for the session (a switch loses the prompt cache), and it moves only when
- * the work really changes: an escalation cue, a long new request, a higher thinking level, a failure,
- * or an explicit failure. There is no handoff to a cheaper tier after the first edit: a fix for a review finding
- * needs the same model as the plan, so the chat model stays on its routed tier.
+ * The cost-opt/auto virtual model. Stateful and cache-aware. With `routing.sessionTier` set (the default is premium)
+ * the tier is fixed: every user, retry and continuation request routes to it whatever the classifier or the thinking
+ * level would say, so nothing is classified and no Decisions call is made. `direct` requests (compaction, summaries)
+ * use `routing.directTier`. The selector still picks the model within the tier (availability, budget, circuits,
+ * price), a transient error retries the same tier without the failed model, and a context overflow moves to a larger
+ * window or the next tier. An escalation cue raises the tier one step only when it is below premium.
+ *
+ * Without a sessionTier (an old code path kept for tests) the first user request is classified once, the chosen model
+ * stays for the session (a switch loses the prompt cache), and it moves only when the work really changes: an
+ * escalation cue, a long new request, a higher thinking level, or a failure. There is no handoff to a cheaper tier
+ * after the first edit: a fix for a review finding needs the same model as the plan.
  */
 
 export type ChatTier = "cheap" | "standard" | "premium";
@@ -200,6 +206,11 @@ function wantedTier(classification: AcceptedClassification, config: WorkflowConf
   return base;
 }
 
+/** Stand-in classification when the session tier is fixed: it only carries the tier and neutral task facts. */
+function sessionClassification(tier: ChatTier): AcceptedClassification {
+  return { task_type: "general", complexity: "medium", risk: "low", required_capabilities: [], recommended_tier: tier, confidence: 1, reason_codes: ["session_tier"], source: "fallback" };
+}
+
 function classifyFailure(request: RouterRequest<ModelLike>): "overflow" | "transient" | "other" {
   const text = `${request.failed?.message?.errorMessage ?? ""} ${request.failed?.message?.stopReason ?? ""}`;
   if (CONTEXT_OVERFLOW.test(text)) return "overflow";
@@ -209,6 +220,7 @@ function classifyFailure(request: RouterRequest<ModelLike>): "overflow" | "trans
 export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M>, deps: VirtualDeps<M>): Promise<RouterResult<M>> {
   const thinkingLevel = request.thinkingLevel;
   const state = request.state;
+  let sessionTier: ChatTier | undefined;
   const registry = deps.registry;
 
   const same = (a: ModelLike | undefined, provider: string, id: string): boolean => a?.provider === provider && a.id === id;
@@ -253,19 +265,22 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
 
   if (request.reason === "direct") {
     const snapshot = await deps.snapshot();
-    for (const tier of CHAT_TIERS) {
+    // The direct tier first, then stronger ones if it has no usable model.
+    for (const tier of CHAT_TIERS.slice(rank(snapshot.config.routing.directTier))) {
       const pick = await choose(snapshot, tier, {}, "compaction summary");
       if (pick) {
         await emit("direct", { tier, provider: pick.candidate.provider, model: pick.candidate.model }, pick.reason);
         return { model: pick.model, thinkingLevel };
       }
     }
-    throw new Error(noModelMessage(snapshot.config, "cheap"));
+    throw new Error(noModelMessage(snapshot.config, snapshot.config.routing.directTier));
   }
 
   const snapshot = await deps.snapshot();
   if (snapshot.budget === "hard") throw new Error("Task or daily budget is exhausted. Run /cost for details.");
   const soft = snapshot.budget === "soft";
+  // With a session tier every user, retry and continuation request routes there; nothing is classified.
+  sessionTier = snapshot.config.routing.sessionTier;
 
   if (request.reason === "retry" && state) {
     const retried = await retry(snapshot);
@@ -275,7 +290,7 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
   if (!state || request.reason === "retry") {
     // Classify once. After a retry with no state, the failed model is excluded from the pick.
     const text = lastUser(request.messages);
-    const classification = await deps.classify(text, request.signal);
+    const classification = sessionTier ? sessionClassification(sessionTier) : await deps.classify(text, request.signal);
     const exclude = request.failed && classifyFailure(request) !== "other" ? request.failed.model : undefined;
     return initial(snapshot, classification, exclude);
   }
@@ -283,11 +298,14 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
   // A later user turn: stay on the model unless the work changed.
   const text = lastUser(request.messages);
   const cue = ESCALATION_CUE.test(text);
-  const reclassify = cue || text.length > LONG_MESSAGE;
+  const reclassify = !sessionTier && (cue || text.length > LONG_MESSAGE);
   const fresh = reclassify ? await deps.classify(text, request.signal) : undefined;
   const summary = fresh ? summarize(fresh, snapshot.config) : state.classification;
-  let tier = state.tier;
-  if (!soft) {
+  let tier = sessionTier ? maxTier(sessionTier, state.tier) : state.tier;
+  if (sessionTier) {
+    // A cue raises a session pinned below premium; at the top it does nothing.
+    if (cue && !soft && tier === state.tier) tier = CHAT_TIERS[Math.min(2, rank(tier) + 1)]!;
+  } else if (!soft) {
     if (fresh) tier = maxTier(tier, wantedTier(fresh, snapshot.config, thinkingLevel === "low" ? "medium" : thinkingLevel));
     const floor = thinkingFloor(thinkingLevel);
     if (floor) tier = maxTier(tier, floor);
@@ -416,7 +434,7 @@ export async function routeVirtual<M extends ModelLike>(request: RouterRequest<M
 
   async function initial(snapshot: RouterSnapshot, classification: AcceptedClassification, exclude: ModelLike | undefined): Promise<RouterResult<M>> {
     const summary = summarize(classification, snapshot.config);
-    let tier = wantedTier(classification, snapshot.config, thinkingLevel);
+    let tier = sessionTier ?? wantedTier(classification, snapshot.config, thinkingLevel);
     if (planning) tier = maxTier(tier, summary.complexity === "high" || summary.securitySensitive ? "premium" : "standard");
     const decision = await decide(snapshot, { ...classification, recommended_tier: tier }, exclude);
     const next: RouterState = {

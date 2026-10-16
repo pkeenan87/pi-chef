@@ -497,9 +497,10 @@ describe("review outcomes are keyed apart from implementation", () => {
     const implement: SuccessTable = { general: { [key]: { success: 19, failure: 1 } } };
     const withReviewFailures: SuccessTable = { ...implement, [reviewMetricType("general")]: { [key]: { success: 0, failure: 30 } } };
     const config = pair();
+    config.routing.reviewTier = "standard";
     for (let seed = 1; seed <= 30; seed++) {
-      const a = decideRoute(classification, config, implement, { purpose: "implement", tierHint: "standard", at, rng: seededRng(seed) });
-      const b = decideRoute(classification, config, withReviewFailures, { purpose: "implement", tierHint: "standard", at, rng: seededRng(seed) });
+      const a = decideRoute(classification, config, implement, { purpose: "implement", ticketTier: "ticketMedium", at, rng: seededRng(seed) });
+      const b = decideRoute(classification, config, withReviewFailures, { purpose: "implement", ticketTier: "ticketMedium", at, rng: seededRng(seed) });
       expect(b.model).toBe(a.model);
       expect(b.reason).toEqual(a.reason);
     }

@@ -125,6 +125,7 @@ export function tieredYaml(extraYaml = ""): string {
 providers:
   openai: { type: openai, auth: account-login }
   anthropic: { type: anthropic, auth: account-login }
+  xai: { type: xai, auth: account-login }
   foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", routeStyle: v1, audience: "https://ai.azure.com" }
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, projectDir: ".", envFile: .env.local }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b" }
@@ -143,6 +144,12 @@ tiers:
   premium:
     - { provider: anthropic, model: claude-opus-5-5 }
     - { provider: openai, model: "gpt-6.1-sol" }
+  ticketLow:
+    - { provider: xai, model: grok-4.7 }
+  ticketMedium:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+  ticketHigh:
+    - { provider: openai, model: "gpt-6.1-sol" }
   advisor:
     - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra }
@@ -156,6 +163,7 @@ pricing:
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
+  - { provider: xai, model: grok-4.7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 1, outputPerMillionUsd: 4 }
   - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 15, outputPerMillionUsd: 75 }
   - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 }

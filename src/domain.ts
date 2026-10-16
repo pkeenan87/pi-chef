@@ -25,8 +25,36 @@ export function isAccountProvider(value: string): value is AccountProvider {
 }
 export type ProviderId = (typeof PROVIDERS)[number];
 
-export const TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;
+/** The general ladder: cheapest to strongest. */
+export const BASE_TIERS = ["deterministic", "classifier", "cheap", "standard", "premium"] as const;
+/** /build ticket tiers, by the difficulty the planner assigns. A failed ticket climbs low, medium, high, then premium. */
+export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
+export type TicketTier = (typeof TICKET_TIERS)[number];
+export const TIERS = [...BASE_TIERS, ...TICKET_TIERS] as const;
 export type Tier = (typeof TIERS)[number];
+
+export const DIFFICULTIES = ["low", "medium", "high"] as const;
+export type Difficulty = (typeof DIFFICULTIES)[number];
+export function isDifficulty(value: string): value is Difficulty {
+  return (DIFFICULTIES as readonly string[]).includes(value);
+}
+/** The ticket tier a difficulty starts on. */
+export const DIFFICULTY_TIER: Record<Difficulty, TicketTier> = { low: "ticketLow", medium: "ticketMedium", high: "ticketHigh" };
+/** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
+export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
+  if (ticket.difficulty) return ticket.difficulty;
+  switch (ticket.suggestedTier) {
+    case "deterministic":
+    case "cheap":
+    case "ticketLow":
+      return "low";
+    case "premium":
+    case "ticketHigh":
+      return "high";
+    default:
+      return "medium";
+  }
+}
 
 /** Tiers a config can list candidates for. `advisor` is on-demand and never part of the escalation ladder. */
 export const TIER_KEYS = [...TIERS, "advisor"] as const;
@@ -97,6 +125,9 @@ export interface Ticket {
   implementation?: string;
   acceptanceCriteria: string[];
   blockedBy: string[];
+  /** How hard the ticket is; picks the model tier for the first attempt. Wins over suggestedTier. */
+  difficulty?: Difficulty;
+  /** Read from old plans only; use ticketDifficulty(). */
   suggestedTier?: Tier;
   /** Ownership hints, not a hard allowlist. */
   files?: string[];

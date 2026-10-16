@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret } from "./redact.js";
-import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
+import { WorkflowError, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey } from "./domain.js";
 
 export interface ProviderConfig {
   type: string;
@@ -96,6 +96,10 @@ export interface CheckConfig {
   args: string[];
 }
 
+/** Tiers a session, direct, or review job can be pinned to. */
+export type ChatTierName = "cheap" | "standard" | "premium";
+const CHAT_TIER_NAMES: readonly string[] = ["cheap", "standard", "premium"];
+
 export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
@@ -108,6 +112,12 @@ export interface WorkflowConfig {
     minConfidence: number;
     maxEscalations: number;
     maxTier: Tier;
+    /** Tier every chat turn on the cost-opt/auto virtual model routes to. Unset: classify the first request instead. */
+    sessionTier?: ChatTierName;
+    /** Tier for cheap side jobs on the virtual model (compaction, summaries). */
+    directTier: ChatTierName;
+    /** Tier the /review model pass routes to. */
+    reviewTier: ChatTierName;
     requirePremiumReviewFor: string[];
     circuitBreakerFailures: number;
     /**
@@ -165,8 +175,11 @@ const DEFAULTS: WorkflowConfig = {
   tiers: {},
   routing: {
     minConfidence: 0.75,
-    maxEscalations: 2,
+    maxEscalations: 3,
     maxTier: "premium",
+    sessionTier: "premium",
+    directTier: "cheap",
+    reviewTier: "premium",
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
     attemptOverheadUsd: 0.02,
@@ -436,6 +449,11 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
     if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier))) {
       invalid(where, "routing.maxTier", `must be one of ${TIERS.join(", ")}`);
+    }
+    for (const field of ["sessionTier", "directTier", "reviewTier"] as const) {
+      if (routing[field] !== undefined && (typeof routing[field] !== "string" || !CHAT_TIER_NAMES.includes(routing[field] as string))) {
+        invalid(where, `routing.${field}`, `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
+      }
     }
     if (routing.requirePremiumReviewFor !== undefined) stringArray(routing.requirePremiumReviewFor, "routing.requirePremiumReviewFor", where);
   }
@@ -774,6 +792,13 @@ export function loadConfig(cwd: string): WorkflowConfig {
   const warnings: string[] = [];
   const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
   validateResolvedConfig(config, where);
+  // An old config lists tiers but no ticket tiers: /build then runs low, medium and high tickets on cheap, standard and premium.
+  if (Object.keys(config.tiers).length > 0) {
+    const missing = TICKET_TIERS.filter((tier) => !config.tiers[tier]);
+    if (missing.length > 0) {
+      warnings.push(`tiers.${missing.join("/")} not set: /build uses cheap, standard and premium for low, medium and high tickets. Add ticketLow, ticketMedium and ticketHigh under tiers to pick the models.`);
+    }
+  }
   if (warnings.length > 0) config.warnings = warnings;
   if (config.proprietaryCode && config.orgProviderAllowlist.length === 0) {
     throw new WorkflowError(
@@ -879,6 +904,10 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
   const explicit = config.tiers[tier];
   if (explicit) return explicit;
   if (tier === "deterministic" || tier === "advisor") return [];
+  // Ticket tiers missing from an older config run on the general tier of the same strength.
+  if (tier === "ticketLow" || tier === "ticketMedium" || tier === "ticketHigh") {
+    return tierCandidates(config, tier === "ticketLow" ? "cheap" : tier === "ticketMedium" ? "standard" : "premium");
+  }
   const provider = config.models[tier];
   return [{ provider, model: modelNameFor(config, provider, tier), api: "chat" }];
 }

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
-import type { BuildRecord, CheckEvidence, CommandResult, Phase, RoutingDecision, TaskState, Ticket, TicketAttempt, TicketRun, Tier } from "../domain.js";
+import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
@@ -321,7 +321,13 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
   }
 }
 
-/** Routes the ticket (tier hint, one tier up after a failure), gates the budget, builds the prompt, and marks the ticket running. */
+/** The ticket tier a first attempt starts on: its difficulty, and at least ticketHigh in a security-sensitive plan. */
+function startTier(state: TaskState, ticket: Ticket): TicketTier {
+  const tier = DIFFICULTY_TIER[ticketDifficulty(ticket)];
+  return state.plan?.securitySensitive ? "ticketHigh" : tier;
+}
+
+/** Routes the ticket (its difficulty tier, one step up the ticket ladder after a failure), gates the budget, builds the prompt, and marks the ticket running. */
 async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): Promise<NextChunk> {
   const run = state.ticketRuns?.[ticket.id];
   const budget = budgetState(ctx, state.taskId);
@@ -331,7 +337,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const escalations = (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
   const classification = state.classification!;
   // A tier with no model cannot run a chunk, so it moves up one tier (as ticket-run did).
-  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, tierHint: failedTier ? undefined : ticket.suggestedTier, strictAvailability: true });
+  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : startTier(state, ticket), strictAvailability: true });
   if (decision.provider === "none" && !decision.blocked) {
     decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }

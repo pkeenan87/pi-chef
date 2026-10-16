@@ -39,6 +39,13 @@ providers:
 # (Thompson sampling over per-model successes and failures), breaking ties by the order here.
 # A candidate is skipped when its provider is not signed in, an org allowlist excludes it,
 # its circuit is open, or its expected cost exceeds the remaining budget.
+# Who does what:
+#   cost-opt/auto chat turns    routing.sessionTier (premium: Opus 5.5)
+#   compaction and summaries    routing.directTier (cheap: Haiku 5.5, then Luna)
+#   /build tickets              ticketLow / ticketMedium / ticketHigh by the ticket's difficulty; a failure
+#                               climbs ticketLow -> ticketMedium -> ticketHigh -> premium
+#   /review model pass          routing.reviewTier (premium: Opus 5.5)
+#   /plan and previews          standard (premium for high complexity or security-sensitive work)
 # Foundry `model` values are YOUR deployment names. The names below are placeholders.
 # `api: decisions` models answer structured questions; they are not chat models.
 tiers:
@@ -47,25 +54,32 @@ tiers:
   classifier:
     - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
     - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
-  cheap:
-    - { provider: openai, model: gpt-6-luna }
+  cheap:                # direct jobs: compaction, summaries
     - { provider: anthropic, model: claude-haiku-5-5 }
-  standard:
+    - { provider: openai, model: gpt-6-luna }
+  standard:             # /plan and preview routes
     - { provider: anthropic, model: claude-sonnet-5-5 }
-    - { provider: xai, model: grok-4.7, label: "Grok 4.7 (SuperGrok)" }
-    - { provider: foundry, model: grok-4-7, label: "Grok 4.7 (Foundry)" }
-  premium:
+    - { provider: openai, model: "gpt-6.1-sol" }
+  premium:              # the main session, the last rung of the ticket ladder, and /review
     - { provider: anthropic, model: claude-opus-5-5 }
+  ticketLow:            # difficulty: low (mechanical or small and well specified)
+    - { provider: xai, model: grok-4.7, label: "Grok 4.7 (SuperGrok)" }
+  ticketMedium:         # difficulty: medium (typical feature work)
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+  ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
   advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
-    - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: openai, model: gpt-6-astra }
+    - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
 
 routing:
   minConfidence: 0.75
-  maxEscalations: 2
+  maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium
   maxTier: premium
+  sessionTier: premium  # every cost-opt/auto chat turn; set it and nothing is classified
+  directTier: cheap     # compaction and summaries
+  reviewTier: premium   # the /review model pass; a failed part falls back to standard
   requirePremiumReviewFor:
     - auth
     - permissions
@@ -117,6 +131,7 @@ pricing:
   - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-opus-4-8, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-fable-5-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: openai, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: xai, model: grok-4.7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
@@ -126,6 +141,7 @@ pricing:
   - { provider: anthropic, model: claude-haiku-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 0.10, outputPerMillionUsd: 0.50, cacheReadPerMillionUsd: 0.01, cacheWritePerMillionUsd: 0.125 }
   - { provider: anthropic, model: claude-sonnet-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 10, cacheReadPerMillionUsd: 0.20, cacheWritePerMillionUsd: 2.5 }
   - { provider: anthropic, model: claude-opus-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 4, outputPerMillionUsd: 20, cacheReadPerMillionUsd: 0.20, cacheWritePerMillionUsd: 5 }
+  - { provider: anthropic, model: claude-opus-4-8, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25, cacheReadPerMillionUsd: 0.50, cacheWritePerMillionUsd: 6.25 }
   - { provider: anthropic, model: claude-fable-5-1, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50, cacheReadPerMillionUsd: 0.25, cacheWritePerMillionUsd: 12.5 }
   - { provider: xai, model: grok-4.7, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 6, cacheReadPerMillionUsd: 0.5, cacheWritePerMillionUsd: 0 }
   # Per-token Foundry deployments (placeholders)
@@ -140,7 +156,7 @@ pricing:
 # to how scarce each model's quota is on your plan.
 quota:
   models:
-    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 0.4 }
+    - { provider: openai, model: gpt-6-luna, perMillionTokensUsd: 1.5 }   # above Haiku so Haiku ranks first for direct jobs
     - { provider: anthropic, model: claude-haiku-5-5, perMillionTokensUsd: 1 }
     - { provider: anthropic, model: claude-sonnet-5-5, perMillionTokensUsd: 3 }
     - { provider: anthropic, model: claude-opus-5-5, perMillionTokensUsd: 10 }

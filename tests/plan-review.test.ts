@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderSpec } from "../src/orchestrator/interview.js";
-import { ticketPrompt } from "../src/orchestrator/prompts.js";
+import { ticketDifficulty, type Difficulty, type Tier } from "../src/domain.js";
+import { ticketPrompt, TICKET_RULES } from "../src/orchestrator/prompts.js";
 import type { PlanReviewRequest } from "../src/orchestrator/types.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown, validateTickets } from "../src/orchestrator/tickets.js";
 import { createPlanQuestionsTool } from "../src/tools/plan-questions.js";
@@ -73,6 +74,36 @@ describe("ticket implementation notes", () => {
   it("rejects implementation text that would corrupt the ticket file", () => {
     const checked = validateTickets([ticket("01", { implementation: "## Steps\n- a" })], { target: 150000, fileSize: () => undefined });
     expect(checked.errors.join("\n")).toMatch(/implementation has a line starting with/);
+  });
+});
+
+describe("ticket difficulty", () => {
+  it("plan_tickets accepts difficulty, rejects an unknown one, and the markdown editor round trip keeps it", async () => {
+    const cwd = await tempRepo();
+    const app = workflow(cwd, { startTurn: () => undefined });
+    await app.startPlan("Add retry to the ingest parser");
+    await call(createPlanSpecTool(() => app), specParams, headless);
+    const tool = createPlanTicketsTool(() => app);
+    await expect(call(tool, { tickets: [ticket("01", { difficulty: "extreme" })] }, headless)).rejects.toThrow(/difficulty "extreme" must be one of low, medium, high/);
+    await call(tool, { tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "high", blockedBy: ["01"] })] }, headless);
+    const tickets = app.store.load(app.activeTaskId()!)!.plan!.tickets!;
+    expect(tickets.map((item) => item.difficulty)).toEqual(["low", "high"]);
+    const markdown = renderTicketsMarkdown(tickets);
+    expect(markdown).toContain("difficulty: high");
+    const again = validateTickets(parseTicketsMarkdown(markdown), { target: 150000, fileSize: () => undefined });
+    expect(again.errors).toEqual([]);
+    expect(again.tickets.map((item) => item.difficulty)).toEqual(["low", "high"]);
+    expect(TICKET_RULES(150000)).toMatch(/low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting/);
+  });
+
+  it("maps a suggestedTier-only ticket to a difficulty and lets difficulty win", () => {
+    const of = (item: { difficulty?: Difficulty; suggestedTier?: Tier }) => ticketDifficulty(item);
+    expect(of({ suggestedTier: "deterministic" })).toBe("low");
+    expect(of({ suggestedTier: "cheap" })).toBe("low");
+    expect(of({ suggestedTier: "standard" })).toBe("medium");
+    expect(of({ suggestedTier: "premium" })).toBe("high");
+    expect(of({})).toBe("medium");
+    expect(of({ suggestedTier: "premium", difficulty: "low" })).toBe("low");
   });
 });
 

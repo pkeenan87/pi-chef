@@ -8,6 +8,7 @@ import {
   loadConfig,
   parseConfig,
   priceFor,
+  tierCandidates,
   toMicroUsd,
   type PricingRow,
 } from "../src/config.js";
@@ -30,6 +31,11 @@ describe("parseConfig validation", () => {
     ["routing:\n  maxEscalations: -1\n", /routing\.maxEscalations/],
     ["routing:\n  maxEscalations: 1.5\n", /routing\.maxEscalations/],
     ["routing:\n  maxTier: ultra\n", /routing\.maxTier/],
+    ["routing:\n  sessionTier: ticketLow\n", /routing\.sessionTier/],
+    ["routing:\n  directTier: huge\n", /routing\.directTier/],
+    ["routing:\n  reviewTier: classifier\n", /routing\.reviewTier/],
+    ["tiers:\n  ticketLow: []\n", /tiers\.ticketLow/],
+    ["tiers:\n  ticketExtra:\n    - { provider: local, model: m }\n", /tiers\.ticketExtra/],
     ["budgets:\n  taskUsd: 0\n", /budgets\.taskUsd/],
     ["budgets:\n  dailyUsd: -5\n", /budgets\.dailyUsd/],
     ["budgets:\n  softWarningRatio: 2\n", /budgets\.softWarningRatio/],
@@ -64,6 +70,22 @@ pricing:
 `);
     expect(config.routing.maxTier).toBe("standard");
     expect(config.pricing[0].effectiveFrom).toBe("2026-01-05");
+  });
+
+  it("defaults the session, direct and review tiers and the escalation count, and accepts the ticket tiers", () => {
+    const config = parseConfig(`${PROVIDERS_BLOCK}
+tiers:
+  ticketLow:
+    - { provider: local, model: m }
+  ticketMedium:
+    - { provider: anthropic, model: claude-sonnet-5-5 }
+  ticketHigh:
+    - { provider: openai, model: gpt-6.1-sol }
+routing: { directTier: standard }
+`);
+    expect(config.routing).toMatchObject({ sessionTier: "premium", directTier: "standard", reviewTier: "premium", maxEscalations: 3 });
+    expect(tierCandidates(config, "ticketLow")).toEqual([expect.objectContaining({ provider: "local", model: "m" })]);
+    expect(tierCandidates(config, "ticketHigh")[0]!.model).toBe("gpt-6.1-sol");
   });
 
   it("does not flag the repo config", () => {
@@ -104,6 +126,29 @@ describe("loadConfig layering", () => {
   });
 
   const base = `${PROVIDERS_BLOCK}\nmodels: { classifier: local, cheap: foundry, standard: anthropic, premium: openai }\n`;
+
+  it("old configs without ticket tiers use cheap, standard and premium for low, medium and high, with a warning", () => {
+    writeProject(`${base}tiers:
+  cheap:
+    - { provider: local, model: m }
+  standard:
+    - { provider: anthropic, model: claude-sonnet }
+  premium:
+    - { provider: openai, model: gpt-5.4 }
+`);
+    const config = loadConfig(project);
+    const models = (tier: "ticketLow" | "ticketMedium" | "ticketHigh") => tierCandidates(config, tier).map((item) => item.model);
+    expect([models("ticketLow"), models("ticketMedium"), models("ticketHigh")]).toEqual([["m"], ["claude-sonnet"], ["gpt-5.4"]]);
+    expect(config.warnings?.join("\n")).toMatch(/ticketLow\/ticketMedium\/ticketHigh not set: \/build uses cheap, standard and premium/);
+    // With all three set, there is nothing to warn about.
+    writeProject(`${base}tiers:
+  cheap: [{ provider: local, model: m }]
+  ticketLow: [{ provider: local, model: m }]
+  ticketMedium: [{ provider: anthropic, model: claude-sonnet }]
+  ticketHigh: [{ provider: openai, model: gpt-5.4 }]
+`);
+    expect(loadConfig(project).warnings ?? []).toEqual([]);
+  });
 
   it("an old commandAllowlist key loads with a warning, from either file", () => {
     writeUser(`${base}commandAllowlist: ["npm test"]\n`);

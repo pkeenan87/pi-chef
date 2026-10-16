@@ -116,10 +116,14 @@ describe("classifier and policy", () => {
   it("limits premium review to configured categories and prices a 4:1 token mix", () => {
     const config = testConfig();
     const risky = { ...base, risk: "high" as const, required_capabilities: ["perf"] };
+    // The review pass routes to routing.reviewTier (premium by default).
     const decision = decideRoute(risky, config, {}, { purpose: "review", at });
     expect(decision.requireHumanApproval).toBe(true);
-    expect(decision.tier).toBe("standard");
-    expect(decision.reviewTier).toBe("standard");
+    expect(decision.tier).toBe("premium");
+    config.routing.reviewTier = "standard";
+    const lowered = decideRoute(risky, config, {}, { purpose: "review", at });
+    expect(lowered.tier).toBe("standard");
+    expect(lowered.reviewTier).toBe("standard");
     const auth = decideRoute({ ...base, required_capabilities: ["auth"] }, config, {}, { purpose: "review", at });
     expect(auth.tier).toBe("premium");
     const cheap = decideRoute(base, config, {}, { purpose: "preview", at });

@@ -17,8 +17,10 @@ function classification(tier: Tier, extra: Partial<AcceptedClassification> = {})
   return { task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], recommended_tier: tier, confidence: 0.9, reason_codes: [], source: "model", ...extra };
 }
 
-function setup(options: { tier?: Tier; extra?: Partial<AcceptedClassification>; missing?: string[]; budget?: RouterSnapshot["budget"]; table?: RouterSnapshot["table"] } = {}) {
+function setup(options: { tier?: Tier; extra?: Partial<AcceptedClassification>; missing?: string[]; budget?: RouterSnapshot["budget"]; table?: RouterSnapshot["table"]; session?: boolean } = {}) {
   const config = tieredConfig();
+  // The classifying path is the one most tests cover; the session-tier tests opt in.
+  if (!options.session) config.routing.sessionTier = undefined;
   const missing = new Set(options.missing ?? []);
   const registry = {
     find: (provider: string, id: string) => model(provider, id),
@@ -279,6 +281,56 @@ describe("routeVirtual while /plan runs", () => {
     // Outside planning nothing changes.
     const after = await routeVirtual(cheap.request({ state: first.state, reason: "continuation" }), cheap.deps);
     expect(after.state).toBeUndefined();
+  });
+});
+
+describe("routeVirtual with a fixed session tier", () => {
+  const modelOf = (result: { model: FakeModel }) => `${result.model.provider}/${result.model.id}`;
+
+  it("routes user, retry and continuation to Opus and direct to Haiku with no classifier call", async () => {
+    const t = setup({ session: true, tier: "cheap" });
+    // As in the sample config, premium lists Opus alone.
+    t.snapshot.config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5", api: "chat" }];
+    t.snapshot.config.quota = { models: [{ provider: "anthropic", model: "claude-haiku-5-5", perMillionTokensUsd: 1 }, { provider: "openai", model: "gpt-6-luna", perMillionTokensUsd: 1.5 }], providers: {}, overCapMultiplier: 4 };
+    const first = await routeVirtual(t.request({ thinkingLevel: "low" }), t.deps);
+    expect(modelOf(first)).toBe("anthropic/claude-opus-5-5");
+    expect(first.state).toMatchObject({ tier: "premium" });
+    const next = await routeVirtual(t.request({ state: first.state }), t.deps);
+    expect(modelOf(next)).toBe("anthropic/claude-opus-5-5");
+    const cont = await routeVirtual(t.request({ reason: "continuation", state: first.state }), t.deps);
+    expect(modelOf(cont)).toBe("anthropic/claude-opus-5-5");
+    const noState = await routeVirtual(t.request({ reason: "retry", failed: { model: model("anthropic", "claude-opus-5-5"), message: { stopReason: "stop" } } }), t.deps);
+    expect(modelOf(noState)).toBe("anthropic/claude-opus-5-5");
+    const direct = await routeVirtual(t.request({ reason: "direct" }), t.deps);
+    expect(modelOf(direct)).toBe("anthropic/claude-haiku-5-5");
+    // A long request and an escalation cue change nothing at the top tier.
+    const cue = await routeVirtual(t.request({ state: first.state, messages: [{ role: "user", content: "this is hard, think harder. " + "x".repeat(3000) }] }), t.deps);
+    expect(modelOf(cue)).toBe("anthropic/claude-opus-5-5");
+    expect(cue.state ?? first.state).toMatchObject({ tier: "premium" });
+    expect(t.classify).not.toHaveBeenCalled();
+  });
+
+  it("direct falls back to Luna, then to stronger tiers", async () => {
+    const t = setup({ session: true, missing: ["claude-haiku-5-5"] });
+    expect(modelOf(await routeVirtual(t.request({ reason: "direct" }), t.deps))).toBe("openai/gpt-6-luna");
+  });
+
+  it("retries a transient error on the same tier without the failed model", async () => {
+    const t = setup({ session: true });
+    const first = await routeVirtual(t.request(), t.deps);
+    const retried = await routeVirtual(t.request({ reason: "retry", state: first.state, failed: { model: model("anthropic", "claude-opus-5-5"), message: { errorMessage: "529 overloaded" } } }), t.deps);
+    expect(retried.state!.tier).toBe("premium");
+    expect(t.recordFailure).toHaveBeenCalled();
+    expect(modelOf(retried)).toBe("openai/gpt-6.1-sol");
+  });
+
+  it("a session pinned below premium still takes an escalation cue", async () => {
+    const t = setup({ session: true });
+    t.snapshot.config.routing.sessionTier = "standard";
+    const first = await routeVirtual(t.request(), t.deps);
+    expect(first.state!.tier).toBe("standard");
+    const cued = await routeVirtual(t.request({ state: first.state, messages: [{ role: "user", content: "this is hard" }] }), t.deps);
+    expect(cued.state!.tier).toBe("premium");
   });
 });
 

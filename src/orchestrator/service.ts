@@ -1,6 +1,6 @@
 import path from "node:path";
 import { loadConfig, type WorkflowConfig } from "../config.js";
-import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type TokenUsage } from "../domain.js";
+import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
@@ -121,7 +121,7 @@ export class Workflow {
   decide(
     classification: AcceptedClassification,
     purpose: "plan" | "implement" | "review" | "preview",
-    extra: { failedTier?: Tier; escalations?: number; taskId?: string; tierHint?: Tier } = {},
+    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier } = {},
   ): Promise<RoutingDecision> {
     return decide(this.ctx, classification, purpose, extra);
   }

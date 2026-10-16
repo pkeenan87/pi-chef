@@ -94,7 +94,7 @@ export function rankingCost(config: WorkflowConfig, provider: string, model: str
 }
 
 /**
- * Metrics are keyed by task type. The advisory /ship model review keeps its outcomes under this derived type so
+ * Metrics are keyed by task type. The advisory /review model review keeps its outcomes under this derived type so
  * a review failure never counts against the model's record on implementation work.
  */
 export function reviewMetricType(taskType: string): string {

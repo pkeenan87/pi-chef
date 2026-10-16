@@ -1,6 +1,6 @@
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
-import { isTier, type PlanGroup, type Ticket } from "../domain.js";
+import { DIFFICULTIES, isDifficulty, isTier, type PlanGroup, type Ticket } from "../domain.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { assertGraph } from "./plan.js";
 
@@ -115,6 +115,8 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     if (model === undefined) errors.push(`Ticket ${label}: estimatedContextTokens must be a positive number.`);
     const tier = typeof item.suggestedTier === "string" ? item.suggestedTier : undefined;
     if (tier !== undefined && !isTier(tier)) errors.push(`Ticket ${label}: suggestedTier "${tier}" is not a tier.`);
+    const difficulty = typeof item.difficulty === "string" ? item.difficulty : undefined;
+    if (difficulty !== undefined && !isDifficulty(difficulty)) errors.push(`Ticket ${label}: difficulty "${difficulty}" must be one of ${DIFFICULTIES.join(", ")}.`);
     const files = strings(item.files).map((file) => file.replace(/^\.\//, ""));
     for (const file of files) {
       if (path.isAbsolute(file) || /^[A-Za-z]:|^~|\0/.test(file) || file.split(/[\\/]/).includes("..")) {
@@ -137,6 +139,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       ...(implementation ? { implementation } : {}),
       acceptanceCriteria,
       blockedBy: strings(item.blockedBy),
+      ...(difficulty && isDifficulty(difficulty) ? { difficulty } : {}),
       ...(tier && isTier(tier) ? { suggestedTier: tier } : {}),
       ...(files.length ? { files } : {}),
       estimatedContextTokens: model ?? 0,
@@ -194,6 +197,7 @@ export function renderTicket(ticket: Ticket): string {
     "---",
     `id: ${ticket.id}`,
     `slug: ${ticket.slug}`,
+    ...(ticket.difficulty ? [`difficulty: ${ticket.difficulty}`] : []),
     ...(ticket.suggestedTier ? [`suggestedTier: ${ticket.suggestedTier}`] : []),
     `estimatedContextTokens: ${ticket.estimatedContextTokens}`,
     ...(ticket.files?.length ? [`files: ${JSON.stringify(ticket.files)}`] : []),
@@ -268,6 +272,7 @@ export function parseTicketsMarkdown(markdown: string): unknown[] {
           .map((line) => line.replace(/^\s*-\s*\[[ xX]\]\s*/, "").trim())
           .filter(Boolean),
         blockedBy: /^none$/i.test(blocked) ? [] : blocked.split("\n").map((line) => line.replace(/^\s*-\s*/, "").trim()).filter(Boolean),
+        difficulty: meta.get("difficulty"),
         suggestedTier: meta.get("suggestedTier"),
         estimatedContextTokens: Number(meta.get("estimatedContextTokens")),
         files: jsonList(meta.get("files")),

@@ -119,7 +119,7 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined): 
   for (const ticket of tickets) {
     const meta = [
       `Blocked by: ${ticket.blockedBy.join(", ") || "none"}`,
-      ...(ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
+      ...(ticket.difficulty ? [`difficulty: ${ticket.difficulty}`] : ticket.suggestedTier ? [`tier: ${ticket.suggestedTier}`] : []),
       `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`,
     ];
     lines.push("", `### ${ticket.id}: ${ticket.title}`, "", meta.join(" · "));
