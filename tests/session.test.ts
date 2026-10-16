@@ -349,9 +349,11 @@ describe("input budget gate", () => {
     spend(app, 9999);
     expect(input("add a retry counter")).toEqual({ action: "handled" });
     expect(notices).toEqual(["warning: Task or daily budget is exhausted. Run /cost for details."]);
-    for (const text of ["/cost", "/status", "  /plan fix it"]) expect(input(text)).toEqual({ action: "continue" });
+    for (const text of ["/cost", "/status", "  /plan fix it", "/skill:review x"]) expect(input(text)).toEqual({ action: "continue" });
+    // A path at the start of a prompt is not a command.
+    expect(input("/tmp/app.log shows an error, why?")).toEqual({ action: "handled" });
     expect(input("# Ticket 01: build", "extension")).toEqual({ action: "continue" });
-    expect(notices).toHaveLength(1);
+    expect(notices).toHaveLength(2);
   });
 
   it("notifies once per session on a soft budget and always continues", async () => {

@@ -246,7 +246,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
     : undefined;
   let advisorsMs: number | undefined;
   const report = await reviewDiff({
-    diff,
+    diff: rawDiff,
     checks,
     setup: ctx.config.setup,
     now: () => ctx.now().getTime(),

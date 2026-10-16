@@ -36,8 +36,17 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
   return results;
 }
 
+/** The lines a unified diff adds, without their `+` (file headers excluded). */
+export function addedLines(diff: string): string {
+  return diff
+    .split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+}
+
 export async function reviewDiff(options: {
-  /** The branch's changes against its base, working tree included. */
+  /** The branch's changes against its base, working tree included, unredacted (the secret scan needs the raw text; the report redacts it). */
   diff: string;
   checks: { name: string; command: string; args: string[] }[];
   /** Commands run one after another before the checks (an install). A failure fails the review and skips the checks. */
@@ -55,9 +64,10 @@ export async function reviewDiff(options: {
   const findings: Finding[] = [];
   const now = options.now ?? (() => Date.now());
   const progress = options.onProgress ?? (() => undefined);
-  const combined = options.diff;
+  // Only lines the diff adds: removing an eval( or a hardcoded password must not block the review.
+  const combined = addedLines(options.diff);
   options.onStage?.("static scan");
-  progress(`static scan of the diff (${Math.round(combined.length / 1000)}k chars)`);
+  progress(`static scan of the diff (${Math.round(options.diff.length / 1000)}k chars)`);
   if (SECRET_DIFF.test(combined)) {
     findings.push({
       severity: "blocking",

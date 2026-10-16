@@ -136,7 +136,8 @@ function errorMessage(body: unknown): string {
   return typeof body === "string" ? body.slice(0, 300) : "unknown error";
 }
 
-export async function runSearch(params: SearchParams, auth: SearchAuth, transport: SearchTransport, signal?: AbortSignal): Promise<SearchOutcome> {
+/** `usage`, when given, is filled in as each request returns, so a caller can ledger what was billed even if a later request throws. */
+export async function runSearch(params: SearchParams, auth: SearchAuth, transport: SearchTransport, signal?: AbortSignal, usage: SearchOutcome["usage"] = { inputTokens: 0, outputTokens: 0, webSearchRequests: 0 }): Promise<SearchOutcome> {
   if (params.allowed_domains?.length && params.blocked_domains?.length) {
     throw new Error("Specify allowed_domains or blocked_domains, not both.");
   }
@@ -157,7 +158,7 @@ export async function runSearch(params: SearchParams, auth: SearchAuth, transpor
   };
   const url = `${(auth.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "")}/v1/messages`;
   const messages: unknown[] = [{ role: "user", content: `Search the web for: ${params.query}` }];
-  const outcome: SearchOutcome = { hits: [], summary: "", errors: [], refused: false, usage: { inputTokens: 0, outputTokens: 0, webSearchRequests: 0 } };
+  const outcome: SearchOutcome = { hits: [], summary: "", errors: [], refused: false, usage };
   const snippets = new Map<string, string>();
 
   for (let turn = 0; turn < 2; turn++) {
@@ -218,8 +219,17 @@ export function createWebSearchTool(deps: WebSearchDeps) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       await deps.budgetCheck?.();
       const auth = await deps.getAuth(ctx);
-      const outcome = await runSearch(params, auth, transport, signal);
-      await deps.onUsage?.({ provider: "anthropic", model: SEARCH_MODEL, purpose: "web_search", query: redact(params.query), ...outcome.usage });
+      const usage = { inputTokens: 0, outputTokens: 0, webSearchRequests: 0 };
+      const record = () => deps.onUsage?.({ provider: "anthropic", model: SEARCH_MODEL, purpose: "web_search", query: redact(params.query), ...usage });
+      let outcome: SearchOutcome;
+      try {
+        outcome = await runSearch(params, auth, transport, signal, usage);
+      } catch (error) {
+        // A first request that returned was billed even when the second one failed or was aborted.
+        if (usage.inputTokens > 0 || usage.outputTokens > 0) await record();
+        throw error;
+      }
+      await record();
       return { content: [{ type: "text" as const, text: formatOutcome(outcome, 10) }], details: { results: outcome.hits.length, errors: outcome.errors, refused: outcome.refused } };
     },
   });

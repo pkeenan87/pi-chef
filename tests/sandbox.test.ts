@@ -55,6 +55,15 @@ describe("deny list", () => {
     "shutdown -h now",
     "dd if=/dev/zero of=/dev/sda",
     "chmod -R 777 /",
+    "bash -c -- 'rm -rf build'",
+    "eval 'rm -rf build'",
+    "timeout 5 rm -rf build",
+    "setsid rm -rf build",
+    "env -S 'rm -rf build'",
+    "find . -exec rm -rf {} +",
+    "git push origin :main",
+    "git push --delete origin main",
+    "git -c alias.p='push --force' p",
   ])("denies %s", (line) => {
     expect(isDeniedCommand(line)).toBe(true);
   });
@@ -74,13 +83,15 @@ describe("deny list", () => {
     "echo shutdown",
     "chmod 755 file",
     "git log --format=%h",
+    "timeout 60 npm test",
+    "find . -name '*.ts' -exec grep -l foo {} +",
   ])("allows %s", (line) => {
     expect(isDeniedCommand(line)).toBe(false);
   });
 });
 
 describe("git push detection", () => {
-  it.each(["git push", "git push origin main", "git -C /x push", "git -c a=b push", "cd x && git push", "bash -c 'git push'", "sh -c \"echo hi; git push\"", "eval 'git push'", "$(echo git) push"])("sees %s", (command) => {
+  it.each(["git push", "git push origin main", "git -C /x push", "git -c a=b push", "cd x && git push", "bash -c 'git push'", "sh -c \"echo hi; git push\"", "eval 'git push'", "$(echo git) push", "timeout 60 git push", "setsid git push", "stdbuf -o0 git push", "git -c alias.p=push p", "echo push | xargs git", "env -S 'git push'", "bash -c -- 'git push'", "find . -maxdepth 0 -exec git push \\;"])("sees %s", (command) => {
     expect(runsGitPush(command), command).toBe(true);
   });
 
@@ -90,11 +101,11 @@ describe("git push detection", () => {
 });
 
 describe("branch switch detection", () => {
-  it.each(["git switch main", "git switch -c x", "git checkout main", "git checkout -b feature", "git checkout -B feature", "git checkout --orphan x", "git -C . checkout other", "cd x && git checkout main", "bash -c 'git switch main'", "git checkout -q main"])("sees %s", (command) => {
+  it.each(["git switch main", "git switch -c x", "git checkout main", "git checkout -b feature", "git checkout -B feature", "git checkout --orphan x", "git -C . checkout other", "cd x && git checkout main", "bash -c 'git switch main'", "git checkout -q main", "git checkout -", "git -c alias.sw=switch sw main", "git symbolic-ref HEAD refs/heads/x", "timeout 9 git switch main"])("sees %s", (command) => {
     expect(switchesBranch(command), command).toBe(true);
   });
 
-  it.each(["git status", "git checkout -- src/a.ts", "git checkout HEAD -- src/a.ts", "git checkout", "git branch --show-current", "git commit -m 'switch to x'", "echo git switch x", "npm test"])("lets %s through", (command) => {
+  it.each(["git status", "git checkout -- src/a.ts", "git checkout HEAD -- src/a.ts", "git checkout", "git branch --show-current", "git commit -m 'switch to x'", "echo git switch x", "npm test", "git symbolic-ref HEAD"])("lets %s through", (command) => {
     expect(switchesBranch(command), command).toBe(false);
   });
 });

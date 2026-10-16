@@ -25,6 +25,58 @@ const PATH_TARGET_COMMANDS = new Set(["cd", "ls", "cat", "head", "tail", "find",
 /** Commands that take no file operands at all. */
 const NO_FILE_COMMANDS = new Set(["pwd", "echo", "which", "date", "uname", "whoami", "basename", "dirname"]);
 
+/**
+ * Splits one pipeline part into words the way bash would read them, or returns undefined when a word would be
+ * expanded: an unquoted or double-quoted `$` (variables, `$'..'` ANSI-C quoting, `$0`), an unquoted brace, or an
+ * unterminated quote. `globbed` marks words with an unquoted `*`, `?` or `[`.
+ */
+function shellWords(part: string): { words: string[]; globbed: boolean[] } | undefined {
+  const words: string[] = [];
+  const globbed: boolean[] = [];
+  let current = "";
+  let has = false;
+  let glob = false;
+  let quote: string | null = null;
+  const end = () => {
+    if (has) {
+      words.push(current);
+      globbed.push(glob);
+    }
+    current = "";
+    has = false;
+    glob = false;
+  };
+  for (let i = 0; i < part.length; i += 1) {
+    const ch = part[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === "$") return undefined;
+      else if (ch === "\\" && i + 1 < part.length) current += part[++i];
+      else current += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      has = true;
+    } else if (ch === "\\") {
+      if (i + 1 < part.length) current += part[++i];
+      has = true;
+    } else if (ch === "$" || ch === "{" || ch === "}") {
+      return undefined;
+    } else if (/\s/.test(ch)) {
+      end();
+    } else {
+      if (ch === "*" || ch === "?" || ch === "[") glob = true;
+      current += ch;
+      has = true;
+    }
+  }
+  if (quote) return undefined;
+  end();
+  return { words, globbed };
+}
+
 /** Indexes (into `words`, after the command) of words that are file operands rather than patterns, flags, or expressions. */
 function fileOperandIndexes(words: string[]): Set<number> {
   const [first = "", ...args] = words;
@@ -39,6 +91,8 @@ function fileOperandIndexes(words: string[]): Set<number> {
       // -e/-f/--regexp supply the pattern, so every bare operand is a file; otherwise the first one is the pattern.
       if (/^(-[A-Za-z]*[ef]|--regexp|--file)$/.test(arg)) {
         patternFlag = true;
+        // A pattern file is read, so it is a file operand.
+        if (/^(-[A-Za-z]*f|--file)$/.test(arg)) out.add(i + 2);
         i += 1;
         continue;
       }
@@ -64,13 +118,14 @@ function fileOperandIndexes(words: string[]): Set<number> {
  * An absolute word is a path only at an operand position, and is checked when the command names its target
  * (cd, ls, cat, ...) or the path exists on disk, so `grep /api/users src` and `rg "/v1/foo"` pass.
  */
-function badPathArgument(word: string, roots: string[], isOperand: boolean, command: string): boolean {
-  if (/\$[A-Za-z_{(]/.test(word)) return true;
+function badPathArgument(word: string, roots: string[], isOperand: boolean, command: string, globbed = false): boolean {
   const value = word.startsWith("-") ? (word.includes("=") ? word.slice(word.indexOf("=") + 1) : "") : word;
   if (!value) return false;
   if (value.startsWith("~")) return true;
   if (value.split("/").includes("..")) return !roots.some((root) => insideRoot(root, value));
   if (path.isAbsolute(value)) {
+    // A glob such as `/et?/passwd` does not exist as written, so it is checked whatever the command.
+    if (globbed) return !roots.some((root) => insideRoot(root, value.slice(0, value.search(/[*?[]/))));
     if (!isOperand && !word.startsWith("-")) return false;
     if (!PATH_TARGET_COMMANDS.has(command) && !existsSync(value)) return false;
     return !roots.some((root) => insideRoot(root, value));
@@ -99,6 +154,8 @@ function safeArguments(words: string[]): boolean {
     }
     case "find":
       return !args.some((arg) => /^-(fprint|fprint0|fprintf|fls|exec|ok|delete)/.test(arg));
+    case "file":
+      return !args.some((arg) => arg === "--compile" || (/^-[A-Za-z]+$/.test(arg) && arg.includes("C")));
     case "date":
       return !args.some((arg) => arg === "--set" || arg.startsWith("--set=") || (/^-[A-Za-z]+$/.test(arg) && arg.includes("s")));
     case "git": {
@@ -116,7 +173,10 @@ function safeArguments(words: string[]): boolean {
         }
         return true;
       }
-      if (sub === "remote") return rest.length === 0 || rest[0] === "-v" || rest[0] === "show" || rest[0] === "get-url";
+      if (sub === "remote") {
+        const words = rest.filter((arg) => arg !== "-v" && arg !== "--verbose");
+        return words.length === 0 || words[0] === "show" || words[0] === "get-url";
+      }
       return true;
     }
     default:
@@ -126,7 +186,7 @@ function safeArguments(words: string[]): boolean {
 
 /**
  * True when a bash command is plainly read-only (the plan-mode allowlist, tightened: no redirects, no chaining,
- * no file-writing or program-running options, no paths outside `root`, no `~` or variable expansion).
+ * no file-writing or program-running options, no paths outside `root`, no `~`, variable or brace expansion).
  */
 export function isReadOnlyCommand(command: string, root: string = process.cwd()): boolean {
   if (isDeniedCommand(command) || UNSAFE_SYNTAX.test(command)) return false;
@@ -137,15 +197,17 @@ export function isReadOnlyCommand(command: string, root: string = process.cwd())
     /* the root may not exist in a test */
   }
   return command.split("|").every((part) => {
-    // Quotes and backslashes are dropped so `'--out'put` cannot hide an option from the checks below.
-    const words = part.trim().split(/\s+/).map((word) => word.replace(/['"\\]/g, ""));
+    // Words as bash reads them, so `'--out'put` or `$'-delete'` cannot hide an option from the checks below.
+    const parsed = shellWords(part);
+    if (!parsed) return false;
+    const { words, globbed } = parsed;
     const [first, second] = words;
     if (!first) return false;
     if (first === "git") {
       if (!second || !SAFE_GIT.has(second)) return false;
     } else if (!SAFE_COMMANDS.has(first)) return false;
     const operands = fileOperandIndexes(words);
-    if (words.slice(1).some((word, index) => badPathArgument(word, roots, operands.has(index + 1), first))) return false;
+    if (words.slice(1).some((word, index) => badPathArgument(word, roots, operands.has(index + 1), first, globbed[index + 1]))) return false;
     return safeArguments(words);
   });
 }

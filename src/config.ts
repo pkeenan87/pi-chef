@@ -394,7 +394,7 @@ function parseUrl(value: string): URL | undefined {
   }
 }
 
-function isHttpsUrl(value: string): boolean {
+export function isHttpsUrl(value: string): boolean {
   const url = parseUrl(value);
   return !!url && url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "";
 }
@@ -844,12 +844,14 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  */
 const DEFAULT_PROVIDER_TYPE: Record<string, string> = { foundry: "azure-foundry", vercel: "vercel-ai-gateway", local: "openai-compatible" };
 
-const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile", "resourceGroup"] as const;
+const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "endpointEnv", "apiKeyEnv", "audience", "projectDir", "envFile", "resourceGroup"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (field === "baseUrl") return provider === "vercel" ? value === DEFAULT_VERCEL_GATEWAY_URL : provider === "local" && isLoopbackHttpUrl(value);
   if (field === "audience") return provider === "foundry" && value === DEFAULT_FOUNDRY_AUDIENCE;
+  // The sample config's variable name; the endpoint it holds must still be https (foundryConfigFrom).
+  if (field === "endpointEnv") return provider === "foundry" && value === "AZURE_AI_ENDPOINT";
   if (field === "projectDir") return provider === "vercel" && value === ".";
   if (field === "envFile") return provider === "vercel" && value === ".env.local";
   return false;
@@ -918,6 +920,36 @@ function restrictSession(project: unknown, warnings: string[]): unknown {
 }
 
 /**
+ * The routing fields that guard the gating review can only tighten: `reviewTier` is user-only, a project's
+ * `requirePremiumReviewFor` adds to the user's list, and `circuitBreakerFailures` takes the lower value.
+ */
+function restrictRouting(user: unknown, project: unknown, warnings: string[]): unknown {
+  if (!isRecord(project)) return project;
+  const out: Record<string, unknown> = { ...project };
+  const u = isRecord(user) ? user : {};
+  if ("reviewTier" in out) {
+    if (out.reviewTier !== (u.reviewTier ?? DEFAULTS.routing.reviewTier)) warnings.push("Ignored project routing.reviewTier: the review that gates commits is set in the user config (~/.pi/agent/chef.yaml) only.");
+    delete out.reviewTier;
+  }
+  if (Array.isArray(out.requirePremiumReviewFor)) {
+    const base = Array.isArray(u.requirePremiumReviewFor) ? u.requirePremiumReviewFor : DEFAULTS.routing.requirePremiumReviewFor;
+    out.requirePremiumReviewFor = [...new Set([...base, ...out.requirePremiumReviewFor])];
+  }
+  if (typeof out.circuitBreakerFailures === "number") {
+    out.circuitBreakerFailures = Math.min(typeof u.circuitBreakerFailures === "number" ? u.circuitBreakerFailures : DEFAULTS.routing.circuitBreakerFailures, out.circuitBreakerFailures);
+  }
+  return out;
+}
+
+/** True when `row` charges less than `floor` for any kind of token (a missing cache rate counts as the input rate). */
+function cheaperThan(row: PricingRow, floor: PricingRow): boolean {
+  const rates = (r: PricingRow) => [r.inputPerMillionUsd, r.outputPerMillionUsd, r.cacheReadPerMillionUsd ?? r.inputPerMillionUsd, r.cacheWritePerMillionUsd ?? r.inputPerMillionUsd];
+  const a = rates(row);
+  const b = rates(floor);
+  return a.some((rate, i) => rate < b[i]!);
+}
+
+/**
  * Layers a project document over a user document. Policy fields follow "user wins / most
  * restrictive"; everything else is merged field-wise with the project overriding.
  */
@@ -929,9 +961,22 @@ export function layerConfigs(
   const user = userRaw ?? {};
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
+  // Where state, the ledger and metrics live is user-only: a project could move it outside the repo or reset the budget.
+  if (project.workspaceDir !== undefined) {
+    if (project.workspaceDir !== (user.workspaceDir ?? DEFAULTS.workspaceDir)) warnings.push("Ignored project workspaceDir: it is read from the user config (~/.pi/agent/chef.yaml) only.");
+    if (user.workspaceDir !== undefined) merged.workspaceDir = user.workspaceDir;
+    else delete merged.workspaceDir;
+  }
 
   for (const key of ["models", "tiers", "routing", "session", "workers", "advisors"]) {
-    const projectSection = key === "advisors" ? restrictAdvisors(user.advisors, project.advisors, warnings) : key === "session" ? restrictSession(project.session, warnings) : project[key];
+    const projectSection =
+      key === "advisors"
+        ? restrictAdvisors(user.advisors, project.advisors, warnings)
+        : key === "session"
+          ? restrictSession(project.session, warnings)
+          : key === "routing"
+            ? restrictRouting(user.routing, project.routing, warnings)
+            : project[key];
     const value = mergeSection(user[key], projectSection);
     if (value) merged[key] = value;
     else delete merged[key];
@@ -1030,9 +1075,17 @@ export function layerConfigs(
   }
   merged.proprietaryCode = user.proprietaryCode === true || project.proprietaryCode === true;
 
-  // Pricing: project rows override user rows for the same provider/model/date.
+  // Pricing: project rows override user rows for the same provider/model/date, but a project row cheaper than any
+  // user row for the same provider/model/billing is ignored: a lower price would loosen the user's budgets.
+  const userRows = (user.pricing as PricingRow[] | undefined) ?? [];
+  const sameModel = (a: PricingRow, b: PricingRow) => a.provider === b.provider && a.model === b.model && (a.billing ?? "") === (b.billing ?? "");
   const rows = new Map<string, PricingRow>();
-  for (const row of [...((user.pricing as PricingRow[] | undefined) ?? []), ...((project.pricing as PricingRow[] | undefined) ?? [])]) {
+  for (const row of userRows) rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}\u0000${row.billing ?? ""}`, row);
+  for (const row of (project.pricing as PricingRow[] | undefined) ?? []) {
+    if (userRows.some((floor) => sameModel(row, floor) && cheaperThan(row, floor))) {
+      warnings.push(`Ignored project pricing row for ${row.provider}/${row.model}${row.billing ? ` (${row.billing})` : ""}: it is cheaper than the user config's row, and a project can only raise a price.`);
+      continue;
+    }
     rows.set(`${row.provider}\u0000${row.model}\u0000${row.effectiveFrom}\u0000${row.billing ?? ""}`, row);
   }
   merged.pricing = [...rows.values()];

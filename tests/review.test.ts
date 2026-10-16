@@ -26,7 +26,7 @@ describe("review summary", () => {
   });
 });
 
-const categories = async (diff: string) => (await review(diff)).findings.filter((f) => f.severity === "blocking").map((f) => f.category);
+const categories = async (line: string) => (await review(`+${line}\n`)).findings.filter((f) => f.severity === "blocking").map((f) => f.category);
 
 describe("review heuristics", () => {
   it.each([
@@ -50,6 +50,11 @@ describe("review heuristics", () => {
     ["verify: false", "auth"],
   ])("flags %s", async (line, category) => {
     expect(await categories(line)).toContain(category);
+  });
+
+  it("scans only the lines a diff adds", async () => {
+    const diff = ["diff --git a/x.ts b/x.ts", "--- a/x.ts", "+++ b/x.ts", "@@ -1,3 +1,2 @@", "-eval(input)", '-const password = "hunter2hunter2";', " // verify: false", "+const ok = 1;"].join("\n");
+    expect((await review(diff)).findings.filter((f) => f.severity === "blocking")).toEqual([]);
   });
 
   it("runs checks concurrently but reports them in order", async () => {
