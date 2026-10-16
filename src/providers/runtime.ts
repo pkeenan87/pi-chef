@@ -122,8 +122,24 @@ function modelEntry(id: string, label: string | undefined, api?: string) {
  * Credentials come from `!command` values Pi runs at request time (Azure CLI token, the pulled Vercel
  * env file), so no token is held in this process or written to config.
  */
-export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, runtime: Pick<ProviderRuntime, "vercel">, env: NodeJS.ProcessEnv = process.env): string[] {
+export function registerChatProviders(
+  pi: RegisterApi,
+  config: WorkflowConfig,
+  runtime: Pick<ProviderRuntime, "vercel">,
+  env: NodeJS.ProcessEnv = process.env,
+  /** When given, receives one redacted line per provider that Pi refused and the others are still registered; else the first failure throws. */
+  errors?: string[],
+): string[] {
   const registered: string[] = [];
+  const register = (name: string, value: unknown) => {
+    try {
+      pi.registerProvider(name, value);
+      registered.push(name);
+    } catch (error) {
+      if (!errors) throw error;
+      errors.push(`provider ${name} could not be registered with Pi: ${redact(error instanceof Error && error.message ? error.message : String(error))}`);
+    }
+  };
   const chatModels = new Map<ProviderId, TierCandidate[]>();
   for (const tier of TIER_KEYS) {
     for (const candidate of tierCandidates(config, tier)) {
@@ -147,7 +163,7 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
       const providerApi = foundry.api ?? "openai-completions";
       const { apis } = foundryDeploymentApis(config);
       const audience = foundry.audience ?? FOUNDRY_DEFAULT_AUDIENCE;
-      pi.registerProvider("foundry", {
+      register("foundry", {
         name: "Azure AI Foundry",
         baseUrl: foundryV1Base(endpoint),
         api: providerApi,
@@ -159,14 +175,13 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
           return modelEntry(foundryDeployment(config, item.model), item.label, api && api !== providerApi ? api : undefined);
         }),
       });
-      registered.push("foundry");
     }
   }
   const vercel = config.providers.vercel;
   const vercelModels = chatModels.get("vercel");
   const envFile = runtime.vercel?.envFilePath();
   if (vercel && vercelModels?.length && envFile) {
-    pi.registerProvider("vercel", {
+    register("vercel", {
       name: "Vercel AI Gateway (CLI auth)",
       baseUrl: vercel.baseUrl ?? VERCEL_GATEWAY_URL,
       api: "openai-completions",
@@ -174,19 +189,17 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
       apiKey: `!sed -n 's/^VERCEL_OIDC_TOKEN="\\{0,1\\}\\([^"]*\\)"\\{0,1\\}$/\\1/p' ${shellQuote(envFile)}`,
       models: vercelModels.map((item) => modelEntry(item.model, item.label)),
     });
-    registered.push("vercel");
   }
   const local = config.providers.local;
   const localModels = chatModels.get("local");
   if (local?.baseUrl && localModels?.length) {
-    pi.registerProvider("local", {
+    register("local", {
       name: "Local (OpenAI-compatible)",
       baseUrl: local.baseUrl,
       api: "openai-completions",
       apiKey: local.apiKeyEnv ? `$${local.apiKeyEnv}` : "local",
       models: localModels.map((item) => modelEntry(item.model, item.label)),
     });
-    registered.push("local");
   }
   return registered;
 }

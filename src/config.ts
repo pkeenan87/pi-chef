@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
-import { containsSecret } from "./redact.js";
+import { containsSecret, redact } from "./redact.js";
 import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
 export interface ProviderConfig {
@@ -487,7 +487,7 @@ function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<st
 }
 
 /** Validates and normalizes one raw YAML document. Returns a shallow copy with normalized fields. */
-function normalizeRaw(input: unknown, where: string, warnings: string[] = []): Record<string, unknown> {
+function normalizeRaw(input: unknown, where: string, warnings: string[] = [], lenient = false): Record<string, unknown> {
   if (!isRecord(input)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
   const raw = dropLegacy(input, warnings);
   assertNoSecrets(raw, where);
@@ -568,7 +568,21 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
 
   const tiers = section(raw, "tiers", where);
   if (tiers) {
+    const kept: Record<string, unknown> = {};
     for (const [key, list] of Object.entries(tiers)) {
+      // A bad tier drops only that tier when loading real files: the built-in tier applies and the rest of the file still loads.
+      try {
+        checkTier(key, list);
+        kept[key] = list;
+      } catch (error) {
+        if (!lenient || !(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+        warnOnce(warnings, `${error.message}; tiers.${key} was dropped, so the built-in ${key} tier applies.`);
+      }
+    }
+    out.tiers = kept;
+  }
+  function checkTier(key: string, list: unknown): void {
+    {
       if (!(TIER_KEYS as readonly string[]).includes(key)) invalid(where, `tiers.${key}`, `is not a known tier (${TIER_KEYS.join(", ")})`);
       if (!Array.isArray(list) || list.length === 0) invalid(where, `tiers.${key}`, "must be a non-empty list of candidates");
       list.forEach((item, index) => {
@@ -602,10 +616,22 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
   }
   const session = section(raw, "session", where);
   if (session) {
+    const checkSession = () => {
     if (session.model !== undefined && (typeof session.model !== "string" || !parseModelRef(session.model))) invalid(where, "session.model", "must be provider/id, for example anthropic/claude-opus-5-5");
     if (session.pin !== undefined && typeof session.pin !== "boolean") invalid(where, "session.pin", "must be true or false");
     if (session.compactionTier !== undefined && (typeof session.compactionTier !== "string" || !CHAT_TIER_NAMES.includes(session.compactionTier))) {
       invalid(where, "session.compactionTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
+    }
+    };
+    if (!lenient) checkSession();
+    else {
+      try {
+        checkSession();
+      } catch (error) {
+        if (!(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+        warnOnce(warnings, `${error.message}; the whole session section was dropped, so the default session settings apply.`);
+        delete out.session;
+      }
     }
   }
   const workers = section(raw, "workers", where);
@@ -661,8 +687,15 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     invalid(where, "proprietaryCode", "must be a boolean");
   }
   out.pricing = normalizePricing(raw.pricing, where);
-  const quota = normalizeQuota(raw.quota, where);
-  if (quota) out.quota = quota;
+  try {
+    const quota = normalizeQuota(raw.quota, where);
+    if (quota) out.quota = quota;
+  } catch (error) {
+    // Quota only ranks models (it never bills), so a bad section is dropped with a warning when loading real files.
+    if (!lenient || !(error instanceof WorkflowError) || error.code !== "CONFIG_INVALID") throw error;
+    warnOnce(warnings, `${error.message}; the whole quota section was dropped, so no quota shadow prices apply.`);
+    delete out.quota;
+  }
   return out;
 }
 
@@ -681,6 +714,19 @@ export function validateResolvedConfig(config: WorkflowConfig, where = "config")
         invalid(where, `tiers.${key}[${index}].provider`, `references provider "${candidate.provider}" which is not defined under providers`);
       }
     });
+  }
+}
+
+/**
+ * The lenient form of `validateResolvedConfig`: a tier naming a provider the config does not define is dropped with a
+ * warning. The account providers (openai, anthropic, xai) need no block: their login is Pi's, and routing checks it.
+ */
+function dropUnresolvedTiers(config: WorkflowConfig, where: string, warnings: string[]): void {
+  for (const [key, list] of Object.entries(config.tiers)) {
+    const index = list?.findIndex((candidate) => !config.providers[candidate.provider] && !isAccountProvider(candidate.provider)) ?? -1;
+    if (index < 0) continue;
+    warnOnce(warnings, `${where}: tiers.${key}[${index}].provider references provider "${list![index]!.provider}" which is not defined under providers; tiers.${key} was dropped, so the built-in ${key} tier applies.`);
+    delete config.tiers[key as TierKey];
   }
 }
 
@@ -759,14 +805,15 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
   return out;
 }
 
-function mergeConfig(raw: unknown, where: string, warnings: string[] = []): WorkflowConfig {
-  const norm = normalizeRaw(raw, where, warnings);
+function mergeConfig(raw: unknown, where: string, warnings: string[] = [], lenient = false): WorkflowConfig {
+  const norm = normalizeRaw(raw, where, warnings, lenient);
   const config = build(norm);
   applyLegacyModels(norm, config, warnings);
   applyDeploymentPricing(config, warnings);
   // A standalone document that spells out both providers and tiers must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
-  if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
+  if (lenient) dropUnresolvedTiers(config, where, warnings);
+  else if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
     validateResolvedConfig(config, where);
   }
   return config;
@@ -1031,6 +1078,36 @@ export function displayPath(file: string): string {
   return file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
 }
 
+/** A config problem that makes a whole file unusable. `file` is the path that was rejected; `reason` is redacted. */
+export class ConfigFileError extends WorkflowError {
+  constructor(code: string, readonly file: string, readonly reason: string) {
+    super(code, reason);
+    this.name = "ConfigFileError";
+  }
+}
+
+/**
+ * Reads, parses, and checks one config file. Policy rejections (a secret, a merge that is not manual, a bad provider or
+ * budget) and unreadable YAML reject the whole file: they throw a ConfigFileError that names it. Only the sections
+ * `normalizeRaw` can drop on their own (a tier, session, or quota section) become warnings.
+ */
+function readConfigFile(file: string, warnings: string[]): Record<string, unknown> {
+  try {
+    let parsed: unknown;
+    try {
+      parsed = parse(readFileSync(file, "utf8"));
+    } catch (error) {
+      const first = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable";
+      throw new WorkflowError("CONFIG_INVALID", `${displayPath(file)}: YAML could not be read (${first})`);
+    }
+    return normalizeRaw(parsed, file, warnings, true);
+  } catch (error) {
+    if (error instanceof ConfigFileError) throw error;
+    const code = error instanceof WorkflowError ? error.code : "CONFIG_INVALID";
+    throw new ConfigFileError(code, file, redact(error instanceof Error && error.message ? error.message : String(error)));
+  }
+}
+
 export function loadConfig(cwd: string): WorkflowConfig {
   const { projectPath, userPath: newUserPath, legacyUserPath } = configPaths(cwd);
   const warnings: string[] = [];
@@ -1049,12 +1126,12 @@ export function loadConfig(cwd: string): WorkflowConfig {
       warnings.push(`Rename ~/.pi/agent/${legacyName} to chef.yaml`);
     }
   }
-  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;
-  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
+  const userRaw = existsSync(userPath) ? readConfigFile(userPath, warnings) : undefined;
+  const projectRaw = existsSync(projectPath) ? readConfigFile(projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
   const where = projectRaw ? projectPath : userPath;
-  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where, warnings);
-  validateResolvedConfig(config, where);
+  // Lenient: a bad tier, session, or quota section drops just that section (with a warning naming file and key).
+  const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where, warnings, true);
   const unpriced = unpricedTierModels(config);
   if (unpriced.length > 0) {
     warnings.push(`No pricing rows for ${unpriced.join(", ")}: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.`);

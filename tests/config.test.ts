@@ -278,7 +278,10 @@ describe("loadConfig layering", () => {
     expect(loadConfig(project).providers.openai?.model).toBe("gpt-5.4");
     writeUser("routing: { maxEscalations: 1 }\n");
     writeProject("providers: { openai: { type: openai, auth: account-login, model: gpt-5.4 } }\ntiers: { cheap: [{ provider: foundry, model: x }] }\n");
-    expect(() => loadConfig(project)).toThrow(/tiers\.cheap\[0\]\.provider/);
+    // Loading real files drops just the tier that names an undefined provider; the strict parse still rejects it.
+    const dropped = loadConfig(project);
+    expect(dropped.tiers.cheap).toBeUndefined();
+    expect(dropped.warnings?.join("\n")).toMatch(/tiers\.cheap\[0\]\.provider.*tiers\.cheap was dropped, so the built-in cheap tier applies/);
   });
 
   it("treats a user entry with no type as an adjustment, not a provider", () => {
