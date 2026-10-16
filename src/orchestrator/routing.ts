@@ -27,7 +27,7 @@ export async function decide(
   ctx: WorkflowContext,
   classification: AcceptedClassification,
   purpose: "plan" | "implement" | "review" | "preview",
-  extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
+  extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: Tier; strictAvailability?: boolean } = {},
 ): Promise<RoutingDecision> {
   return decideRoute(classification, ctx.config, ctx.store.readMetrics(), {
     purpose,

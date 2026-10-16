@@ -240,9 +240,35 @@ export function reviewFailureDetail(record: TicketReviewRecord): string {
  */
 export async function reviewTicket(ctx: WorkflowContext, state: TaskState, ticket: Ticket, run: TicketRun): Promise<TicketReviewOutcome | undefined> {
   if (!ctx.config.advisors.tickets || !ctx.chat) return undefined;
+  try {
+    return await reviewTicketUnsafe(ctx, state, ticket, run);
+  } catch (error) {
+    // Infrastructure must not block work (or throw into /build): any failure is an unavailable review.
+    const why = redact((error as Error).message || "unknown error").slice(0, 300);
+    const attempt = run.attempts;
+    return {
+      kind: "unavailable",
+      record: {
+        attempt,
+        round: (run.reviews ?? []).filter((item) => item.tier === (run.tier ?? "standard")).length + 1,
+        tier: run.tier ?? "standard",
+        implementer: run.provider && run.model ? `${run.provider}/${run.model}` : "unknown",
+        verdict: "unavailable",
+        findings: [],
+        advisors: [],
+        rationale: `Review unavailable: ${why}`,
+        costUsd: { review: null, advisors: null },
+      },
+      warning: `Ticket ${ticket.id} was committed without its review (unavailable: ${why}).`,
+    };
+  }
+}
+
+async function reviewTicketUnsafe(ctx: WorkflowContext, state: TaskState, ticket: Ticket, run: TicketRun): Promise<TicketReviewOutcome | undefined> {
   const progress = (line: string) => ctx.progress?.(`Ticket ${ticket.id} review: ${line}`);
   const attempt = run.attempts;
-  const round = (run.reviews ?? []).filter((item) => item.attempt === attempt).length + 1;
+  // Counted per tier, not per attempt: aborting and resuming must not buy more review rounds.
+  const round = (run.reviews ?? []).filter((item) => item.tier === (run.tier ?? "standard")).length + 1;
   const implementer = run.provider && run.model ? `${run.provider}/${run.model}` : "unknown";
   const base = { attempt, round, tier: run.tier ?? "standard", implementer, findings: [] as TicketReviewFinding[], advisors: [] as AdvisorOpinion[], costUsd: { review: 0 as number | null, advisors: 0 as number | null } };
   const unavailable = (why: string, costUsd = base.costUsd): TicketReviewOutcome => ({

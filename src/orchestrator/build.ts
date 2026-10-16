@@ -287,7 +287,7 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, reviews: [...(previous.reviews ?? []), reviewed.record] }));
     if (reviewed.kind === "fail") {
       const run = state.ticketRuns?.[ticket.id];
-      return { kind: "review-failed", record: reviewed.record, text: reviewed.text, final: (run?.reviews ?? []).some((item) => item.attempt === reviewed.record.attempt && item.verdict === "fail") };
+      return { kind: "review-failed", record: reviewed.record, text: reviewed.text, final: (run?.reviews ?? []).some((item) => item.tier === reviewed.record.tier && item.verdict === "fail") };
     }
     if (reviewed.kind === "unavailable") {
       ctx.progress?.(reviewed.warning);
@@ -331,13 +331,36 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       // A ticket the review failed is not settled by passing checks: it goes to a stronger model, not to a commit.
       if (run && run.attempts > 0 && run.status === "failed" && run.failedBy !== "review" && (await dirtyPaths(ctx)).length > 0) {
         ctx.progress?.(`Ticket ${ticket.id}: re-running checks on the changes in the tree`);
-        const settled = await settle(ctx, state, ticket, run.summary ?? "", false);
-        if (settled.kind === "committed") {
-          await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, status: "done", error: undefined, failedBy: undefined, commit: settled.sha }));
+        const began = iso(ctx);
+        // Nobody can say which model wrote a hand fix: the review runs without an implementer, and no model metric moves.
+        const handFixed: TicketRun = { ...run, provider: undefined, model: undefined };
+        const settled = await settle(ctx, state, ticket, run.summary ?? "", false, () => reviewTicket(ctx, state, ticket, handFixed));
+        if (settled.kind === "committed" || settled.kind === "review-failed") {
+          const spent = ticketSpend(ctx, state.taskId, ticket.id, began);
+          const elapsed = Math.max(0, ctx.now().getTime() - new Date(began).getTime());
+          const { total, ...split } = spent;
+          const accrue = (previous: TicketRun): TicketRun => ({ ...previous, elapsedMs: (previous.elapsedMs ?? 0) + elapsed, costUsd: addUsd(previous.costUsd, total), costSplit: addSplit(previous.costSplit, split) });
+          const entry = (previous: TicketRun, outcome: TicketAttempt["outcome"], failedBy?: TicketAttempt["failedBy"], error?: string): TicketAttempt => ({ ...attempt(previous, began, elapsed, spent, outcome, failedBy, error), provider: "", model: "hand fix" });
+          if (settled.kind === "committed") {
+            await patch(ctx, state.taskId, ticket, (previous) => {
+              const next = accrue(previous);
+              return { ...next, status: "done", error: undefined, failedBy: undefined, commit: settled.sha, attemptLog: [...(next.attemptLog ?? []), entry(next, "success")] };
+            });
+            logTicket(ctx, state.taskId, ticket.id);
+            ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes · committed ${settled.sha.slice(0, 7)}`);
+            if (settled.warning) ctx.notify(settled.warning);
+            continue;
+          }
+          // The review failed the hand fix: the ticket stays failed and the next model attempt gets the findings.
+          const reason = reviewFailureDetail(settled.record);
+          await patch(ctx, state.taskId, ticket, (previous) => {
+            const next = accrue(previous);
+            return { ...next, status: "failed", failedBy: "review", error: clip(reason), attemptLog: [...(next.attemptLog ?? []), entry(next, "failure", "review", reason)] };
+          });
+          editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "failed"));
           logTicket(ctx, state.taskId, ticket.id);
-          ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes · committed ${settled.sha.slice(0, 7)}`);
-          if (settled.warning) ctx.notify(settled.warning);
-          continue;
+          ctx.progress?.(`Ticket ${ticket.id} · checks passed on your changes, but the review failed them; the next attempt gets its findings`);
+          return await prepare(ctx, ctx.store.load(state.taskId) ?? state, ticket);
         }
         // The failure text goes to the next model.
         if (settled.kind === "failed") await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
@@ -361,14 +384,18 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const budget = budgetState(ctx, state.taskId);
   if (budget.status === "hard") return { kind: "stopped", code: "BUDGET", reason: "Task or daily budget is exhausted; no further ticket was started. /build resumes after the budget is raised." };
   if (budget.status === "soft") warnSoft(ctx, state.taskId);
-  const failedTier: Tier | undefined = run?.status === "failed" ? run.tier : undefined;
-  if (failedTier) {
+  // The tier the ticket is on: the latest attempt's, whatever its status. A failed one escalates from it; an aborted or
+  // in-progress one resumes on it (no escalation, no reset to the start tier).
+  const attempted = run && run.attempts > 0 ? (run.tier ?? run.attemptLog?.at(-1)?.tier) : undefined;
+  const failedTier: Tier | undefined = run?.status === "failed" ? attempted : undefined;
+  const resumeTier: Tier | undefined = run?.status === "failed" ? undefined : attempted;
+  if (attempted) {
     // routing.maxEscalations: how many tiers a ticket may climb from the one its difficulty starts on.
     const from = TICKET_LADDER.indexOf(startTier(state, ticket));
-    const at = TICKET_LADDER.indexOf(failedTier);
+    const at = Math.max(TICKET_LADDER.indexOf(attempted), ...(run?.attemptLog ?? []).map((item) => TICKET_LADDER.indexOf(item.tier)));
     const climbed = from >= 0 && at >= 0 ? Math.max(0, at - from) : (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
     const limit = ctx.config.routing.maxEscalations;
-    if (climbed >= limit) {
+    if (failedTier && climbed >= limit) {
       return {
         kind: "stopped",
         code: "MAX_ESCALATIONS",
@@ -379,7 +406,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const escalations = (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
   const classification = state.classification!;
   // A tier with no model cannot run a chunk, so it moves up one tier (as ticket-run did).
-  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : startTier(state, ticket), strictAvailability: true });
+  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(state, ticket), strictAvailability: true });
   if (decision.provider === "none" && !decision.blocked) {
     decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }

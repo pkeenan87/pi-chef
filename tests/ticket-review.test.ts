@@ -1,8 +1,9 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Ticket, TokenUsage } from "../src/domain.js";
 import { runBuild, type BuildDriver, type ModelRef } from "../src/orchestrator/build.js";
+import { reviewTicket } from "../src/orchestrator/ticket-review.js";
 import { record } from "../src/orchestrator/budget.js";
 import { advisorRequestLimit } from "../src/review/advisors.js";
 import { checkRunner, contextOf, fakeChat, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, withAdvisors, type FakeCall } from "./helpers.js";
@@ -20,7 +21,7 @@ interface Send {
 }
 
 /** A driver whose sessions run a script that may write files, like a model would. */
-function fakeDriver(cwd: string, script: (send: Send) => { lastText?: string } | void) {
+function fakeDriver(cwd: string, script: (send: Send) => { lastText?: string; aborted?: boolean } | void) {
   const sends: Send[] = [];
   const driver: BuildDriver = {
     async fresh(model, run) {
@@ -32,7 +33,7 @@ function fakeDriver(cwd: string, script: (send: Send) => { lastText?: string } |
           const send: Send = { ticket: current, model, text, turn: turn++ };
           sends.push(send);
           const reply = script(send) ?? {};
-          return { lastText: reply.lastText ?? "Done.\n- [x] retry works\nFiles changed: x", aborted: false };
+          return { lastText: reply.lastText ?? "Done.\n- [x] retry works\nFiles changed: x", aborted: reply.aborted ?? false };
         },
       });
     },
@@ -455,3 +456,109 @@ async function gitLog(cwd: string): Promise<string> {
   const { promisify } = await import("node:util");
   return (await promisify(execFile)("git", ["log", "--format=%s"], { cwd })).stdout.trim();
 }
+
+describe("a hand fix is reviewed before its commit", () => {
+  it("records the review without an implementer and strikes no model when it passes", async () => {
+    const t = await setup();
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    expect((await t.run(first.driver)).ok).toBe(false);
+    const struck = t.app.store.readMetrics().general?.ticketLow?.failure ?? 0;
+    const reviewsBefore = t.calls.filter((call) => call.model === OPUS).length;
+    t.passing.ok = true;
+    writeFileSync(path.join(t.cwd, "hand-fix.txt"), "fixed\n");
+    const second = fakeDriver(t.cwd, () => undefined);
+    const result = await t.run(second.driver);
+    expect(result.ok, result.text).toBe(true);
+    expect(second.sends).toHaveLength(0);
+    expect(t.calls.filter((call) => call.model === OPUS).length).toBe(reviewsBefore + 1);
+    const run = t.load().ticketRuns!["01"]!;
+    expect(run.status).toBe("done");
+    expect(run.reviews!.at(-1)).toMatchObject({ verdict: "pass", implementer: "unknown" });
+    expect(run.attemptLog!.at(-1)).toMatchObject({ outcome: "success", model: "hand fix" });
+    expect(t.app.store.readMetrics().general?.ticketLow?.failure ?? 0).toBe(struck);
+    expect(t.app.store.readMetrics().general?.ticketLow?.success ?? 0).toBe(0);
+  });
+
+  it("a failed review leaves the ticket failed, and the next model attempt gets the findings", async () => {
+    let reviews = 0;
+    const t = await setup({ answer: roles({ review: () => (reviews++ === 0 ? fail("hand fix ignores the cap") : pass()) }) });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    expect((await t.run(first.driver)).ok).toBe(false);
+    const struck = t.app.store.readMetrics().general?.ticketLow?.failure ?? 0;
+    t.passing.ok = true;
+    writeFileSync(path.join(t.cwd, "hand-fix.txt"), "fixed\n");
+    const second = fakeDriver(t.cwd, () => second.write("g.txt"));
+    const result = await t.run(second.driver);
+    expect(result.ok, result.text).toBe(true);
+    expect(await gitLog(t.cwd)).toContain("01: Ticket 01");
+    // The review failed the hand fix, so a model got another go, one tier up, with the findings.
+    expect(second.sends[0]!.model).toEqual({ provider: "anthropic", id: "claude-sonnet-5-5" });
+    expect(second.sends[0]!.text).toContain("hand fix ignores the cap");
+    const run = t.load().ticketRuns!["01"]!;
+    expect(run.reviews![0]).toMatchObject({ verdict: "fail", implementer: "unknown" });
+    expect(run.attemptLog!.map((item) => `${item.model}:${item.outcome}`)).toContain("hand fix:failure");
+    expect(t.app.store.readMetrics().general?.ticketLow?.failure ?? 0).toBe(struck);
+  });
+});
+
+describe("aborting and resuming", () => {
+  it("resumes on the escalated tier, and repeated aborts never climb or exceed maxEscalations", async () => {
+    const t = await setup({ mutate: (config) => void (config.routing.maxEscalations = 1) });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    await t.run(first.driver);
+    const aborted = (name: string) => {
+      const d = fakeDriver(t.cwd, () => ({ aborted: true }));
+      return t.run(d.driver).then(() => d);
+    };
+    // Escalated to the second tier, then aborted; resuming stays there, however often.
+    for (let i = 0; i < 3; i++) {
+      const d = await aborted(`abort ${i}`);
+      expect(d.sends.map((item) => item.model.id)).toEqual(["claude-sonnet-5-5"]);
+      expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "ticketMedium" });
+    }
+    const resumed = fakeDriver(t.cwd, () => resumed.write("g.txt"));
+    await t.run(resumed.driver);
+    expect(resumed.sends[0]!.model.id).toBe("claude-sonnet-5-5");
+    // Still failing there: maxEscalations (1) is used up.
+    const last = fakeDriver(t.cwd, () => undefined);
+    expect((await t.run(last.driver)).code).toBe("MAX_ESCALATIONS");
+  });
+
+  it("keeps the review fail count per tier: abort and resume cannot buy more review rounds", async () => {
+    const t = await setup({ answer: roles({ review: () => fail() }) });
+    const first = fakeDriver(t.cwd, (send) => (send.turn === 0 ? d1.write("f.txt") : { aborted: true }));
+    const d1 = first;
+    const aborted = await t.run(first.driver);
+    expect(aborted.ok).toBe(false);
+    expect(first.sends).toHaveLength(2);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "ticketLow" });
+    const second = fakeDriver(t.cwd, () => second.write("g.txt"));
+    const result = await t.run(second.driver);
+    expect(result.code).toBe("REVIEW_FAILED");
+    // One review already failed at this tier, so the next failure is final: no retry turn.
+    expect(second.sends).toHaveLength(1);
+    expect(t.load().ticketRuns!["01"]!.reviews!.map((item) => item.round)).toEqual([1, 2]);
+  });
+});
+
+describe("reviewTicket never throws", () => {
+  it("returns unavailable when the diff, the advisors or the ledger blow up", async () => {
+    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })] });
+    const state = t.load();
+    const ticket = state.plan!.tickets![0]!;
+    const run = { status: "in-progress", attempts: 1, tier: "ticketHigh", provider: "openai", model: "gpt-6.1-sol" } as never;
+    vi.spyOn(t.ctx.git, "workingDiff").mockRejectedValueOnce(new Error("git exploded"));
+    const outcome = await reviewTicket(t.ctx, state, ticket, run);
+    expect(outcome).toMatchObject({ kind: "unavailable", record: { verdict: "unavailable" } });
+    expect(outcome!.record.rationale).toContain("git exploded");
+    const ledger = vi.spyOn(t.ctx.store, "appendLedger").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    const second = await reviewTicket(t.ctx, state, ticket, run);
+    expect(second).toMatchObject({ kind: "unavailable" });
+    ledger.mockRestore();
+  });
+});

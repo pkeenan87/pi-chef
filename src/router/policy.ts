@@ -42,7 +42,8 @@ export interface RouteOptions {
   /** Subscription quota use for shadow-price ranking. Never affects budgets. */
   quota?: QuotaUsage;
   /** The ticket's difficulty tier (implement purpose): where its first attempt starts. Sensitive work starts at ticketHigh at least. Ignored after a failure. */
-  ticketTier?: TicketTier;
+  /** The tier to implement on: a ticket's difficulty tier, or the tier an interrupted attempt was on. */
+  ticketTier?: Tier;
   /** Uniform [0, 1) for exploration. Defaults to Math.random. */
   rng?: () => number;
   /**
@@ -99,7 +100,7 @@ export function decideRoute(
   } else if (purpose === "implement" && options.ticketTier) {
     // Deterministic: the difficulty tier, raised to ticketHigh for security-sensitive work. Unavailable or blocked tiers
     // move up the same ladder below. The proven-tier shortcut does not apply: it could only pick another tier.
-    tier = sensitive && TICKET_LADDER.indexOf(options.ticketTier) < TICKET_LADDER.indexOf("ticketHigh") ? "ticketHigh" : options.ticketTier;
+    tier = sensitive && TICKET_LADDER.includes(options.ticketTier) && TICKET_LADDER.indexOf(options.ticketTier) < TICKET_LADDER.indexOf("ticketHigh") ? "ticketHigh" : options.ticketTier;
     if (sensitive && tier !== options.ticketTier) reasons.push("ticket_sensitive_floor");
     if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
       const escalated = escalateImplementation(tier, cap, config);
