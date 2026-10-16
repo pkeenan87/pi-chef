@@ -76,8 +76,9 @@ export interface PlannerRating {
  * keyword hit. A sensitive task is high risk whatever risk the planner gave.
  */
 export function plannerClassification(rating: PlannerRating, scanned: string): AcceptedClassification {
-  const scan = classifyKeywords(scanned);
-  const hit = isSecuritySensitive(scan);
+  // Only strong keywords overrule the planner: weak ones ("token", "session", "production") are everywhere in
+  // ordinary specs and would mark nearly every plan sensitive, starting every ticket at ticketHigh.
+  const hit = STRONG_SECURITY.test(scanned);
   const sensitive = rating.securitySensitive || hit;
   const reason = rating.reason?.replace(/\s+/g, " ").trim().slice(0, 200);
   return {
@@ -88,7 +89,7 @@ export function plannerClassification(rating: PlannerRating, scanned: string): A
     recommended_tier: tierFor(rating.complexity, sensitive),
     reason_codes: [
       "planner",
-      ...(hit && !rating.securitySensitive ? ["security_keyword_override", ...scan.reason_codes.slice(1)] : rating.securitySensitive ? ["planner_security_sensitive"] : []),
+      ...(hit && !rating.securitySensitive ? ["security_keyword_override", "security_keywords_strong"] : rating.securitySensitive ? ["planner_security_sensitive"] : []),
       ...(reason ? [`reason: ${reason}`] : []),
     ],
     source: "planner",

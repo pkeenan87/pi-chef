@@ -130,6 +130,12 @@ describe("classification and policy", () => {
     expect(rated.reason_codes).toContain("security_keyword_override");
   });
 
+  it("does not let weak keywords alone overrule the planner", () => {
+    const rated = plannerClassification({ complexity: "medium", risk: "low", securitySensitive: false }, "Cache the session token count and log it in production");
+    expect(isSecuritySensitive(rated)).toBe(false);
+    expect(rated).toMatchObject({ task_type: "general", risk: "low", recommended_tier: "standard" });
+  });
+
   it("clips long text in the middle", () => {
     const clipped = clipMiddle("x".repeat(50_000), 8000);
     expect(clipped.length).toBeLessThan(8100);
