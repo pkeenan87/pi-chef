@@ -38,11 +38,11 @@ describe("ticket tiers in decideRoute", () => {
     expect(nextTier("ticketHigh", "standard")).toBeUndefined();
   });
 
-  it("starts security-sensitive work at ticketHigh at least", () => {
+  it("does not raise security-sensitive work above its ticket's difficulty tier, but still asks for approval", () => {
     const config = opusOnly();
     const decision = decideRoute(classification({ required_capabilities: ["auth"] }), config, {}, { purpose: "implement", ticketTier: "ticketLow", rng, strictAvailability: true });
-    expect(decision).toMatchObject({ tier: "ticketHigh", model: "gpt-6.1-sol" });
-    expect(decision.reason).toContain("ticket_sensitive_floor");
+    expect(decision).toMatchObject({ tier: "ticketLow", model: "grok-4.7", requireHumanApproval: true });
+    expect(decision.reason).not.toContain("ticket_sensitive_floor");
   });
 
   it("does not let a proven lower tier route a ticket below its difficulty", () => {

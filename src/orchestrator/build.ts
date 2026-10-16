@@ -372,10 +372,9 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
   }
 }
 
-/** The ticket tier a first attempt starts on: its difficulty, and at least ticketHigh in a security-sensitive plan. */
-function startTier(state: TaskState, ticket: Ticket): TicketTier {
-  const tier = DIFFICULTY_TIER[ticketDifficulty(ticket)];
-  return state.plan?.securitySensitive ? "ticketHigh" : tier;
+/** The ticket tier a first attempt starts on: its own difficulty. A security-sensitive plan does not raise it; the planner rates such tickets high. */
+function startTier(ticket: Ticket): TicketTier {
+  return DIFFICULTY_TIER[ticketDifficulty(ticket)];
 }
 
 /** Routes the ticket (its difficulty tier, one step up the ticket ladder after a failure), gates the budget, builds the prompt, and marks the ticket running. */
@@ -394,7 +393,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const resumeTier: Tier | undefined = run?.status === "failed" ? undefined : attempted;
   if (attempted) {
     // routing.maxEscalations: how many tiers a ticket may climb from the one its difficulty starts on.
-    const from = TICKET_LADDER.indexOf(startTier(state, ticket));
+    const from = TICKET_LADDER.indexOf(startTier(ticket));
     const at = Math.max(TICKET_LADDER.indexOf(attempted), ...(run?.attemptLog ?? []).map((item) => TICKET_LADDER.indexOf(item.tier)));
     const climbed = from >= 0 && at >= 0 ? Math.max(0, at - from) : (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
     const limit = ctx.config.routing.maxEscalations;
@@ -402,14 +401,14 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
       return {
         kind: "stopped",
         code: "MAX_ESCALATIONS",
-        reason: `Ticket ${ticket.id} is still failing on ${failedTier} after climbing ${climbed} tier(s) from ${startTier(state, ticket)} (routing.maxEscalations is ${limit}), so it stays failed and the build stops. Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.`,
+        reason: `Ticket ${ticket.id} is still failing on ${failedTier} after climbing ${climbed} tier(s) from ${startTier(ticket)} (routing.maxEscalations is ${limit}), so it stays failed and the build stops. Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.`,
       };
     }
   }
   const escalations = (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
   const classification = state.classification!;
   // A tier with no model cannot run a chunk, so it moves up one tier (as ticket-run did).
-  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(state, ticket), strictAvailability: true });
+  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(ticket), strictAvailability: true });
   if (decision.provider === "none" && !decision.blocked) {
     decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
   }

@@ -258,12 +258,12 @@ describe("/build failures", () => {
     expect(t.load().ticketRuns!["01"]!.tier).toBe("premium");
   });
 
-  it("starts a security-sensitive plan's tickets at ticketHigh at least", async () => {
+  it("starts a security-sensitive plan's tickets on their own difficulty tier", async () => {
     const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], approve: true });
     await t.app.store.update(t.taskId, "test", (state) => ({ ...state, plan: { ...state.plan!, securitySensitive: true } }));
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends[0]!.model.id).toBe("gpt-6.1-sol");
+    expect(d.sends[0]!.model.id).toBe("grok-4.7");
   });
 
   it("does not strike the model when a check cannot run", async () => {
