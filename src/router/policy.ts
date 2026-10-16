@@ -132,7 +132,7 @@ export function decideRoute(
   if (capRank(tier) > capRank(cap)) tier = cap;
   let selection = probe(tier);
   // Nothing usable at this tier (allowlist, open circuit): move up the ladder rather than stall.
-  const movable = (code: string) => code === "excluded" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
+  const movable = (code: string) => code === "excluded" || code === "no_candidates" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
   while (selection.blocked && tier !== "deterministic" && movable(selection.blocked.code)) {
     const escalated = escalateImplementation(tier, cap, config);
     if (escalated === tier) break;

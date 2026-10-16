@@ -83,6 +83,7 @@ export function hardExclusion(input: {
   budgetRemainingUsd?: number;
 }): string | undefined {
   const { config, candidate, price } = input;
+  if (candidate.model === "") return "no model id";
   const allow = config.orgProviderAllowlist;
   if (allow.length > 0 && !allow.includes(candidate.provider)) return "org_allowlist";
   if (config.proprietaryCode && allow.length === 0 && candidate.provider !== "local") return "proprietary_code_policy";
@@ -98,7 +99,7 @@ export function selectCandidate(options: SelectOptions): Selection {
   const rng = options.rng ?? Math.random;
   const candidates = tierCandidates(config, tier);
   if (candidates.length === 0) {
-    return { tier, considered: [], reason: `no candidates configured for ${tier}`, unpriced: false, blocked: { code: "no_candidates", message: `No models are configured for the ${tier} tier.` } };
+    return { tier, considered: [], reason: `no candidates configured for ${tier}`, unpriced: false, blocked: { code: "no_candidates", message: `No model configured for tier ${tier}; add tiers.${tier} to your config.` } };
   }
   const hard = new Map<TierCandidate, string>();
   const soft = new Map<TierCandidate, string>();
