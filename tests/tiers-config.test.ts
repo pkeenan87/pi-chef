@@ -85,7 +85,8 @@ tiers:
     expect(ids("ticketLow")).toEqual(["xai/grok-4.7"]);
     expect(ids("ticketMedium")).toEqual(["anthropic/claude-sonnet-5-5"]);
     expect(ids("ticketHigh")).toEqual(["openai/gpt-6.1-sol"]);
-    expect(config.routing).toMatchObject({ sessionTier: "premium", directTier: "cheap", reviewTier: "premium", maxEscalations: 3 });
+    expect(config.routing).toMatchObject({ reviewTier: "premium", maxEscalations: 3 });
+    expect(config.session).toEqual({ model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "cheap" });
     expect(config.warnings ?? []).toEqual([]);
     // every listed chat model has a quota weight
     for (const tier of ["cheap", "batch", "standard", "premium", "ticketLow", "ticketMedium", "ticketHigh", "advisor"] as const) {

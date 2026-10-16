@@ -39,8 +39,10 @@ describe("parseConfig validation", () => {
     ["advisors:\n  adHocMinLines: -1\n", /advisors\.adHocMinLines/],
     ["advisors:\n  summarizeCut: 1\n", /advisors\.summarizeCut/],
     ["advisors: 3\n", /advisors/],
-    ["routing:\n  sessionTier: ticketLow\n", /routing\.sessionTier/],
-    ["routing:\n  directTier: huge\n", /routing\.directTier/],
+    ["session:\n  model: opus\n", /session\.model/],
+    ["session:\n  model: anthropic/\n", /session\.model/],
+    ["session:\n  pin: maybe\n", /session\.pin/],
+    ["session:\n  compactionTier: ticketLow\n", /session\.compactionTier/],
     ["routing:\n  reviewTier: classifier\n", /routing\.reviewTier/],
     ["tiers:\n  ticketLow: []\n", /tiers\.ticketLow/],
     ["tiers:\n  ticketExtra:\n    - { provider: local, model: m }\n", /tiers\.ticketExtra/],
@@ -80,7 +82,7 @@ pricing:
     expect(config.pricing[0].effectiveFrom).toBe("2026-01-05");
   });
 
-  it("defaults the session, direct and review tiers and the escalation count, and accepts the ticket tiers", () => {
+  it("defaults the session, compaction and review tiers and the escalation count, and accepts the ticket tiers", () => {
     const config = parseConfig(`${PROVIDERS_BLOCK}
 tiers:
   ticketLow:
@@ -89,11 +91,22 @@ tiers:
     - { provider: anthropic, model: claude-sonnet-5-5 }
   ticketHigh:
     - { provider: openai, model: gpt-6.1-sol }
-routing: { directTier: standard }
+session: { compactionTier: standard }
 `);
-    expect(config.routing).toMatchObject({ sessionTier: "premium", directTier: "standard", reviewTier: "premium", maxEscalations: 3 });
+    expect(config.routing).toMatchObject({ reviewTier: "premium", maxEscalations: 3 });
+    expect(config.session).toEqual({ model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "standard" });
     expect(tierCandidates(config, "ticketLow")).toEqual([expect.objectContaining({ provider: "local", model: "m" })]);
     expect(tierCandidates(config, "ticketHigh")[0]!.model).toBe("gpt-6.1-sol");
+  });
+
+  it("loads the old routing.sessionTier and routing.directTier with one warning each", () => {
+    const config = parseConfig("routing:\n  sessionTier: premium\n  directTier: cheap\n  maxEscalations: 2\n");
+    expect(config.routing.maxEscalations).toBe(2);
+    expect(config.routing).not.toHaveProperty("sessionTier");
+    expect(config.routing).not.toHaveProperty("directTier");
+    expect(config.warnings).toHaveLength(2);
+    expect(config.warnings![0]).toMatch(/routing\.sessionTier is no longer used.*session\.model/);
+    expect(config.warnings![1]).toMatch(/routing\.directTier is no longer used.*session\.compactionTier/);
   });
 
   it("does not flag the repo config", () => {

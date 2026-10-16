@@ -61,13 +61,14 @@ export async function announce(
   await ctx.store.appendRoute(taskId, { purpose, tier: decision.tier, provider: decision.provider, model: decision.model, reason: why, considered }, iso(ctx));
 }
 
-/** Who does what under the current config: the tiers for chat, direct jobs, review, and tickets, with their chat models. */
-export function routingSummary(ctx: WorkflowContext): { chat: string; direct: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
+/** Who does what under the current config: the session model, compaction, review, and tickets, with their chat models. */
+export function routingSummary(ctx: WorkflowContext): { session: string; compaction: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
   const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).filter((item) => item.api === "chat").map((item) => `${item.provider}/${item.model}`);
-  const { sessionTier, directTier, reviewTier } = ctx.config.routing;
+  const { reviewTier } = ctx.config.routing;
+  const { model, pin, compactionTier } = ctx.config.session;
   return {
-    chat: sessionTier ? `${sessionTier}: ${models(sessionTier).join(", ")}` : "classified per session",
-    direct: `${directTier}: ${models(directTier).join(", ")}`,
+    session: pin ? model : "your own model (session.pin is off)",
+    compaction: `${compactionTier}: ${models(compactionTier).join(", ")}`,
     batch: `batch: ${models("batch").join(", ")}`,
     review: `${reviewTier}: ${models(reviewTier).join(", ")}`,
     tickets: { low: models("ticketLow"), medium: models("ticketMedium"), high: models("ticketHigh"), then: models("premium") },

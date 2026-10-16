@@ -5,16 +5,18 @@ import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
+import type { ChatFn } from "../providers/pi-chat.js";
 import { advisor } from "./advisor.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild } from "./build.js";
-import { budgetRemainingUsd, checkBudget, quotaState, observeUsage, recordClassifier, recordWebSearch } from "./budget.js";
+import { budgetRemainingUsd, budgetState, checkBudget, quotaState, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
+import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import type { WorkflowContext } from "./context.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
-import { approveDraft, classify, plan, route, showPlan } from "./planning.js";
+import { approveDraft, plan, route, showPlan } from "./planning.js";
 import { review } from "./review.js";
 import { auth, cost, status } from "./reports.js";
 import { announce, availability, decide } from "./routing.js";
@@ -290,25 +292,24 @@ export class Workflow {
     return observeUsage(this.ctx, input);
   }
 
-  /** Classifies a chat message for the virtual model (Decisions classifier, else keywords) and ledgers the classifier call to the active task. */
-  async classifyChat(text: string): Promise<AcceptedClassification> {
-    const result = await classify(this.ctx, text);
-    const taskId = this.activeTaskId();
-    const state = taskId ? this.store.load(taskId) : undefined;
-    if (state) recordClassifier(this.ctx, state.taskId, state.phase, result.usage);
-    return result.classification;
+  /**
+   * A compaction summary from `session.compactionTier`, ledgered as `compaction`. Undefined when no model can write it
+   * (hard budget, nobody signed in, a failed call), so the caller lets Pi compact with the session model.
+   */
+  summarizeForCompaction(chat: ChatFn, input: CompactionInput): Promise<CompactionSummary | undefined> {
+    return summarizeForCompaction(this.ctx, chat, input);
   }
 
-  /** Counts a failed chat attempt against a model so the circuit breaker can open. */
-  async recordChatFailure(input: { taskType: string; tier: string; provider: string; model: string }): Promise<void> {
-    await this.store.bumpMetric(input.taskType, input.tier, false, this.ctx.now(), { provider: input.provider, model: input.model });
+  /** Task or daily budget state with no warning, for gates that decide for themselves what to say. */
+  budgetStatus(taskId?: string): BudgetStatus {
+    return budgetState(this.ctx, taskId).status;
   }
 
   now(): Date {
     return this.ctx.now();
   }
 
-  /** Budget state for callers outside the workflow (for example the virtual model route). Warns once on "soft". */
+  /** Budget state for callers outside the workflow (for example web_search). Warns once on "soft". */
   checkBudget(taskId?: string): "ok" | "soft" | "hard" {
     return checkBudget(this.ctx, taskId);
   }

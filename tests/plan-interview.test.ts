@@ -471,7 +471,6 @@ describe("extension wiring", () => {
         return () => undefined;
       },
       appendEntry() {},
-      registerVirtualModel() {},
       registerTool() {},
       getActiveTools: () => active,
       setActiveTools: (names: string[]) => {

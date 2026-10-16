@@ -54,7 +54,7 @@ export function gateBudget(ctx: WorkflowContext, taskId: string): CommandResult 
   return undefined;
 }
 
-/** Budget state for callers outside the workflow (for example the virtual model route). Warns once on "soft". */
+/** Budget state for callers outside the workflow (for example web_search). Warns once on "soft". */
 export function checkBudget(ctx: WorkflowContext, taskId?: string): BudgetStatus {
   const { status } = budgetState(ctx, taskId);
   if (status === "soft") warnSoft(ctx, taskId ?? "daily");

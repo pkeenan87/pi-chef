@@ -100,6 +100,24 @@ export interface CheckConfig {
 export type ChatTierName = "cheap" | "standard" | "premium";
 const CHAT_TIER_NAMES: readonly string[] = ["cheap", "standard", "premium"];
 
+export interface SessionConfig {
+  /** The main session's model as `provider/id`. */
+  model: string;
+  /** Switch the session to `model` at session start. False leaves the model the user picked. */
+  pin: boolean;
+  /** Tier that writes compaction summaries (session_before_compact). Pi compacts on the session model when none can. */
+  compactionTier: ChatTierName;
+}
+
+export const DEFAULT_SESSION: SessionConfig = { model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "cheap" };
+
+/** Splits `provider/id` at the first slash. Undefined when either part is empty. */
+export function parseModelRef(value: string): { provider: string; id: string } | undefined {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1 || /\s/.test(value)) return undefined;
+  return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+}
+
 export interface WorkflowConfig {
   schemaVersion: 1;
   workspaceDir: string;
@@ -112,10 +130,6 @@ export interface WorkflowConfig {
     minConfidence: number;
     maxEscalations: number;
     maxTier: Tier;
-    /** Tier every chat turn on the cost-opt/auto virtual model routes to. Unset: classify the first request instead. */
-    sessionTier?: ChatTierName;
-    /** Tier for cheap side jobs on the virtual model (compaction, summaries). */
-    directTier: ChatTierName;
     /** Tier the /review model pass routes to. */
     reviewTier: ChatTierName;
     requirePremiumReviewFor: string[];
@@ -127,6 +141,8 @@ export interface WorkflowConfig {
      */
     attemptOverheadUsd: number;
   };
+  /** The main chat session: a normal Pi model, pinned at session start, with compaction on a cheap tier. */
+  session: SessionConfig;
   workers: {
     /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
@@ -185,13 +201,12 @@ const DEFAULTS: WorkflowConfig = {
     minConfidence: 0.75,
     maxEscalations: 3,
     maxTier: "premium",
-    sessionTier: "premium",
-    directTier: "cheap",
     reviewTier: "premium",
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
     attemptOverheadUsd: 0.02,
   },
+  session: DEFAULT_SESSION,
   workers: {
     tokenBudget: 8000,
     ticketContextTokens: 150000,
@@ -358,9 +373,36 @@ function isLoopbackHttpUrl(value: string): boolean {
   return !!url && url.protocol === "http:" && url.username === "" && url.password === "" && isLoopbackHost(url.hostname);
 }
 
+/** Adds a load note once, however many files carry the same old key. */
+function warnOnce(warnings: string[], message: string): void {
+  if (!warnings.includes(message)) warnings.push(message);
+}
+
+/**
+ * Removes settings from earlier versions, each with one warning, so an old file still loads. The cost-opt/auto
+ * virtual model and its router settings are gone.
+ */
+function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw };
+  if (isRecord(out.routing)) {
+    const routing = { ...out.routing };
+    if ("sessionTier" in routing) {
+      warnOnce(warnings, "routing.sessionTier is no longer used; the main session is a normal Pi model (set session.model).");
+      delete routing.sessionTier;
+    }
+    if ("directTier" in routing) {
+      warnOnce(warnings, "routing.directTier is no longer used; compaction runs on session.compactionTier.");
+      delete routing.directTier;
+    }
+    out.routing = routing;
+  }
+  return out;
+}
+
 /** Validates and normalizes one raw YAML document. Returns a shallow copy with normalized fields. */
-function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
-  if (!isRecord(raw)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
+function normalizeRaw(input: unknown, where: string, warnings: string[] = []): Record<string, unknown> {
+  if (!isRecord(input)) throw new WorkflowError("CONFIG_INVALID", `${where} must be a mapping`);
+  const raw = dropLegacy(input, warnings);
   assertNoSecrets(raw, where);
   const out: Record<string, unknown> = { ...raw };
 
@@ -459,12 +501,18 @@ function normalizeRaw(raw: unknown, where: string): Record<string, unknown> {
     if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier) || routing.maxTier === "batch")) {
       invalid(where, "routing.maxTier", `must be one of ${TIERS.filter((tier) => tier !== "batch").join(", ")}`);
     }
-    for (const field of ["sessionTier", "directTier", "reviewTier"] as const) {
-      if (routing[field] !== undefined && (typeof routing[field] !== "string" || !CHAT_TIER_NAMES.includes(routing[field] as string))) {
-        invalid(where, `routing.${field}`, `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
-      }
+    if (routing.reviewTier !== undefined && (typeof routing.reviewTier !== "string" || !CHAT_TIER_NAMES.includes(routing.reviewTier))) {
+      invalid(where, "routing.reviewTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
     }
     if (routing.requirePremiumReviewFor !== undefined) stringArray(routing.requirePremiumReviewFor, "routing.requirePremiumReviewFor", where);
+  }
+  const session = section(raw, "session", where);
+  if (session) {
+    if (session.model !== undefined && (typeof session.model !== "string" || !parseModelRef(session.model))) invalid(where, "session.model", "must be provider/id, for example anthropic/claude-opus-5-5");
+    if (session.pin !== undefined && typeof session.pin !== "boolean") invalid(where, "session.pin", "must be true or false");
+    if (session.compactionTier !== undefined && (typeof session.compactionTier !== "string" || !CHAT_TIER_NAMES.includes(session.compactionTier))) {
+      invalid(where, "session.compactionTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
+    }
   }
   const workers = section(raw, "workers", where);
   if (workers) {
@@ -561,6 +609,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     models: { ...DEFAULTS.models, ...obj("models") } as WorkflowConfig["models"],
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
+    session: { ...DEFAULTS.session, ...obj("session") } as WorkflowConfig["session"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
@@ -609,8 +658,8 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
   return out;
 }
 
-function mergeConfig(raw: unknown, where: string): WorkflowConfig {
-  const norm = normalizeRaw(raw, where);
+function mergeConfig(raw: unknown, where: string, warnings: string[] = []): WorkflowConfig {
+  const norm = normalizeRaw(raw, where, warnings);
   const config = build(norm);
   // A standalone document that spells out both providers and models must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
@@ -622,7 +671,10 @@ function mergeConfig(raw: unknown, where: string): WorkflowConfig {
 
 export function parseConfig(text: string, where = "config"): WorkflowConfig {
   const raw = parse(text);
-  return mergeConfig(raw, where);
+  const warnings: string[] = [];
+  const config = mergeConfig(raw, where, warnings);
+  if (warnings.length > 0) config.warnings = warnings;
+  return config;
 }
 
 function mergeSection(user: unknown, project: unknown): Record<string, unknown> | undefined {
@@ -682,7 +734,7 @@ export function layerConfigs(
   const project = projectRaw ?? {};
   const merged: Record<string, unknown> = { ...user, ...project };
 
-  for (const key of ["models", "tiers", "routing", "workers", "advisors"]) {
+  for (const key of ["models", "tiers", "routing", "session", "workers", "advisors"]) {
     const value = mergeSection(user[key], project[key]);
     if (value) merged[key] = value;
     else delete merged[key];
@@ -805,11 +857,11 @@ export function configPaths(cwd: string): { projectPath: string; userPath: strin
 
 export function loadConfig(cwd: string): WorkflowConfig {
   const { projectPath, userPath } = configPaths(cwd);
-  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath) : undefined;
-  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath) : undefined;
+  const warnings: string[] = [];
+  const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;
+  const projectRaw = existsSync(projectPath) ? normalizeRaw(parse(readFileSync(projectPath, "utf8")), projectPath, warnings) : undefined;
   if (!userRaw && !projectRaw) return { ...DEFAULTS, providers: { ...DEFAULTS.providers } };
   const where = projectRaw ? projectPath : userPath;
-  const warnings: string[] = [];
   const config = mergeConfig(layerConfigs(userRaw, projectRaw, warnings), where);
   validateResolvedConfig(config, where);
   // An old config lists tiers but no ticket tiers: /build then runs low, medium and high tickets on cheap, standard and premium.

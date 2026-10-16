@@ -40,8 +40,8 @@ providers:
 # A candidate is skipped when its provider is not signed in, an org allowlist excludes it,
 # its circuit is open, or its expected cost exceeds the remaining budget.
 # Who does what:
-#   cost-opt/auto chat turns    routing.sessionTier (premium: Opus 5.5)
-#   compaction and summaries    routing.directTier (cheap: Haiku 5.5), in the session
+#   the main chat session       session.model (Opus 5.5), a normal Pi model pinned at session start
+#   compaction summaries        session.compactionTier (cheap: Haiku 5.5), through session_before_compact
 #   standalone batch jobs       batch (Luna): one-line summaries of files a diff clip cut
 #   /build tickets              ticketLow / ticketMedium / ticketHigh by the ticket's difficulty; a failure
 #                               climbs ticketLow -> ticketMedium -> ticketHigh -> premium
@@ -55,14 +55,14 @@ tiers:
   classifier:
     - { provider: foundry, model: Microsoft-Decision-1, api: decisions, label: "Decision-1 (Foundry)" }
     - { provider: vercel, model: "typesafe-ai/jev", api: decisions, label: "jev (Vercel AI Gateway)" }
-  cheap:                # direct jobs inside the session: compaction and summaries
+  cheap:                # compaction summaries (session.compactionTier)
     - { provider: anthropic, model: claude-haiku-5-5 }
   batch:                # standalone jobs the extension runs by itself, outside any conversation (cut-file summaries)
     - { provider: openai, model: gpt-6-luna }
   standard:             # /plan and preview routes
     - { provider: anthropic, model: claude-sonnet-5-5 }
     - { provider: openai, model: "gpt-6.1-sol" }
-  premium:              # the main session, the last rung of the ticket ladder, and /review
+  premium:              # the last rung of the ticket ladder and /review
     - { provider: anthropic, model: claude-opus-5-5 }
   ticketLow:            # difficulty: low (mechanical or small and well specified)
     - { provider: xai, model: grok-4.7, label: "Grok 4.7 (SuperGrok)" }
@@ -79,8 +79,6 @@ routing:
   minConfidence: 0.75
   maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium
   maxTier: premium
-  sessionTier: premium  # every cost-opt/auto chat turn; set it and nothing is classified
-  directTier: cheap     # compaction and summaries
   reviewTier: premium   # the /review model pass; a failed part falls back to standard
   requirePremiumReviewFor:
     - auth
@@ -92,6 +90,12 @@ routing:
   # success rate. It stands for the time and retry cost of a failed attempt, so a $0 subscription model with a
   # poor record does not always win. 0 turns it off.
   attemptOverheadUsd: 0.02
+
+# The main chat session is a normal Pi model, not a router. Compaction summaries come from a cheap model.
+session:
+  model: anthropic/claude-opus-5-5   # provider/id; set at session start unless a /build ticket model is pending
+  pin: true                          # false leaves the model you picked with /model alone
+  compactionTier: cheap              # cheap, standard or premium; on any failure Pi compacts with the session model
 
 workers:
   tokenBudget: 8000

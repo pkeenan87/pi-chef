@@ -1,8 +1,8 @@
-import type { ExtensionAPI, ExtensionContext, ModelRoute } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, isToolCallEventType, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
-import { configPaths, loadConfig, setBillingResolver, type WorkflowConfig } from "./config.js";
+import { configPaths, DEFAULT_SESSION, loadConfig, parseModelRef, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
@@ -11,10 +11,7 @@ import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js"
 import { Workflow } from "./orchestrator/service.js";
 import { reviewPlan } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
-import { declaredLimits, routeVirtual, VIRTUAL_THINKING_LEVELS, type RouterRegistry, type RouterRequest, type RouterState } from "./router/virtual.js";
-import { fallbackClassification } from "./router/classify.js";
-import type { Availability } from "./router/select.js";
-import { ACCOUNT_PROVIDERS, type CommandResult, type TokenUsage } from "./domain.js";
+import type { CommandResult, TokenUsage } from "./domain.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { SEARCH_MODEL } from "./tools/web-search.js";
@@ -152,8 +149,8 @@ function showPlanMessage(ctx: CommandContext, text: string, customType = "cost-p
 }
 
 /**
- * The model to put back after /build opens a new session (Pi starts it on the default model, which drops
- * cost-opt/auto). Kept on globalThis because the new session may load a fresh copy of this module.
+ * The model /build wants a fresh session to start on (Pi starts it on the default model). Kept on globalThis because the
+ * new session may load a fresh copy of this module.
  */
 const RESTORE_MODEL = Symbol.for("pi-cost-router.restore-model");
 type ModelRef = { provider: string; id: string };
@@ -186,6 +183,88 @@ function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: Extensio
   const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
   if (!model || typeof pi.setModel !== "function") return void warn();
   return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
+}
+
+/**
+ * Puts the session on `session.model` when pinning is on and the session started on another model. Not used while a
+ * /build model is pending (that slot wins). One warning when the model is unknown or Pi refuses the switch.
+ */
+function pinSessionModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): Promise<void> | undefined {
+  const session = (active ?? tryWorkflowFor(ctx.cwd))?.config.session ?? DEFAULT_SESSION;
+  const wanted = session.pin ? parseModelRef(session.model) : undefined;
+  if (!wanted) return undefined;
+  const current = (ctx as { model?: ModelRef }).model;
+  if (current?.provider === wanted.provider && current.id === wanted.id) return undefined;
+  const warn = () => {
+    if (ctx.hasUI) ctx.ui.notify(`Could not switch to ${session.model}. Run /model ${session.model}, or set session.pin: false to keep your own model.`, "warning");
+  };
+  const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
+  if (!model || typeof pi.setModel !== "function") return void warn();
+  return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
+}
+
+/** Set when the soft-budget notice has been shown; reset by `session_start`. */
+let softBudgetShown = false;
+
+/**
+ * Pi's `session_before_compact` hook: the summary comes from `session.compactionTier` (Haiku by default) instead of the
+ * session model. Returns undefined, and so lets Pi compact as usual, on any problem or a hard budget. Never throws.
+ */
+async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<SessionBeforeCompactResult | undefined> {
+  try {
+    const workflow = active ?? tryWorkflowFor(cwd);
+    const registry = ctx.modelRegistry as unknown as PiRegistryLike | undefined;
+    if (!workflow || !registry || event.signal?.aborted) return undefined;
+    const { preparation } = event;
+    const messages = preparation.isSplitTurn ? [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages] : preparation.messagesToSummarize;
+    const conversation = serializeConversation(convertToLlm(messages));
+    if (!conversation.trim()) return undefined;
+    const apiKeyFallback = (provider: string) => workflow.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
+    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback), {
+      conversation,
+      previousSummary: preparation.previousSummary,
+      customInstructions: event.customInstructions,
+      signal: event.signal,
+    });
+    if (!result) return undefined;
+    const { input, output, cacheRead, cacheWrite } = result.usage;
+    const [i, o, r, w] = [input ?? 0, output ?? 0, cacheRead ?? 0, cacheWrite ?? 0];
+    return {
+      compaction: {
+        summary: result.summary,
+        firstKeptEntryId: preparation.firstKeptEntryId,
+        tokensBefore: preparation.tokensBefore,
+        usage: { input: i, output: o, cacheRead: r, cacheWrite: w, totalTokens: i + o + r + w, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: result.record.actualUsd ?? 0 } },
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pi's `input` hook, the budget gate. A hard budget stops a prompt before it reaches the model; commands (`/cost`,
+ * `/status`, ...) always pass, and so does input an extension sent itself (/build and /plan check the budget on their own).
+ * A soft budget shows one notice per session.
+ */
+function gateInput(event: InputEvent, ctx: ExtensionContext): InputEventResult {
+  const proceed = { action: "continue" as const };
+  try {
+    if (event.source === "extension" || event.text.trimStart().startsWith("/")) return proceed;
+    const workflow = active ?? tryWorkflowFor(cwd);
+    const status = workflow?.budgetStatus(workflow.activeTaskId());
+    if (status === "hard") {
+      if (ctx.hasUI) ctx.ui.notify("Task or daily budget is exhausted. Run /cost for details.", "warning");
+      return { action: "handled" };
+    }
+    if (status === "soft" && !softBudgetShown) {
+      softBudgetShown = true;
+      if (ctx.hasUI) ctx.ui.notify("Budget warning: spend is near the task or daily limit. Run /cost for details.", "warning");
+    }
+  } catch {
+    /* a gate that cannot read the budget must not stop the user typing */
+  }
+  return proceed;
 }
 
 /**
@@ -245,7 +324,7 @@ function restoreToolsBeforePlan(ctx: ExtensionContext): void {
  */
 function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: BuildDriver } {
   let live: CommandContext = ctx;
-  // Plain data captured before the first replacement: the model the user was on (normally cost-opt/auto).
+  // Plain data captured before the first replacement: the model the user was on.
   const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
   const getWorkflow = () => workflowFor(live.cwd, live);
   const driver: BuildDriver = {
@@ -292,13 +371,21 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
       }
     },
     async finish() {
-      if (!original) return;
+      // With pinning on the session belongs on session.model; otherwise it goes back to the model the user was on.
+      let target = original;
+      try {
+        const session = getWorkflow().config.session;
+        if (session.pin) target = parseModelRef(session.model) ?? original;
+      } catch {
+        /* an unreadable config: put the user's model back */
+      }
+      if (!target) return;
       const now = (live as { model?: ModelRef }).model;
-      if (now?.provider === original.provider && now.id === original.id) return;
-      const model = live.modelRegistry?.find(original.provider, original.id);
+      if (now?.provider === target.provider && now.id === target.id) return;
+      const model = live.modelRegistry?.find(target.provider, target.id);
       const set = restoreSlot[SET_MODEL];
       const ok = model && set ? await set(model as never).catch(() => false) : false;
-      if (!ok && live.hasUI) live.ui.notify(`Run /model ${original.provider}/${original.id} to switch back to your model.`, "warning");
+      if (!ok && live.hasUI) live.ui.notify(`Run /model ${target.provider}/${target.id} to switch back to your model.`, "warning");
     },
   };
   return { getWorkflow, driver };
@@ -368,15 +455,23 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     syncPlanTools(pi);
     const progress = active?.planningStatus();
     if (progress && ctx.hasUI) ctx.ui.setStatus("cost-plan", progress);
-    registerRouter(pi, { cwd: ctx.cwd, modelRegistry: ctx.modelRegistry });
-    // After /build's new session, put back the model the previous session used (normally cost-opt/auto).
+    softBudgetShown = false;
+    try {
+      // Foundry, Vercel, and local models must be in Pi's registry before anything can select them.
+      syncProviders(refreshConfig(ctx.cwd).config);
+    } catch {
+      /* a bad config is reported by the commands; it must not stop the session from starting */
+    }
     restoreSlot[SET_MODEL] = typeof pi.setModel === "function" ? (model) => pi.setModel(model) : undefined;
     try {
-      restoreSlot[RESTORE_DONE] = restoreModel(pi, ctx);
+      // A model /build routed for its ticket wins; otherwise the session goes onto session.model (when pinned).
+      restoreSlot[RESTORE_DONE] = restoreSlot[RESTORE_MODEL] ? restoreModel(pi, ctx) : pinSessionModel(pi, ctx);
     } catch {
       /* the model stays as Pi chose it; /model switches it */
     }
   });
+  pi.on("session_before_compact", (event, ctx) => compactWithCheapTier(event, ctx));
+  pi.on("input", (event, ctx) => gateInput(event, ctx));
   pi.on("session_shutdown", () => {
     active?.dispose();
     active = undefined;
@@ -448,79 +543,6 @@ function tryWorkflowFor(root: string): Workflow | undefined {
   }
 }
 
-/** Where the router resolves config and the workflow: the launch cwd until a session starts, then the session's. */
-type RouterHost = { cwd: string; modelRegistry?: ExtensionContext["modelRegistry"] };
-
-function registerRouter(pi: ExtensionAPI, fallback: RouterHost): void {
-  try {
-    // Foundry, Vercel, and local models must be in Pi's registry before the router can return them.
-    syncProviders(refreshConfig(fallback.cwd).config);
-  } catch {
-    /* a bad config is reported by the commands; it must not stop the session from starting */
-  }
-  // Reloaded whenever either config file changes, so edits apply without restarting Pi.
-  const configFor = (): WorkflowConfig => {
-    const { config, changed } = refreshConfig(fallback.cwd);
-    if (changed) syncProviders(config);
-    return config;
-  };
-  let limits: { contextWindow?: number; maxTokens?: number } = {};
-  try {
-    limits = declaredLimits(refreshConfig(fallback.cwd).config, (provider, id) => fallback.modelRegistry?.find(provider, id) as { contextWindow?: number; maxTokens?: number } | undefined);
-  } catch {
-    /* limits stay unknown */
-  }
-  pi.registerVirtualModel<RouterState>({
-    provider: "cost-opt",
-    id: "auto",
-    name: "Cost-optimized auto",
-    thinkingLevels: [...VIRTUAL_THINKING_LEVELS],
-    ...limits,
-    async route(request, ctx) {
-      type PiModel = (typeof request)["model"];
-      const registry = ctx.modelRegistry as unknown as RouterRegistry<PiModel>;
-      // Build the workflow if needed so the daily limit applies even before any task exists.
-      const workflow = currentWorkflow() ?? tryWorkflowFor(fallback.cwd);
-      const result = await routeVirtual<PiModel>(request as unknown as RouterRequest<PiModel>, {
-        registry,
-        now: () => workflow?.now() ?? new Date(),
-        planning: () => workflow?.planningStage() !== undefined,
-        classify: async (text) => (workflow ? workflow.classifyChat(text) : fallbackClassification(text, "virtual_route")),
-        async snapshot() {
-          const taskId = workflow?.activeTaskId();
-          // Provider readiness: the auth probe, with the registry as the truth for account-login providers.
-          const availability: Availability = workflow ? await workflow.availability() : {};
-          const allowed = configFor().providers;
-          for (const provider of ACCOUNT_PROVIDERS) {
-            const ok = registry.getAvailable().some((item) => item.provider === provider && (registry.isUsingOAuth?.(item) || allowed[provider]?.apiKeyFallback === true));
-            availability[provider] = { ok, detail: "no account login" };
-          }
-          return {
-            config: configFor(),
-            table: workflow?.store.readMetrics() ?? {},
-            availability,
-            budget: workflow ? workflow.checkBudget(taskId) : "ok",
-            budgetRemainingUsd: workflow?.budgetRemainingUsd(taskId),
-            quota: workflow?.quotaUsage(),
-          };
-        },
-        recordFailure: (input) => workflow?.recordChatFailure(input),
-        // The footer shows the routed model natively; chat turns only add a route event to the active task's log.
-        onRoute: async (event) => {
-          const taskId = workflow?.activeTaskId();
-          if (workflow && taskId) await workflow.announce(taskId, event.purpose, event, () => undefined);
-        },
-        // Pi reads the Vercel token from the env file, so make sure the CLI has refreshed it first.
-        apiKeyFallback: (provider) => configFor().providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true,
-        prepare: async (candidate) => {
-          if (candidate.provider === "vercel") await runtime?.vercel?.getToken();
-        },
-      });
-      return result as unknown as ModelRoute<RouterState>;
-    },
-  });
-}
-
 /** Registers web_search and web_fetch. Search is budget-gated and ledgered through the active workflow. */
 export function registerExtensionTools(pi: Pick<ExtensionAPI, "registerTool">, overrides: Partial<WebToolsDeps> = {}): void {
   registerPlanTools(pi, currentWorkflow);
@@ -543,10 +565,10 @@ export function registerExtensionTools(pi: Pick<ExtensionAPI, "registerTool">, o
 export default function extension(pi: ExtensionAPI): void {
   registerWorkflow(pi);
   registerExtensionTools(pi);
-  // Register cost-opt/auto at load time too, so `--model cost-opt/auto`, settings defaults, and `--list-models`
-  // resolve it before any session starts. session_start registers it again with the session's cwd and registry.
+  // Register Foundry, Vercel, and local models at load time too, so `--model` and `--list-models` resolve them
+  // before any session starts. session_start registers them again with the session's cwd.
   try {
-    registerRouter(pi, { cwd: process.cwd() });
+    syncProviders(refreshConfig(process.cwd()).config);
   } catch {
     /* session_start retries; a bad config is reported by the commands */
   }
