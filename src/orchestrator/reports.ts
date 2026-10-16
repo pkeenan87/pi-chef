@@ -198,7 +198,9 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
   const markdown = [
     `## Status · ${label.line}`,
     "",
-    ...mdTable(["", ""], pairs.map(([key, value]) => [key, cell(value, 400)])),
+    "| | |",
+    "| --- | --- |",
+    ...pairs.map(([key, value]) => `| ${key} | ${cell(value, 400)} |`),
     ...(tickets.length > 0 ? ["", ...tickets] : []),
     "",
     "### Routing",
