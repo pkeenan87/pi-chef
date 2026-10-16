@@ -65,3 +65,30 @@ describe("built-in defaults never fail validation", () => {
     expect(() => parseConfig(`${FOUNDRY.replace("routeStyle: v1", "deployments: {}")}`)).not.toThrow();
   });
 });
+
+describe("a provider block without type", () => {
+  let home: string;
+  let project: string;
+  let priorHome: string | undefined;
+  beforeEach(() => {
+    priorHome = process.env.HOME;
+    home = mkdtempSync(path.join(tmpdir(), "pi-home-"));
+    project = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
+    process.env.HOME = home;
+    mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+  });
+  afterEach(() => {
+    process.env.HOME = priorHome;
+  });
+
+  it("still defines foundry, vercel, and local (only account providers need a type to count)", () => {
+    writeFileSync(path.join(home, ".pi", "agent", "chef.yaml"), 'providers:\n  foundry: { endpoint: "https://res.services.ai.azure.com", routeStyle: v1, audience: "https://ai.azure.com" }\n  anthropic: { apiKeyFallback: true }\n');
+    const config = loadConfig(project);
+    expect(config.providers.foundry?.endpoint).toBe("https://res.services.ai.azure.com");
+    expect(config.providers.foundry?.type).toBe("azure-foundry");
+    // An account provider with no type is only an adjustment and is not a provider of its own.
+    expect(config.providers.anthropic).toBeUndefined();
+    const calls: string[] = [];
+    expect(registerChatProviders({ registerProvider: (name) => void calls.push(name) }, config, {}, {})).toContain("foundry");
+  });
+});

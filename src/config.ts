@@ -13,7 +13,11 @@ export interface ProviderConfig {
   apiVersion?: string;
   audience?: string;
   api?: "openai-responses" | "openai-completions" | "azure-openai-responses";
-  deployments?: { classifier?: string; reasoning?: string; cheap?: string };
+  /**
+   * Foundry: maps a model name used in `tiers` (for example gpt-6.1-sol) to your Azure deployment name. A model with
+   * no entry is called by its own name. Pi is registered with the deployment name; routing shows `model → deployment`.
+   */
+  deployments?: Record<string, string>;
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
@@ -411,16 +415,29 @@ function warnOnce(warnings: string[], message: string): void {
  * Removes settings from earlier versions, each with one warning, so an old file still loads. The cost-opt/auto
  * virtual model, its router settings, and the Decisions classifier are gone.
  */
+const LEGACY_DEPLOYMENT_KEYS = ["cheap", "reasoning", "classifier"];
+
 function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = { ...raw };
   if (isRecord(out.providers)) {
     const providers: Record<string, unknown> = {};
     for (const [name, provider] of Object.entries(out.providers)) {
-      if (isRecord(provider) && "decisionsPath" in provider) {
+      let current: unknown = provider;
+      if (isRecord(current) && "decisionsPath" in current) {
         warnOnce(warnings, `providers.${name}.decisionsPath is no longer used; the Decisions classifier is gone.`);
-        const { decisionsPath: _gone, ...rest } = provider;
-        providers[name] = rest;
-      } else providers[name] = provider;
+        const { decisionsPath: _gone, ...rest } = current;
+        current = rest;
+      }
+      if (name === "foundry" && isRecord(current) && isRecord(current.deployments)) {
+        const kept: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(current.deployments)) {
+          if (LEGACY_DEPLOYMENT_KEYS.includes(key)) {
+            warnOnce(warnings, `providers.foundry.deployments.${key} is ignored: deployments now maps a Foundry model to your deployment name, for example { "gpt-6.1-sol": "my-sol" }. Name the model under tiers.`);
+          } else kept[key] = value;
+        }
+        current = { ...current, deployments: kept };
+      }
+      providers[name] = current;
     }
     out.providers = providers;
   }
@@ -514,6 +531,15 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
     }
     if (typeof provider.baseUrl === "string" && !isHttpsUrl(provider.baseUrl) && !(name === "local" && isLoopbackHttpUrl(provider.baseUrl))) {
       invalid(where, `providers.${name}.baseUrl`, name === "local" ? "must be an https URL, or http only for localhost" : "must be an https URL");
+    }
+    if (provider.deployments !== undefined) {
+      if (name !== "foundry") invalid(where, `providers.${name}.deployments`, "applies only to foundry");
+      if (!isRecord(provider.deployments)) invalid(where, `providers.${name}.deployments`, "must map a model name to a deployment name");
+      for (const [model, deployment] of Object.entries(provider.deployments)) {
+        if (typeof deployment !== "string" || !DEPLOYMENT_NAME.test(deployment)) {
+          invalid(where, `providers.${name}.deployments.${model}`, "must be a deployment name (letters, digits, dot, underscore, hyphen)");
+        }
+      }
     }
     if (provider.routeStyle !== undefined && provider.routeStyle !== "v1" && provider.routeStyle !== "deployments") {
       invalid(where, `providers.${name}.routeStyle`, 'must be "v1" or "deployments"');
@@ -640,6 +666,8 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = []): R
   return out;
 }
 
+const DEPLOYMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 const MODEL_KEYS = ["cheap", "standard", "premium"] as const;
 
 /**
@@ -735,6 +763,7 @@ function mergeConfig(raw: unknown, where: string, warnings: string[] = []): Work
   const norm = normalizeRaw(raw, where, warnings);
   const config = build(norm);
   applyLegacyModels(norm, config, warnings);
+  applyDeploymentPricing(config, warnings);
   // A standalone document that spells out both providers and tiers must be self-consistent.
   // Partial overlays are cross-checked after layering in loadConfig.
   if (isRecord(norm.providers) && Object.keys(norm.providers).length > 0 && (isRecord(norm.models) || isRecord(norm.tiers))) {
@@ -761,6 +790,8 @@ function mergeSection(user: unknown, project: unknown): Record<string, unknown> 
  * untrusted (it ships with a cloned repo), so these come from the user config only. The one exception
  * is a provider the user did not define, where a project may repeat the built-in default.
  */
+const DEFAULT_PROVIDER_TYPE: Record<string, string> = { foundry: "azure-foundry", vercel: "vercel-ai-gateway", local: "openai-compatible" };
+
 const USER_ONLY_PROVIDER_FIELDS = ["baseUrl", "endpoint", "apiKeyEnv", "audience", "projectDir", "envFile"] as const;
 
 function isBuiltinDefault(provider: string, field: string, value: unknown): boolean {
@@ -858,10 +889,18 @@ export function layerConfigs(
     const u = isRecord(user.providers) ? user.providers : {};
     const p = isRecord(project.providers) ? project.providers : {};
     for (const name of new Set([...Object.keys(u), ...Object.keys(p)])) {
-      const entry = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
-      // A user entry with no type only adjusts a provider defined elsewhere (for example apiKeyFallback). With
-      // nothing under it, it is not a provider of its own.
-      if (isRecord(entry) && entry.type === undefined) continue;
+      let entry = mergeSection(u[name], restrictProject(name, u[name], p[name], warnings)) ?? p[name] ?? u[name];
+      if (isRecord(entry) && isRecord(u[name]) && isRecord(p[name]) && isRecord(u[name].deployments) && isRecord(p[name].deployments)) {
+        // Deployment names merge per model, the project winning, so a project can rename one target without dropping the user's others.
+        entry = { ...entry, deployments: { ...u[name].deployments, ...p[name].deployments } };
+      }
+      if (isRecord(entry) && entry.type === undefined) {
+        // Only an account provider (openai, anthropic, xai) with no type is an adjustment such as apiKeyFallback and is
+        // not a provider of its own. Foundry, Vercel, and local have no other form, so a missing type is filled in.
+        const defaultType = DEFAULT_PROVIDER_TYPE[name];
+        if (!defaultType) continue;
+        entry = { ...entry, type: defaultType };
+      }
       providers[name] = entry;
     }
     merged.providers = providers;
@@ -1126,6 +1165,67 @@ export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandi
   const explicit = config.tiers[tier];
   if (explicit) return explicit.filter((candidate) => candidate.model !== "");
   return DEFAULT_TIERS[tier];
+}
+
+/** The Azure deployment a Foundry model is called through: its `deployments` entry, else the model name itself. */
+export function foundryDeployment(config: WorkflowConfig, model: string): string {
+  const mapped = config.providers.foundry?.deployments?.[model];
+  return mapped && mapped !== "" ? mapped : model;
+}
+
+/** The model name a Foundry deployment stands for (reverse of `foundryDeployment`); the input when no entry maps to it. */
+export function foundryModelOf(config: WorkflowConfig, deployment: string): string {
+  for (const [model, mapped] of Object.entries(config.providers.foundry?.deployments ?? {})) if (mapped === deployment) return model;
+  return deployment;
+}
+
+/** The model id Pi knows a candidate by: the deployment name for Foundry, the model itself otherwise. */
+export function piModelId(config: WorkflowConfig, provider: string, model: string): string {
+  return provider === "foundry" ? foundryDeployment(config, model) : model;
+}
+
+/** `provider/model`, plus ` → deployment` when a Foundry mapping applies. Used in route events, labels, /status, and stops. */
+export function modelLabel(config: WorkflowConfig, provider: string, model: string): string {
+  const id = piModelId(config, provider, model);
+  return id === model ? `${provider}/${model}` : `${provider}/${model} → ${id}`;
+}
+
+const VERSION_DIGITS = /\d+/g;
+const MODEL_FAMILIES = ["gpt", "grok", "claude", "gemini", "llama", "mistral", "qwen", "deepseek", "phi"];
+
+/** Heuristic: the deployment name reads like a different model or version than the key it is mapped from. */
+function looksLikeDifferentModel(model: string, deployment: string): boolean {
+  const wanted = model.match(VERSION_DIGITS) ?? [];
+  const given = deployment.match(VERSION_DIGITS) ?? [];
+  if (given.length > 0 && !wanted.every((digits, index) => given[index] === digits)) return true;
+  const family = (name: string) => MODEL_FAMILIES.find((item) => new RegExp(`(^|[^a-z])${item}([^a-z]|$)`, "i").test(name));
+  const a = family(model);
+  const b = family(deployment);
+  return !!a && !!b && a !== b;
+}
+
+/**
+ * Foundry prices follow the deployment first, then the model: a pricing row for the deployment name wins and is also
+ * used for the model name; otherwise the model's row is also used for the deployment name. Pi reports usage under the
+ * deployment name, so both names must price the same. Warns when a mapped deployment's name suggests a different model.
+ */
+function applyDeploymentPricing(config: WorkflowConfig, warnings: string[]): void {
+  const map = config.providers.foundry?.deployments;
+  if (!map) return;
+  let rows = config.pricing;
+  for (const [model, deployment] of Object.entries(map)) {
+    if (model === deployment) continue;
+    const depRows = rows.filter((row) => row.provider === "foundry" && row.model === deployment);
+    const modelRows = rows.filter((row) => row.provider === "foundry" && row.model === model);
+    if (depRows.length > 0) rows = [...rows.filter((row) => !modelRows.includes(row)), ...depRows.map((row) => ({ ...row, model }))];
+    else {
+      if (modelRows.length > 0) rows = [...rows, ...modelRows.map((row) => ({ ...row, model: deployment }))];
+      if (looksLikeDifferentModel(model, deployment)) {
+        warnOnce(warnings, `providers.foundry.deployments: ${deployment} is mapped from ${model} but its name suggests a different model or version. Add a pricing row for foundry/${deployment} so its cost is right.`);
+      }
+    }
+  }
+  config.pricing = rows;
 }
 
 /**

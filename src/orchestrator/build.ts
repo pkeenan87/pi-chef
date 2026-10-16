@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { fromMicroUsd, toMicroUsd } from "../config.js";
+import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
 import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
@@ -438,7 +438,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     kind: "chunk",
     ticket,
     prompt,
-    model: { provider: decision.provider, id: decision.model },
+    model: { provider: decision.provider, id: piModelId(ctx.config, decision.provider, decision.model) },
     tier: decision.tier,
     candidate: decision.candidate ? { provider: decision.provider, model: decision.model } : undefined,
     previous: run,

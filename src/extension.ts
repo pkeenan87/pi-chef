@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, Sess
 import { convertToLlm, isToolCallEventType, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync } from "node:fs";
-import { configPaths, DEFAULT_SESSION, loadConfig, parseModelRef, setBillingResolver, type WorkflowConfig } from "./config.js";
+import { configPaths, DEFAULT_SESSION, loadConfig, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
@@ -109,7 +109,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
     const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
     active.bind({
-      chat: registry ? createRegistryChat(registry, apiKeyFallback) : undefined,
+      chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
       status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef", text) : undefined,
       planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef-plan", text) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
@@ -229,7 +229,7 @@ async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: Exten
     const conversation = serializeConversation(convertToLlm(messages));
     if (!conversation.trim()) return undefined;
     const apiKeyFallback = (provider: string) => workflow.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
-    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback), {
+    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(workflow.config, provider, model)), {
       conversation,
       previousSummary: preparation.previousSummary,
       customInstructions: event.customInstructions,

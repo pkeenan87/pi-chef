@@ -20,7 +20,6 @@ providers:
   foundry:
     type: azure-foundry
     auth: azure-cli
-    deployments: { classifier: c, reasoning: r, cheap: c }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:1/v1", model: m }
 `;
 
@@ -311,7 +310,7 @@ describe("loadConfig layering", () => {
     writeProject(`providers:
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, baseUrl: "https://ai-gateway.vercel.sh/v1", projectDir: "." }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: m }
-  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", deployments: { cheap: c, reasoning: r } }
+  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com" }
 models: { cheap: local, standard: local, premium: local }
 `);
     const config = loadConfig(project);

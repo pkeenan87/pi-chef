@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { WorkflowConfig } from "../config.js";
-import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeploymentApis, tierCandidates } from "../config.js";
+import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeployment, foundryDeploymentApis, tierCandidates } from "../config.js";
 import { redact } from "../redact.js";
 import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from "../domain.js";
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
@@ -129,7 +129,8 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
     for (const candidate of tierCandidates(config, tier)) {
       if (!candidate.model) continue;
       const list = chatModels.get(candidate.provider) ?? [];
-      if (!list.some((item) => item.model === candidate.model)) list.push(candidate);
+      const sameTarget = (item: TierCandidate) => (candidate.provider === "foundry" ? foundryDeployment(config, item.model) === foundryDeployment(config, candidate.model) : item.model === candidate.model);
+      if (!list.some(sameTarget)) list.push(candidate);
       chatModels.set(candidate.provider, list);
     }
   }
@@ -152,9 +153,10 @@ export function registerChatProviders(pi: RegisterApi, config: WorkflowConfig, r
         api: providerApi,
         apiKey: `!az account get-access-token --resource ${shellQuote(audience)} --query accessToken -o tsv`,
         // Per-model api only where it differs from the provider's. The registry chat resolves the api from here.
+        // The id Pi calls is the Azure deployment name (the model name unless providers.foundry.deployments maps it).
         models: foundryModels.map((item) => {
           const api = apis.get(item.model);
-          return modelEntry(item.model, item.label, api && api !== providerApi ? api : undefined);
+          return modelEntry(foundryDeployment(config, item.model), item.label, api && api !== providerApi ? api : undefined);
         }),
       });
       registered.push("foundry");

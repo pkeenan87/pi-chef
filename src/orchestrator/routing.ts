@@ -1,4 +1,4 @@
-import { tierCandidates } from "../config.js";
+import { modelLabel, tierCandidates } from "../config.js";
 import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { decideRoute } from "../router/policy.js";
 import type { Availability } from "../router/select.js";
@@ -52,18 +52,18 @@ export async function announce(
   setStatus: (text: string) => void = (text) => ctx.status?.(text),
 ): Promise<void> {
   const why = (decision.blocked ?? decision.selectionReason ?? "").split(";")[0]!.slice(0, 80);
-  const target = decision.provider === "none" ? "literal edits" : `${decision.provider}/${decision.model}`;
+  const target = decision.provider === "none" ? "literal edits" : modelLabel(ctx.config, decision.provider, decision.model);
   setStatus(`${decision.tier} → ${target}${why ? ` · ${why}` : ""}`);
   if (!taskId) return;
   const considered = (decision.considered ?? []).map(
-    (item) => `${item.provider}/${item.model}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
+    (item) => `${modelLabel(ctx.config, item.provider, item.model)}: ${item.excludedReason ? `excluded (${item.excludedReason})` : item.score !== undefined ? `$${item.score.toFixed(4)}/success${item.quotaUsd ? ` (incl. $${item.quotaUsd.toFixed(4)} quota shadow)` : ""}` : "price unknown"}`,
   );
   await ctx.store.appendRoute(taskId, { purpose, tier: decision.tier, provider: decision.provider, model: decision.model, reason: why, considered }, iso(ctx));
 }
 
 /** Who does what under the current config: the session model, compaction, review, and tickets, with their chat models. */
 export function routingSummary(ctx: WorkflowContext): { session: string; compaction: string; batch: string; review: string; tickets: { low: string[]; medium: string[]; high: string[]; then: string[] } } {
-  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).map((item) => `${item.provider}/${item.model}`);
+  const models = (tier: Tier): string[] => tierCandidates(ctx.config, tier).map((item) => modelLabel(ctx.config, item.provider, item.model));
   const { reviewTier } = ctx.config.routing;
   const { model, pin, compactionTier } = ctx.config.session;
   return {

@@ -24,11 +24,17 @@ export type ChatFn = (candidate: { provider: ProviderId; model: string }, reques
  * Chat through Pi's model registry, which owns authentication. OpenAI, Anthropic, and xAI calls are refused
  * unless the registry is using an account login for that model, or the user allowed that provider's API key.
  */
-export function createRegistryChat(registry: PiRegistryLike, apiKeyFallback: (provider: string) => boolean = () => false): ChatFn {
+export function createRegistryChat(
+  registry: PiRegistryLike,
+  apiKeyFallback: (provider: string) => boolean = () => false,
+  /** The id Pi knows a candidate by (a Foundry deployment name); the model name when omitted. */
+  piModelId: (provider: string, model: string) => string = (_provider, model) => model,
+): ChatFn {
   return async (candidate, request) => {
-    const model = registry.find(candidate.provider, candidate.model);
+    const piId = piModelId(candidate.provider, candidate.model);
+    const model = registry.find(candidate.provider, piId);
     if (!model) {
-      throw new ProviderCallError("config", `Model ${candidate.provider}/${candidate.model} is not registered in this Pi session.`);
+      throw new ProviderCallError("config", `Model ${candidate.provider}/${piId}${piId === candidate.model ? "" : ` (mapped from ${candidate.model})`} is not registered in this Pi session.`);
     }
     if (isAccountProvider(candidate.provider) && !registry.isUsingOAuth?.(model as never) && !apiKeyFallback(candidate.provider)) {
       throw new WorkflowError("API_KEY_REJECTED", `No ${candidate.provider} account login is available. Run /login ${candidate.provider}, or allow its API key with providers.${candidate.provider}.apiKeyFallback in the user config.`);
