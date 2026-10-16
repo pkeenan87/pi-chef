@@ -961,25 +961,51 @@ export function layerConfigs(
   return merged;
 }
 
-/** Config files that loadConfig reads, so callers can watch them for changes. */
-export function configPaths(cwd: string): { projectPath: string; userPath: string; legacyUserPath: string } {
+/** First existing of `<base>.yaml` / `<base>.yml`; `.yaml` when neither exists. `ignored` is the `.yml` that lost to an existing `.yaml`. */
+function pickYaml(base: string): { path: string; exists: boolean; ignored?: string } {
+  const yaml = `${base}.yaml`;
+  const yml = `${base}.yml`;
+  if (existsSync(yaml)) return { path: yaml, exists: true, ignored: existsSync(yml) ? yml : undefined };
+  if (existsSync(yml)) return { path: yml, exists: true };
+  return { path: yaml, exists: false };
+}
+
+/** Config files that loadConfig reads, so callers can watch them for changes. `watch` lists every candidate file. */
+export function configPaths(cwd: string): { projectPath: string; userPath: string; legacyUserPath: string; watch: string[] } {
+  const agent = path.join(homedir(), ".pi", "agent");
+  const project = path.join(cwd, ".pi-workflows", "config");
+  const user = path.join(agent, "chef");
+  const legacy = path.join(agent, "cost-workflow");
   return {
-    projectPath: path.join(cwd, ".pi-workflows", "config.yaml"),
-    userPath: path.join(homedir(), ".pi", "agent", "chef.yaml"),
-    legacyUserPath: path.join(homedir(), ".pi", "agent", "cost-workflow.yaml"),
+    projectPath: pickYaml(project).path,
+    userPath: pickYaml(user).path,
+    legacyUserPath: pickYaml(legacy).path,
+    watch: [project, user, legacy].flatMap((base) => [`${base}.yaml`, `${base}.yml`]),
   };
+}
+
+/** `~/...` for paths under the home directory, so messages do not print a user name. */
+export function displayPath(file: string): string {
+  const home = homedir();
+  return file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
 }
 
 export function loadConfig(cwd: string): WorkflowConfig {
   const { projectPath, userPath: newUserPath, legacyUserPath } = configPaths(cwd);
   const warnings: string[] = [];
+  const agent = path.join(homedir(), ".pi", "agent");
+  for (const base of [path.join(cwd, ".pi-workflows", "config"), path.join(agent, "chef"), path.join(agent, "cost-workflow")]) {
+    const { path: used, ignored } = pickYaml(base);
+    if (ignored) warnings.push(`${displayPath(ignored)} is ignored because ${displayPath(used)} exists; delete one of them.`);
+  }
   // The user file used to be cost-workflow.yaml: still read when it is the only one, and say to rename it.
   let userPath = newUserPath;
   if (existsSync(legacyUserPath)) {
-    if (existsSync(newUserPath)) warnings.push("~/.pi/agent/cost-workflow.yaml is ignored because ~/.pi/agent/chef.yaml exists; delete the old file.");
+    const legacyName = path.basename(legacyUserPath);
+    if (existsSync(newUserPath)) warnings.push(`~/.pi/agent/${legacyName} is ignored because ~/.pi/agent/${path.basename(newUserPath)} exists; delete the old file.`);
     else {
       userPath = legacyUserPath;
-      warnings.push("Rename ~/.pi/agent/cost-workflow.yaml to chef.yaml");
+      warnings.push(`Rename ~/.pi/agent/${legacyName} to chef.yaml`);
     }
   }
   const userRaw = existsSync(userPath) ? normalizeRaw(parse(readFileSync(userPath, "utf8")), userPath, warnings) : undefined;

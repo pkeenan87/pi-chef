@@ -57,8 +57,8 @@ function stamp(file: string): string {
  * files are invalid; the previous good config is kept so a later fix applies without a restart.
  */
 function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
-  const { projectPath, userPath, legacyUserPath } = configPaths(root);
-  const key = `${stamp(projectPath)}|${stamp(userPath)}|${stamp(legacyUserPath)}`;
+  // Every candidate (.yaml and .yml) is stamped, so adding, removing, or editing whichever file is used reloads.
+  const key = configPaths(root).watch.map(stamp).join("|");
   if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
   const config = loadConfig(root);
   const changed = !!loaded && loaded.root === root;
