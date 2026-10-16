@@ -3,7 +3,7 @@ import { remember } from "./budget.js";
 import { iso, knownZero, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
-import { applyOverlap, assertGraph, forNewPlan, PLAN_FILE, renderPlanReview } from "./plan.js";
+import { applyOverlap, assertGraph, forNewPlan, PLAN_FILE, renderPlanReview, ticketsTableLines } from "./plan.js";
 import { suggestAdvisor, announce } from "./routing.js";
 import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validateTickets, type TicketCheck } from "./tickets.js";
 
@@ -56,14 +56,14 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
 export function previewPlan(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): string {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
-  return renderPlanReview(draftFor(ctx, task, tickets, iso(ctx), advisorReview), ctx.store.readText(task.taskId, SPEC_FILE));
+  return renderPlanReview(draftFor(ctx, task, tickets, iso(ctx), advisorReview), ctx.store.readText(task.taskId, SPEC_FILE), ctx.config);
 }
 
 /**
  * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
  * Plan approval is still required before /build.
  */
-export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): Promise<{ plan: PlanDocument; files: string[]; markdown: string }> {
+export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview): Promise<{ plan: PlanDocument; files: string[]; markdown: string; table: string }> {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
   const at = iso(ctx);
@@ -73,7 +73,7 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
     move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, approvedVersion: undefined, publishApproved: false }, "AWAITING_PLAN_APPROVAL", at),
   );
   const files = ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
-  const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE));
+  const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE), ctx.config);
   ctx.store.writeText(task.taskId, "plan.json", JSON.stringify(draft, null, 2));
   ctx.store.writeText(task.taskId, PLAN_FILE, markdown);
   if (routing) {
@@ -82,5 +82,5 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
   }
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
-  return { plan: draft, files, markdown };
+  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config).join("\n") };
 }
