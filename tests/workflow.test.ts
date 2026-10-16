@@ -49,7 +49,7 @@ describe("workflow", () => {
     const cwd = await tempRepo();
     const secret = "sk-live-SECRETVALUE123456";
     const app = workflow(cwd);
-    await app.plan(`Rotate the ${secret} in Neo`);
+    await app.plan(`Rotate the ${secret} in the ingest parser`);
     const root = path.join(cwd, ".pi-workflows");
     const blob = walk(root).map((file) => readFileSync(file, "utf8")).join("\n");
     expect(blob).not.toContain(secret);
@@ -83,7 +83,7 @@ describe("workflow", () => {
   it("pauses a security-sensitive plan until a person confirms", async () => {
     const cwd = await tempRepo();
     const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, confirm: async () => false });
-    await app.startPlan("change auth and permissions for Neo production secrets");
+    await app.startPlan("change auth and permissions for the ingest parser production secrets");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01")]);
     await app.approveDraft();
@@ -94,7 +94,7 @@ describe("workflow", () => {
 });
 
 describe("a new /plan closes a finished task", () => {
-  const request = "Add a retry counter to the Neo ingest parser";
+  const request = "Add a retry counter to the ingest parser";
 
   it("closes a task whose tickets are all built, and goes on to plan", async () => {
     const lines: string[] = [];
@@ -146,7 +146,7 @@ describe("build and review robustness", () => {
     const config = tieredConfig();
     config.budgets.taskUsd = 1;
     const app = workflow(cwd, { config, rng: () => 0.5, startTurn: () => undefined, notify: (message) => messages.push(message), confirm: async () => (prompts += 1, false) });
-    await app.startPlan("change auth and permissions for Neo production secrets");
+    await app.startPlan("change auth and permissions for the ingest parser production secrets");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01")]);
     await app.approveDraft();

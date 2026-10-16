@@ -1,5 +1,5 @@
 {
-  "name": "pi-conductor",
+  "name": "pi-chef",
   "version": "0.1.0",
   "private": true,
   "description": "Pi extension that plans, builds and reviews coding work with the right model for each job",
@@ -7,17 +7,17 @@
   "keywords": ["pi-package", "pi", "coding-agent"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pkeenan/pi-conductor.git"
+    "url": "git+https://github.com/pkeenan87/pi-chef.git"
   },
-  "homepage": "https://github.com/pkeenan/pi-conductor",
+  "homepage": "https://github.com/pkeenan87/pi-chef",
   "bugs": {
-    "url": "https://github.com/pkeenan/pi-conductor/issues"
+    "url": "https://github.com/pkeenan87/pi-chef/issues"
   },
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "pi-conductor-init": "./bin/init.mjs"
+    "pi-chef-init": "./bin/init.mjs"
   },
   "files": ["src", "skills", "bin", ".pi-workflows/config.yaml", "README.md", "docs"],
   "main": "./dist/index.js",

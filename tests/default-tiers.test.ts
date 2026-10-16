@@ -26,7 +26,7 @@ describe("built-in tiers", () => {
   });
   const writeUser = (yaml: string) => {
     mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(path.join(home, ".pi", "agent", "conductor.yaml"), yaml);
+    writeFileSync(path.join(home, ".pi", "agent", "chef.yaml"), yaml);
   };
 
   it("a user config with no tiers and no project config routes every tier to a real model id", () => {

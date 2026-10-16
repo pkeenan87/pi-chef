@@ -22,7 +22,7 @@ async function setup(options: { answer?: (call: FakeCall) => string; advisors?: 
   options.mutate?.(config);
   const fake = fakeChat(options.answer ?? ((c) => (c.provider === "openai" ? opinion("disagree", [{ severity: "high", file: "src/ingest.ts", issue: "duplicate events" }]) : opinion("agree"))));
   const app = workflow(await tempRepo(), { config, chat: options.chat === false ? undefined : fake.chat, startTurn: () => undefined });
-  expect((await app.startPlan("Add retry to the Neo ingest parser", { noQuestions: true })).ok).toBe(true);
+  expect((await app.startPlan("Add retry to the ingest parser", { noQuestions: true })).ok).toBe(true);
   await call(createPlanSpecTool(() => app), specParams, headless);
   return { app, calls: fake.calls, consult: createPlanConsultTool(() => app), tickets: createPlanTicketsTool(() => app) };
 }
@@ -62,7 +62,7 @@ describe("plan_consult", () => {
       expect(item.user).toContain("Add retryParse().");
       expect(item.user).toContain("1. Is the backoff bounded?");
       expect(item.user).toContain("2. Could retries duplicate events?");
-      expect(item.system).not.toContain("Add retry to the Neo ingest parser");
+      expect(item.system).not.toContain("Add retry to the ingest parser");
     }
     const text = textOf(result);
     expect(text).toContain("duplicate events");
@@ -115,7 +115,7 @@ describe("plan_consult", () => {
     await expect(call(consult, { tickets: [ticket("01")], questions: ["only one"] }, headless)).rejects.toThrow(/2 or 3/);
     const cwd = await tempRepo();
     const app = workflow(cwd, { config: withAdvisors(tieredConfig()), chat: fakeChat(() => opinion("agree")).chat, startTurn: () => undefined });
-    await app.startPlan("Add retry to the Neo ingest parser", { noQuestions: true });
+    await app.startPlan("Add retry to the ingest parser", { noQuestions: true });
     await expect(call(createPlanConsultTool(() => app), { tickets: [ticket("01")], questions }, headless)).rejects.toThrow(/plan_spec/);
   });
 });

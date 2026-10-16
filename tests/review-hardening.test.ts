@@ -47,7 +47,7 @@ describe("interview pending round", () => {
   async function planning() {
     const cwd = await tempRepo();
     const app = workflow(cwd, { startTurn: () => undefined });
-    expect((await app.startPlan("Add retry to the Neo ingest parser")).ok).toBe(true);
+    expect((await app.startPlan("Add retry to the ingest parser")).ok).toBe(true);
     return { app, cwd, tool: createPlanQuestionsTool(() => app) };
   }
   const seven = (prefix: string) => Array.from({ length: 7 }, (_, i) => question(`${prefix}${i}`));
@@ -200,7 +200,7 @@ describe("plan tool restore", () => {
   async function planningApp() {
     const cwd = await tempRepo();
     const app = workflow(cwd, { startTurn: () => undefined });
-    expect((await app.startPlan("Add retry to the Neo ingest parser")).ok).toBe(true);
+    expect((await app.startPlan("Add retry to the ingest parser")).ok).toBe(true);
     return app;
   }
 
@@ -211,11 +211,11 @@ describe("plan tool restore", () => {
     extension(fake.pi);
     fake.handlers.get("before_agent_start")!({ type: "before_agent_start", messageType: "user" }, {});
     expect(fake.active()).not.toContain("edit");
-    expect(fake.appended.at(-1)).toEqual({ type: "conductor-tools", data: { tools: ["read", "bash", "edit", "write"] } });
+    expect(fake.appended.at(-1)).toEqual({ type: "chef-tools", data: { tools: ["read", "bash", "edit", "write"] } });
     bindWorkflow(workflow(await tempRepo()));
     fake.handlers.get("agent_end")!({ type: "agent_end", messages: [] }, {});
     expect(fake.active()).toEqual(["read", "bash", "edit", "write"]);
-    expect(fake.appended.at(-1)).toEqual({ type: "conductor-tools", data: { tools: null } });
+    expect(fake.appended.at(-1)).toEqual({ type: "chef-tools", data: { tools: null } });
     bindWorkflow(undefined);
   });
 
@@ -234,7 +234,7 @@ describe("plan tool restore", () => {
   it("restores from the persisted session entry after a reload during planning", async () => {
     const app = await planningApp();
     bindWorkflow(app);
-    const saved = [{ type: "custom", customType: "conductor-tools", data: { tools: ["read", "bash", "edit", "write", "mcp_x"] } }];
+    const saved = [{ type: "custom", customType: "chef-tools", data: { tools: ["read", "bash", "edit", "write", "mcp_x"] } }];
     const fake = fakePi(["read", "bash", "grep", "plan_questions", "plan_spec", "plan_tickets"], ["read", "bash", "edit", "write", "grep"], saved);
     extension(fake.pi);
     fake.handlers.get("session_start")!({ type: "session_start" }, fake.ctx);

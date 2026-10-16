@@ -18,7 +18,7 @@ const git = async (cwd: string, ...args: string[]) => (await exec("git", args, {
 async function repoWithOrigin(base = "main") {
   const cwd = await tempRepo();
   await git(cwd, "branch", "-m", base);
-  const remote = mkdtempSync(path.join(tmpdir(), "pi-conductor-remote-"));
+  const remote = mkdtempSync(path.join(tmpdir(), "pi-chef-remote-"));
   await git(remote, "init", "--bare");
   await git(cwd, "remote", "add", "origin", remote);
   await git(cwd, "push", "-u", "origin", base);
@@ -292,7 +292,7 @@ describe("/review after /build", () => {
     expect(existsSync(path.join(dir, "reports", "review.json"))).toBe(true);
     expect(readFileSync(path.join(dir, "reports", "review.md"), "utf8")).toContain("## Review passed");
     expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(head);
-    expect(await git(t.cwd, "branch", "--show-current")).toBe(`conductor/${t.taskId}`);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe(`chef/${t.taskId}`);
   });
 
   it("falls back to the tickets' checks when the config has none, and cannot pass with no checks at all", async () => {

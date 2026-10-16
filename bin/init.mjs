@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Scaffold the conductor workflow into a project: register the Pi
+// Scaffold the chef workflow into a project: register the Pi
 // package, copy the sample config, and gitignore runtime state.
 // Plain JavaScript on purpose: npx runs this with no build step.
 
@@ -20,7 +20,7 @@ const GITIGNORE_LINES = [
   ".pi-workflows/*.local.yaml",
 ];
 
-const USAGE = `Usage: pi-conductor-init [init] [options]
+const USAGE = `Usage: pi-chef-init [init] [options]
 
 Options:
   --source <spec>  Pi package source (git:host/path, https URL, npm:name, or a path).
@@ -123,7 +123,7 @@ function updateGitignore(opts, log) {
   if (opts.dryRun) return;
   const prefix = current === "" || current.endsWith("\n") ? "" : "\n";
   const header = current === "" ? "" : "\n";
-  writeFileSync(target, `${current}${prefix}${header}# pi conductor workflow state\n${missing.join("\n")}\n`);
+  writeFileSync(target, `${current}${prefix}${header}# pi chef workflow state\n${missing.join("\n")}\n`);
 }
 
 export function run(argv, log = console.log) {
@@ -143,7 +143,7 @@ export function run(argv, log = console.log) {
   log(`
 Next:
   1. Edit .pi-workflows/config.yaml: set checks:, setup:, and pricing rows.
-  2. Keep endpoints, base URLs, and env-var names in ~/.pi/agent/conductor.yaml.
+  2. Keep endpoints, base URLs, and env-var names in ~/.pi/agent/chef.yaml.
   3. In Pi: /login openai, /login anthropic (and az login for Foundry), then /auth status.
   4. Grant project trust when Pi asks, so it reads .pi/settings.json.`);
   return installed ? 0 : 1;
@@ -155,7 +155,7 @@ if (invokedDirectly) {
   try {
     process.exitCode = run(process.argv.slice(2));
   } catch (error) {
-    console.error(`pi-conductor-init: ${error.message}`);
+    console.error(`pi-chef-init: ${error.message}`);
     process.exitCode = 2;
   }
 }

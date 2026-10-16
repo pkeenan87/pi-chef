@@ -28,7 +28,7 @@ describe("pi extension surface", () => {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
     expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "build", "review", "route", "advisor", "cost", "status", "auth"]);
-    expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "conductor"].sort());
+    expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "chef"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");
     expect(completions?.map((item) => item.value)).toContain("anthropic");
@@ -92,7 +92,7 @@ describe("pi extension surface", () => {
     const { cwd, app } = await ticketWorkflow([sampleTicket("01", { suggestedTier: "standard" }), sampleTicket("02", { suggestedTier: "standard", blockedBy: ["01"] })]);
     const { commands, handlers, setModelCalls, onSetModel } = fakePi();
     bindWorkflow(app);
-    const slot = Symbol.for("pi-conductor.restore-model");
+    const slot = Symbol.for("pi-chef.restore-model");
     const original = { provider: "openai", id: "gpt-user" };
     const registryFor = { find: (provider: string, id: string) => ({ provider, id }), isUsingOAuth: () => true, getAvailable: () => [] };
     const log: string[] = [];
@@ -204,7 +204,7 @@ describe("pi extension surface", () => {
 
   it("never prints an empty model id when the model to restore is empty or unknown", async () => {
     const { handlers } = fakePi();
-    const slot = Symbol.for("pi-conductor.restore-model");
+    const slot = Symbol.for("pi-chef.restore-model");
     for (const id of ["", "ghost"]) {
       const notices: string[] = [];
       (globalThis as Record<symbol, unknown>)[slot] = { provider: "openai", id };

@@ -10,7 +10,7 @@ import type { TaskStore } from "../storage/store.js";
 export interface WorkflowBinding {
   /** Chat access to the selected model (/advisor and the model review). */
   chat?: ChatFn;
-  /** Persistent routing status line (for example ctx.ui.setStatus("conductor", text)). */
+  /** Persistent routing status line (for example ctx.ui.setStatus("chef", text)). */
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   /** Sends a user message to the Pi session and starts a turn (used by /plan to begin the interview). */

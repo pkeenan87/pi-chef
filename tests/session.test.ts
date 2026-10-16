@@ -11,8 +11,8 @@ import { contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYam
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string };
 
-const RESTORE_MODEL = Symbol.for("pi-conductor.restore-model");
-const RESTORE_DONE = Symbol.for("pi-conductor.restore-done");
+const RESTORE_MODEL = Symbol.for("pi-chef.restore-model");
+const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
 const slots = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void> };
 
 const priorHome = process.env.HOME;
@@ -67,7 +67,7 @@ describe("session_start pins the session model", () => {
     if (options.yaml) writeProject(cwd, options.yaml);
     if (options.userYaml) {
       mkdirSync(path.join(process.env.HOME!, ".pi", "agent"), { recursive: true });
-      writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "conductor.yaml"), options.userYaml);
+      writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "chef.yaml"), options.userYaml);
     }
     const pi = fakePi(options.setModel);
     const notices: string[] = [];

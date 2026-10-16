@@ -19,7 +19,7 @@ export function checkRunner(run: CheckRunner["run"]): CheckRunner {
 const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
-  const cwd = mkdtempSync(path.join(tmpdir(), "pi-conductor-"));
+  const cwd = mkdtempSync(path.join(tmpdir(), "pi-chef-"));
   writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
@@ -77,7 +77,7 @@ export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Wo
 }
 
 export const tasksRequest = `
-Maintain Neo.
+Maintain the ingest parser.
 AC: ingest rejects empty events
 \`\`\`tasks
 [
@@ -88,7 +88,7 @@ AC: ingest rejects empty events
 `;
 
 export const singleTaskRequest = `
-Maintain Neo.
+Maintain the ingest parser.
 \`\`\`tasks
 [{"id":"ingest","summary":"Guard ingest","files":["src/ingest.ts"],"edits":[{"path":"src/ingest.ts","content":"export const ingest = 1;\\n"}]}]
 \`\`\`
@@ -214,7 +214,7 @@ export const sampleSpec = { summary: "Retry failed ingests.", context: "src/inge
 export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string } = {}) {
   const cwd = options.cwd ?? (await tempRepo());
   const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, ...extras });
-  if (!(await app.startPlan("Add retry to the Neo ingest parser")).ok) throw new Error("startPlan failed in fixture");
+  if (!(await app.startPlan("Add retry to the ingest parser")).ok) throw new Error("startPlan failed in fixture");
   await app.savePlanSpec(sampleSpec);
   await app.commitTickets(tickets);
   if (options.approve !== false && !(await app.approveDraft()).ok) throw new Error("approveDraft failed in fixture");

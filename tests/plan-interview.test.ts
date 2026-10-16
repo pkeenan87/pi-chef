@@ -60,7 +60,7 @@ async function planning(extras: { noQuestions?: boolean; request?: string } = {}
   const turns: string[] = [];
   const status: (string | undefined)[] = [];
   const app = workflow(cwd, { startTurn: (text) => void turns.push(text), planStatus: (text) => void status.push(text) });
-  const started = await app.startPlan(extras.request ?? "Add retry to the Neo ingest parser", { noQuestions: extras.noQuestions });
+  const started = await app.startPlan(extras.request ?? "Add retry to the ingest parser", { noQuestions: extras.noQuestions });
   expect(started.ok, started.text).toBe(true);
   const questions = createPlanQuestionsTool(() => app);
   const spec = createPlanSpecTool(() => app);
@@ -76,9 +76,9 @@ describe("plan interview start", () => {
     const task = app.store.load(app.activeTaskId()!)!;
     expect(task.phase).toBe("PLANNING");
     expect(task.planning).toEqual({ stage: "interview", noQuestions: false });
-    expect(readInterview((app as never as { ctx: never })["ctx"], task.taskId)).toMatchObject({ request: "Add retry to the Neo ingest parser", noQuestions: false, rounds: [] });
+    expect(readInterview((app as never as { ctx: never })["ctx"], task.taskId)).toMatchObject({ request: "Add retry to the ingest parser", noQuestions: false, rounds: [] });
     expect(turns).toHaveLength(1);
-    expect(turns[0]).toContain("Add retry to the Neo ingest parser");
+    expect(turns[0]).toContain("Add retry to the ingest parser");
     expect(status.at(-1)).toBe("plan · interview round 1 (0/7 questions)");
     const events = readFileSync(path.join(app.store.taskDir(task.taskId), "events.jsonl"), "utf8");
     expect(events).toContain('"purpose":"interview"');
@@ -167,7 +167,7 @@ describe("plan_questions", () => {
     // A new process (a fresh Workflow on the same folder) resumes from interview.json.
     const turns: string[] = [];
     const again = workflow(cwd, { startTurn: (text) => void turns.push(text) });
-    const resumed = await again.startPlan("Add retry to the Neo ingest parser");
+    const resumed = await again.startPlan("Add retry to the ingest parser");
     expect(resumed.ok).toBe(true);
     expect(resumed.text).toContain("Resuming");
     expect(resumed.text).toContain("round 2 (2/7 questions)");
