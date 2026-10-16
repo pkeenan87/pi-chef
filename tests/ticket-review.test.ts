@@ -446,8 +446,11 @@ describe("the per-ticket log, costs and status", () => {
     const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
     const d = fakeDriver(t.cwd, () => d.write("f.txt"));
     await t.run(d.driver);
+    const before = t.reports.length;
     const status = await t.app.status();
-    expect(status.text).toContain("Ticket 01: done · medium · anthropic/claude-sonnet-5-5 · review pass · Astra ·");
+    expect(status.text).toBe("Built · 1 of 1 tickets done · run /review");
+    const table = t.reports.slice(before).join("\n");
+    expect(table).toMatch(/\| 01 \| .* \| medium \| anthropic\/claude-sonnet-5-5 \| pass · Astra \| .* \| done [0-9a-f]{7} \|/);
   });
 });
 

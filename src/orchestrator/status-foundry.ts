@@ -5,6 +5,7 @@ import { assertCommandSafe } from "../sandbox.js";
 import { configProblem, userConfigPath } from "../providers/usable.js";
 import { foundryConfigFrom } from "../providers/runtime.js";
 import type { WorkflowContext } from "./context.js";
+import { cell } from "./format.js";
 
 /** Runs the Azure CLI with an argv array. Tests pass a fake; the default is `runAz`. */
 export type AzRunner = (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -67,23 +68,36 @@ export function missingDeployments(config: WorkflowConfig, have: Set<string>): {
   return [...out.values()];
 }
 
+/** Foundry tier entries (after mapping) by deployment name, with the tiers that use each. */
+function tiersByDeployment(config: WorkflowConfig): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const tier of TIER_KEYS) {
+    for (const candidate of tierCandidates(config, tier)) {
+      if (candidate.provider !== "foundry") continue;
+      const name = foundryDeployment(config, candidate.model);
+      out.set(name, [...(out.get(name) ?? []), tier]);
+    }
+  }
+  return out;
+}
+
 /**
- * The `/status foundry` section: lists the resource's deployments with `az cognitiveservices account deployment list`
- * and flags every tier entry whose deployment is not among them. Runs az only when asked; prints deployment names and
- * model names and versions, never a token.
+ * The `/status foundry` section, as markdown: a table of the resource's deployments
+ * (`az cognitiveservices account deployment list`) with the tiers that use each, and every tier entry whose deployment
+ * is not among them. Runs az only when asked; prints deployment names and model names and versions, never a token.
  */
-export async function foundryLines(ctx: WorkflowContext): Promise<string[]> {
-  const head = "Foundry deployments:";
+export async function foundrySection(ctx: WorkflowContext): Promise<string[]> {
+  const head = "### Foundry deployments";
   const problem = configProblem(ctx.config, "foundry", userConfigPath(ctx.cwd));
-  if (problem) return [`${head} ${problem}.`];
+  if (problem) return [head, "", `${problem}.`];
   let endpoint: string;
   try {
     endpoint = foundryConfigFrom(ctx.config).endpoint;
   } catch {
-    return [`${head} the Foundry endpoint is not set.`];
+    return [head, "", "The Foundry endpoint is not set."];
   }
   const resource = resourceFromEndpoint(endpoint);
-  if (!resource) return [`${head} cannot derive the resource name from the endpoint host (expected <resource>.services.ai.azure.com or <resource>.openai.azure.com).`];
+  if (!resource) return [head, "", "Cannot derive the resource name from the endpoint host (expected <resource>.services.ai.azure.com or <resource>.openai.azure.com)."];
   const run = ctx.azure;
   const az = async (args: string[]) => {
     assertCommandSafe("az", args);
@@ -92,23 +106,25 @@ export async function foundryLines(ctx: WorkflowContext): Promise<string[]> {
   let group = ctx.config.providers.foundry?.resourceGroup;
   if (!group) {
     const found = await az(["cognitiveservices", "account", "list", "--query", `[?name=='${resource}'].resourceGroup`, "-o", "tsv"]);
-    if (found.code !== 0) return [`${head} ${azFailure(found)}`];
+    if (found.code !== 0) return [head, "", azFailure(found)];
     group = found.stdout.split("\n").map((line) => line.trim()).find(Boolean);
-    if (!group) return [`${head} no resource named ${resource} was found in your subscription. Set providers.foundry.resourceGroup in ${userConfigPath(ctx.cwd)}, or check az account show.`];
+    if (!group) return [head, "", `No resource named ${resource} was found in your subscription. Set providers.foundry.resourceGroup in ${userConfigPath(ctx.cwd)}, or check az account show.`];
   }
   const listed = await az(["cognitiveservices", "account", "deployment", "list", "-g", group, "-n", resource, "-o", "json"]);
-  if (listed.code !== 0) return [`${head} ${azFailure(listed)}`];
+  if (listed.code !== 0) return [head, "", azFailure(listed)];
   const deployments = parseDeployments(listed.stdout);
-  if (!deployments) return [`${head} az returned output that is not a deployment list.`];
-  const lines = [`${head} ${deployments.length} on ${resource} (resource group ${group})`];
-  for (const item of deployments) lines.push(`  ${item.name}: ${item.model}${item.version ? ` ${item.version}` : ""}`);
+  if (!deployments) return [head, "", "az returned output that is not a deployment list."];
+  const used = tiersByDeployment(ctx.config);
+  const lines = [head, "", `${deployments.length} deployment(s) on ${resource} (resource group ${cell(group)})`, "", "| Deployment | Model | Version | Used by tiers |", "| --- | --- | --- | --- |"];
+  for (const item of deployments) lines.push(`| ${cell(item.name)} | ${cell(item.model)} | ${cell(item.version ?? "-")} | ${cell(used.get(item.name)?.join(", ") || "-")} |`);
   const missing = missingDeployments(ctx.config, new Set(deployments.map((item) => item.name)));
+  if (missing.length === 0) return [...lines, "", "Every Foundry entry in the tiers has a deployment."];
+  lines.push("", "Tier entries with no matching deployment:");
   for (const item of missing) {
     const guess = deployments.find((candidate) => candidate.model === item.model || candidate.name === item.model);
     lines.push(
-      `  Missing: foundry/${item.model}${item.deployment === item.model ? "" : ` → ${item.deployment}`} (used by ${item.tiers.join(", ")}) is not a deployment on ${resource}. Map it in ${userConfigPath(ctx.cwd)}: providers.foundry.deployments: { "${item.model}": "${guess?.name ?? deployments[0]?.name ?? "<your deployment name>"}" }`,
+      `- Missing: foundry/${item.model}${item.deployment === item.model ? "" : ` → ${item.deployment}`} (used by ${item.tiers.join(", ")}) is not a deployment on ${resource}. Map it in ${userConfigPath(ctx.cwd)}: providers.foundry.deployments: { "${item.model}": "${guess?.name ?? deployments[0]?.name ?? "<your deployment name>"}" }`,
     );
   }
-  if (missing.length === 0) lines.push("  Every Foundry entry in the tiers has a deployment.");
   return lines;
 }

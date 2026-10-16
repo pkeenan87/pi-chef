@@ -597,7 +597,35 @@ Decision = the reviewer's call after the advisors; dropped findings are not sent
 
 ### Other commands
 
-`/route <task>` previews tier, provider, and expected cost, plus who serves chat, direct calls, review and each ticket difficulty, and writes nothing. `/status` shows the same routing summary, phase, approval, the build branch and ticket progress, budget, auth, and config warnings. `/cost`, `/cost json`, and `/cost csv` show the ledger.
+`/route <task>` previews tier, provider, and expected cost, plus who serves chat, direct calls, review and each ticket difficulty, and writes nothing. `/status` shows the same routing summary as tables; see below. `/cost`, `/cost json`, and `/cost csv` show the ledger.
+
+**`/status`** posts a chat block of tables and returns only the state line, so nothing is clipped. It is cheap: no model call, no `az` (except `/status foundry`), and git only for HEAD and the commits-ahead count. The heading is the **state line**, derived from the plan, tickets and review rather than the raw phase (which stays in the Task row):
+
+```
+## Status · Reviewed · passed 14:32 · push and open the PR (a new /plan closes this task)
+
+| | |
+| --- | --- |
+| Task | task-20261014-ab12 (IMPLEMENTING) |
+| Plan | v2 approved 12:25 |
+| Branch | chef/task-ab12 (base main) · 3 commits ahead |
+| Review | passed 14:32 · 2 kept, 1 dropped |
+| Next | push and open the PR (a new /plan closes this task) |
+| Budget | task $1.92 / $20 · daily $3.10 / $75 · ok |
+| Session model | anthropic/claude-opus-5-5 (pinned) |
+
+### Tickets
+| # | Ticket | Difficulty | Implementer | Review | Cost | Status |
+...
+### Routing
+| Tier | Runs | Skipped |
+...
+### Logins
+| Provider | Status | Detail |
+...
+```
+
+The states: `No active task`, `Planning · interview` or `writing tickets`, `Draft v3 · waiting for approval`, `Approved v2 · run /build`, `Building · ticket 02 of 5`, `Stopped · ticket 02: <reason> · /build resumes`, `Built · 5 of 5 tickets done · run /review`, `Reviewed · passed HH:MM` or `Reviewed · N finding(s) to fix`, `Complete`, and the reason for a blocked or paused task. A review made before a later commit gets ` · review is out of date (commits since) · /review again` (the review records the git HEAD it ran at; an older review without one is never flagged). Tasks from the removed publish flow show `Published (older task)`. A `Warnings` section appears only when there is something to say (config warnings, corrupt event lines, models with no pricing row). Without a chat UI the command returns the whole markdown.
 
 ## Cost
 
@@ -644,7 +672,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
-| `/status [foundry]` | Phase, build progress, auth, budget, and a Routing check (per tier, the candidate that will run and each skipped one with its reason). `/status foundry` also runs `az cognitiveservices account deployment list` (only when you ask) and flags tier entries whose deployment does not exist |
+| `/status [foundry]` | The task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier (what runs and each skipped model with its reason), and logins. `/status foundry` also runs `az cognitiveservices account deployment list` (only when you ask) and tabulates the deployments, flagging tier entries that have none |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
 | `/chef` | List the commands |
 

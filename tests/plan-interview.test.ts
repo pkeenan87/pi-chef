@@ -303,7 +303,7 @@ describe("plan_tickets", () => {
       expect(after.classification!.reason_codes).toContain("reason: one parser wrapper");
       expect(after.routing?.tier).toBe("cheap");
       const status = (await app.status()).text;
-      expect(status).toContain("Rating (planner): low complexity, low risk · one parser wrapper");
+      expect(status).toContain("| Rating | planner: low complexity, low risk · one parser wrapper |");
     });
 
     it("raises risk and the flag when the planner says security-sensitive", async () => {

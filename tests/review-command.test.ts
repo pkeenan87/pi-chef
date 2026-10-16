@@ -82,6 +82,8 @@ describe("/review with no task", () => {
     expect(result.ok, result.text).toBe(true);
     expect(result.text).toBe("Review passed: 1 check(s), no findings.");
     expect(sessionReport(t.app).passed).toBe(true);
+    expect(sessionReport(t.app).headSha).toBe((await git(t.cwd, "rev-parse", "HEAD")).trim());
+    expect(sessionReport(t.app).at).toBeTruthy();
     expect(t.reports.at(-1)).toContain("## Review passed");
     expect(t.reports.at(-1)).toContain(".pi-workflows/reports/review-");
     expect(t.progress.some((line) => /^Review: started · fix\/retry against main/.test(line))).toBe(true);

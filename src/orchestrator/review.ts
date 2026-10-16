@@ -269,6 +269,8 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
     if (pick.advisors.length > 0) advisorsMs = ctx.now().getTime() - advisorsStarted;
   } else report.modelReview = modelReview;
   report.elapsedMs = ctx.now().getTime() - started;
+  report.at = iso(ctx);
+  report.headSha = await ctx.git.head().catch(() => undefined);
   const costs = stageCosts(ctx, taskId, started);
   report.stages = {
     ...report.stages,
