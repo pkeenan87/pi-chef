@@ -209,9 +209,10 @@ The YAML must not contain secrets, API keys, or tokens.
 | `routing.sessionTier` (default `premium`) | Tier every chat turn on `cost-opt/auto` routes to. While it is set nothing is classified for chat, so no Decisions call is made. One of `cheap`, `standard`, `premium` |
 | `routing.directTier` (default `cheap`) | Tier for compaction and other direct calls on `cost-opt/auto` |
 | `routing.reviewTier` (default `premium`) | Tier of the `/review` model pass. A failed part falls back to `standard` candidates once this tier has none left |
-| `routing.maxEscalations` (default 3) | Failed attempts a ticket gets before `/build` stops climbing: low, medium, high, then premium |
+| `routing.maxEscalations` (default 3) | Tier steps a failed ticket may climb from its difficulty tier (low, medium, high, then premium). When they are used up the ticket stays `failed`, `/build` stops with `MAX_ESCALATIONS`, and you fix it in the chat or raise the limit |
 | `tiers.ticketLow`, `tiers.ticketMedium`, `tiers.ticketHigh` | Models for tickets of difficulty `low`, `medium`, `high`. A config that lists `tiers` without them runs those tickets on `cheap`, `standard` and `premium`, with a warning in `/status` |
 | `routing.attemptOverheadUsd` (default 0.02, at least 0) | Ranking only. Added to each candidate's price before it is divided by its success rate, so a $0 model with a poor record does not always win. Never billed, never in a budget |
+| `advisors` | Second opinions during `/build` (see below): `tickets` (default true; false turns the per-ticket review off), `timeoutMs` (default 180000, per call), `maxDiffChars` (default 40000, the ticket diff sent), `maxOutputTokens` (default 1500, the visible answer an advisor is asked to stay within) |
 | `review` | The advisory model pass of `/review`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
 
 Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, and `budgets.autopilotPrUsd`. An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
@@ -324,7 +325,7 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 | ticketLow | Grok 4.7 `grok-4.7` through a SuperGrok subscription (`xai`). Tickets of difficulty `low` |
 | ticketMedium | Claude Sonnet `claude-sonnet-5-5`. Difficulty `medium` |
 | ticketHigh | Sol 6.1 `gpt-6.1-sol`. Difficulty `high` |
-| advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Not yet wired into `/plan` or `/review` |
+| advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Consulted by `/build`'s per-ticket review for medium and high tickets; `/plan` and `/review` do not call it. Astra is $0 on a ChatGPT subscription; Fable is billed per token on an API key |
 
 Who does what, by default: chat turns go to Opus; Haiku (then Luna) does the cheap side jobs; `/build` tickets go to Grok, Sonnet or Sol by difficulty and climb one step on each failure (Grok, Sonnet, Sol, Opus); `/review` asks Opus. The shipped quota weights rank Haiku ahead of Luna.
 
@@ -483,14 +484,18 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 1. **Route.** The ticket is routed with purpose `implement` to the tier of its `difficulty` (`low` to `ticketLow`, `medium` to `ticketMedium`, `high` to `ticketHigh`). The planner sets `difficulty` on each ticket: low is mechanical or small and well specified, medium is typical feature work, high is cross-cutting, tricky logic, concurrency, security, or a large blast radius. An old plan with only `suggestedTier` maps deterministic and cheap to low, standard to medium, premium to high, and none to medium; `difficulty` wins when both are present. A security-sensitive plan or classification starts at `ticketHigh` at least. After a failure the ticket moves one step up the ladder `ticketLow`, `ticketMedium`, `ticketHigh`, `premium`. The selector picks the model within the tier, and a tier with no usable model, an open circuit, or a provider that is not signed in moves up the same ladder. The status line shows the choice and a `route` event is logged.
 2. **Fresh session.** `/build` opens a new Pi session on that model, so each ticket starts with an empty context. The first message holds the chunk rules (one ticket only, no commit, push, or branch switch), the ticket (what to build, implementation steps, acceptance criteria), the spec with its decisions, the final summaries of the tickets it is blocked by, and the repo's `AGENTS.md`. The model works in your checkout with Pi's normal tools. While a ticket runs, a `git push` and a branch switch are blocked.
 3. **Checks.** When the model stops, `setup` runs once per build, then the ticket's `checks` (else `config.checks`), in the repo root. A failure sends the output tail back to the same session for one retry turn. If it fails again the ticket is `failed`.
-4. **Commit.** On a pass, the whole tree is committed as `<id>: <title>`, the ticket file's `## Status:` becomes `done`, criteria are ticked from the model's closing checklist (best effort), and the model's success is recorded. `/build` then moves on to the next ticket by itself. A ticket with no checks anywhere is committed with a warning that nothing verified it.
-5. **Trail.** The chat gets a line per ticket (model, time, cost, checks, commit) and a table at the end. Spend is ledgered as it happens, with the ticket id in the reason, so `/cost` can show it per ticket.
+4. **Review.** Once the checks pass and before the commit, the review tier (`routing.reviewTier`, Opus) reads the ticket (title, what to build, implementation, acceptance criteria) and the ticket's own diff (working tree against `HEAD`, new files included; redacted, lockfiles reduced to one line, cut to `advisors.maxDiffChars` with a note naming what was cut) and answers `pass` or `fail` with findings. For medium and high tickets it also writes 2-3 questions, and advisors answer them in parallel, each seeing only the ticket, the same diff and those questions, never the session. Low tickets have no advisors; a medium ticket gets one advisor from a provider other than the implementer's (Sonnet gets Astra, Sol gets Fable); a high ticket gets every advisor, one per provider. Each advisor is capped at about 1,500 visible tokens (`advisors.maxOutputTokens`; the request also leaves 2,048 tokens of room for reasoning models) and `advisors.timeoutMs`. Advisors are skipped when the budget is soft or exhausted. When any advisor answered, a second Opus call weighs their answers and concerns against the diff and gives the final verdict with a rationale, which is stored. **Only Opus's final verdict counts.** Advisors never gate on their own, and a failed advisor is recorded as an error while the others still count.
+   - **Pass** commits. **First fail** sends Opus's findings and rationale to the same session ("fix these; do not commit; the checks and the review run again"). The check retry and the review retry are counted separately. **Second fail** at that tier fails the ticket, strikes the implementer's record, and stops the build; the next `/build` escalates one tier.
+   - A review call that errors or times out, after one retry on the next review candidate, is recorded as `unavailable`. The ticket is **committed with a warning** (a chat line, and a note under the final table), because infrastructure must not block work.
+   - Every review is stored on the ticket's run (`ticketRuns[id].reviews`: attempt, tier, implementer, verdict, findings, each advisor's verdict and concerns, rationale, cost). `advisors.tickets: false` turns all of it off.
+5. **Commit.** On a pass, the whole tree is committed as `<id>: <title>`, the ticket file's `## Status:` becomes `done`, criteria are ticked from the model's closing checklist (best effort), and the model's success is recorded. `/build` then moves on to the next ticket by itself. A ticket with no checks anywhere is committed with a warning that nothing verified it.
+6. **Trail.** The chat gets a line per ticket (difficulty, implementer, time, cost split into implementer, review and advisors, checks, review such as `pass (2nd) · Astra`, commit) and a table at the end. Spend is ledgered as it happens, with the ticket id in the reason (`ticket review ticket 01`, `ticket review resolve ticket 01`, `advisor ticket review ticket 01`, and the implementer's turns), so `/cost` can show it per ticket. When a ticket finishes, done or failed, one line is appended to `.pi-workflows/metrics/tickets.jsonl` (difficulty, the implementers tried, review counts, advisors that answered, the final verdict and rationale, the cost split with `null` where unknown, elapsed time). The file is append-only. `/status` shows each ticket's difficulty, implementer and review outcome.
 
 A check that cannot run (no such command, a denied command, or a failing `setup`) stops the ticket as `failed` with the reason. It does not count against the model, because a stronger model cannot fix a plan.
 
 **Esc** during a ticket stops the build after that turn. Nothing is checked or committed, and the ticket stays in progress. When the last ticket is done, the session model is put back (normally `cost-opt/auto`) and `/build` points you at `/review`.
 
-**Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, it is committed without a model turn. Otherwise it goes to a model again, one tier up. A hard budget starts no new ticket and says so.
+**Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, it is committed without a model turn. A ticket whose review failed is not committed this way: it goes one tier up. Otherwise it goes to a model again, one tier up, until `routing.maxEscalations` is used up. A hard budget starts no new ticket and says so.
 
 ### /review
 
@@ -518,7 +523,9 @@ Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not p
 
 `/cost json` is the dashboard source. `compareBaseline` in `src/cost/ledger.ts` diffs this workflow against a Cursor Auto sample you supply (cost per merged PR, time to merge-ready, success rate, retries, regressions, interventions). The repo does not invent a Cursor Auto number.
 
-Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at its difficulty tier and climbs one step per failure (default `maxEscalations` 3, so the full ladder fits), never past `maxTier`. The classifier tier is for decisions, so it is never on a ladder. Three failures and zero successes in a task class open the circuit breaker.
+**Review and advisor cost.** Each ticket costs its implementer turns plus one Opus review call, a second Opus call when advisors answered, and the advisors. Prices come from `pricing` rows like every other call, and an unknown price stays unknown. Astra is $0 on a ChatGPT subscription (a Foundry deployment of it is billed per token); Fable is billed per token on an Anthropic API key (it needs `providers.anthropic.apiKeyFallback: true` in the user config and a `billing: api-key` row), so high tickets, which always consult both advisors, are where the advisor spend shows up. The split is in the build table, `/status` and `tickets.jsonl`.
+
+Routing keeps a rolling success table in `.pi-workflows/metrics/success.json`. `/build` starts each ticket at its difficulty tier and climbs one step per failure, at most `routing.maxEscalations` steps (default 3, so the full ladder fits), never past `maxTier`. The classifier tier is for decisions, so it is never on a ladder. Three failures and zero successes in a task class open the circuit breaker.
 
 ## Web tools
 
@@ -544,7 +551,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 |---|---|
 | `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits |
 | `/show-plan` | Show the full plan. A draft opens the review so you can approve it |
-| `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then a commit, on one branch. Run again to resume |
+| `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then an Opus review (with advisors for medium and high tickets), then a commit, on one branch. Run again to resume |
 | `/review` | Review the changes against the base branch (setup, checks, static scan, advisory model pass), list the findings, and offer to fix them in this session. Never commits or pushes |
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
@@ -565,7 +572,7 @@ src/commands.ts           the command table
 src/orchestrator/         state machine, plans, workflow; build.ts (/build), review.ts (/review)
 src/providers/            account-login gate, Foundry, Vercel, Decisions client, Pi registry chat
 src/router/               classifier schema, policy, and per-tier candidate selector
-src/review/               static scan, checks, and the advisory model pass
+src/review/               static scan, checks, the advisory model pass, and the advisor client
 src/cost/                 ledger, budgets, quota, baseline compare
 src/storage/              lock, journal, snapshots
 src/git/workspace.ts      branch, diff, and commit helpers for the checkout
