@@ -4,6 +4,7 @@ import { quotaLines } from "../cost/quota.js";
 import { routingSummary } from "./routing.js";
 import { budgetState, quotaState, statusFor } from "./budget.js";
 import { active, done, fail, guard, type WorkflowContext } from "./context.js";
+import { reviewLabel } from "./build.js";
 import { formatDuration } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
@@ -50,14 +51,18 @@ function routeLine(routing: RoutingDecision): string {
   return `${routing.tier} → ${target}${routing.selectionReason ? ` · ${routing.selectionReason}` : ""}`;
 }
 
+const fmt = (value: number | null) => (value === null ? "unknown" : `$${value.toFixed(4)}`);
+
 /** One line per ticket that has run: state, model, tokens, cost, and peak context. */
 function ticketLines(state: TaskState | undefined): string[] {
   const runs = Object.entries(state?.ticketRuns ?? {}).sort(([a], [b]) => a.localeCompare(b));
   return runs.map(([id, run]) => {
     const model = run.provider && run.model ? `${run.provider}/${run.model}` : "no model yet";
     const spend = run.costUsd === null ? "cost unknown" : `$${run.costUsd.toFixed(4)}`;
+    const split = run.reviews?.length && run.costSplit ? ` (impl ${fmt(run.costSplit.implementer)} · review ${fmt(run.costSplit.review)} · advisors ${fmt(run.costSplit.advisors)})` : "";
     const trail = (run.attemptLog ?? []).map((item) => `${item.provider}/${item.model} ${item.outcome === "success" ? "ok" : "failed"} in ${formatDuration(item.elapsedMs)}`).join(", ");
-    return `Ticket ${id}: ${run.status} · ${model} · ${run.tokens} tokens over ${run.turns} turn(s) · ${spend} · ${formatDuration(run.elapsedMs ?? 0)} · peak ~${run.maxContextTokens} ctx${run.crossedTarget ? " (over soft target)" : ""}${run.attempts > 1 ? ` · ${run.attempts} attempts` : ""}${trail ? ` · [${trail}]` : ""}${run.error && run.status !== "done" ? ` · ${run.error.slice(0, 120)}` : ""}`;
+    const review = run.reviews?.length ? ` · review ${reviewLabel(run)}` : "";
+    return `Ticket ${id}: ${run.status}${run.difficulty ? ` · ${run.difficulty}` : ""} · ${model}${review} · ${run.tokens} tokens over ${run.turns} turn(s) · ${spend}${split} · ${formatDuration(run.elapsedMs ?? 0)} · peak ~${run.maxContextTokens} ctx${run.crossedTarget ? " (over soft target)" : ""}${run.attempts > 1 ? ` · ${run.attempts} attempts` : ""}${trail ? ` · [${trail}]` : ""}${run.error && run.status !== "done" ? ` · ${run.error.slice(0, 120)}` : ""}`;
   });
 }
 

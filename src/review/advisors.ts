@@ -1,5 +1,5 @@
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
-import { emptyUsage, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
+import { emptyUsage, type AdvisorAnswer, type AdvisorConcern, type AdvisorOpinion, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
 import { budgetState, record } from "../orchestrator/budget.js";
 import type { WorkflowContext } from "../orchestrator/context.js";
 import { availability } from "../orchestrator/routing.js";
@@ -17,29 +17,7 @@ export interface AdvisorCandidate {
   model: string;
 }
 
-export interface AdvisorConcern {
-  severity: "high" | "medium" | "low";
-  file?: string;
-  issue: string;
-  suggestion?: string;
-}
-
-export interface AdvisorAnswer {
-  question: string;
-  answer: string;
-}
-
-/** One advisor's outcome. Either an opinion (`verdict`, `answers`, `concerns`) or `error`; never both. */
-export interface AdvisorOpinion {
-  provider: ProviderId;
-  model: string;
-  verdict?: "agree" | "disagree" | "unsure";
-  answers: AdvisorAnswer[];
-  concerns: AdvisorConcern[];
-  error?: string;
-  /** Known cost of this call; null when unknown (a failed call may still have been billed). */
-  costUsd: number | null;
-}
+export type { AdvisorAnswer, AdvisorConcern, AdvisorOpinion };
 
 export interface AdvisorConsultation {
   results: AdvisorOpinion[];

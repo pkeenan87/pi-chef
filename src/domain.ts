@@ -331,6 +331,75 @@ export interface TicketRun {
   attemptLog?: TicketAttempt[];
   /** Commit that /build made for this ticket. */
   commit?: string;
+  difficulty?: Difficulty;
+  /** Why the ticket last failed, for /build: a review failure is not settled by running the checks again. */
+  failedBy?: "checks" | "unrunnable" | "setup" | "review";
+  /** Every per-ticket review, oldest first. */
+  reviews?: TicketReviewRecord[];
+  /** Known cost across attempts by who incurred it; null when any entry was unknown. `costUsd` is their sum. */
+  costSplit?: CostSplit;
+}
+
+export interface CostSplit {
+  implementer: number | null;
+  review: number | null;
+  advisors: number | null;
+}
+
+/** One concern an advisor raised. */
+export interface AdvisorConcern {
+  severity: "high" | "medium" | "low";
+  file?: string;
+  issue: string;
+  suggestion?: string;
+}
+
+export interface AdvisorAnswer {
+  question: string;
+  answer: string;
+}
+
+/** One advisor's outcome. Either an opinion (`verdict`, `answers`, `concerns`) or `error`; never both. */
+export interface AdvisorOpinion {
+  provider: ProviderId;
+  model: string;
+  verdict?: "agree" | "disagree" | "unsure";
+  answers: AdvisorAnswer[];
+  concerns: AdvisorConcern[];
+  error?: string;
+  /** Known cost of this call; null when unknown (a failed call may still have been billed). */
+  costUsd: number | null;
+}
+
+/** One finding of the per-ticket review. */
+export interface TicketReviewFinding {
+  severity: "high" | "medium" | "low";
+  file?: string;
+  issue: string;
+}
+
+/**
+ * One review of a ticket's diff during /build, after its checks passed. `unavailable`: the review call failed twice, so
+ * the ticket was committed without it. The review model's final verdict is the only one that counts; advisors advise.
+ */
+export interface TicketReviewRecord {
+  /** The ticket's attempt (one per tier tried). */
+  attempt: number;
+  /** 1 for the first review of the attempt, 2 after a fix. */
+  round: number;
+  tier: Tier;
+  /** "provider/model" of the implementer. */
+  implementer: string;
+  /** "provider/model" that gave the verdict; absent when unavailable. */
+  reviewer?: string;
+  verdict: "pass" | "fail" | "unavailable";
+  findings: TicketReviewFinding[];
+  advisors: AdvisorOpinion[];
+  /** Why advisors were not consulted, when they should have been. */
+  advisorsSkipped?: string;
+  /** The reviewer's reasoning (after the advisors, when any answered), or why the review was unavailable. */
+  rationale: string;
+  costUsd: { review: number | null; advisors: number | null };
 }
 
 /** Where /build works: one branch in the main checkout. */
@@ -358,6 +427,9 @@ export interface TicketAttempt {
   turns: number;
   costUsd: number | null;
   outcome: "success" | "failure";
+  failedBy?: TicketRun["failedBy"];
+  /** What this attempt cost by who incurred it. */
+  costSplit?: CostSplit;
   error?: string;
 }
 

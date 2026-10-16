@@ -137,12 +137,12 @@ describe("/build commits", () => {
     });
     expect((await t.run(d.driver)).ok).toBe(true);
     const sha = (await git(t.cwd, "rev-parse", "--short=7", "HEAD")).slice(0, 7);
-    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toMatch(new RegExp(`^Ticket 01 · anthropic/claude-sonnet-5-5 · \\d+\\.\\ds · \\$0\\.0180 · checks passed · committed ${sha}$`));
+    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toMatch(new RegExp(`^Ticket 01 · medium · anthropic/claude-sonnet-5-5 · \\d+\\.\\ds · \\$0\\.0180 · checks passed · committed ${sha}$`));
     const ledger = t.app.store.readLedger().filter((item) => item.reason.includes("observed assistant usage"));
     expect(ledger).toHaveLength(1);
     expect(ledger[0]!.reason).toBe("observed assistant usage · ticket 01");
     expect(t.reports).toHaveLength(1);
-    expect(t.reports[0]).toContain("| 01 | Ticket 01 | anthropic/claude-sonnet-5-5 |");
+    expect(t.reports[0]).toContain("| 01 | Ticket 01 | medium | anthropic/claude-sonnet-5-5 |");
     expect(t.reports[0]).toContain(`done ${sha}`);
     expect(t.reports[0]).toContain("Next: /review");
   });
@@ -175,7 +175,7 @@ describe("/build failures", () => {
     expect(t.app.store.readMetrics().general?.ticketLow).toMatchObject({ failure: 1 });
     expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
     expect(d.state.finished).toBe(1);
-    expect(t.reports[0]).toContain("| 01 | Ticket 01 | xai/grok-4.7 |");
+    expect(t.reports[0]).toContain("| 01 | Ticket 01 | low | xai/grok-4.7 |");
     expect(t.reports[0]).toContain("failed");
   });
 
