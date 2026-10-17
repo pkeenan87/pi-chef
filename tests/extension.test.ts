@@ -97,6 +97,7 @@ describe("pi extension surface", () => {
     const registryFor = { find: (provider: string, id: string) => ({ provider, id }), isUsingOAuth: () => true, getAvailable: () => [] };
     const log: string[] = [];
     const notices: string[] = [];
+    const statuses: string[] = [];
     const bashHook = (command: string) => handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "t", input: { command } }, {});
     let sessions = 0;
     let current: Record<string, unknown> | undefined;
@@ -106,7 +107,7 @@ describe("pi extension surface", () => {
         hasUI: true,
         model: { provider: "default", id: "model" },
         modelRegistry: registryFor,
-        ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+        ui: { notify: (message: string) => notices.push(message), setStatus: (key: string, text?: string) => void statuses.push(`${key}=${text ?? ""}`), confirm: async () => true },
         async sendMessage() {},
         async sendUserMessage(text: string) {
           const ticket = text.match(/^# Ticket (\d+):/m)![1]!;
@@ -155,6 +156,10 @@ describe("pi extension surface", () => {
     // Outside a chunk the branch hook is quiet again.
     expect(await bashHook("git switch main")).toBeUndefined();
     expect(notices.some((text) => text.includes("Built 2 ticket(s)"))).toBe(true);
+    // One status line: each ticket's session shows the ticket and its model, and the end shows the next step.
+    expect(new Set(statuses.map((item) => item.split("=")[0]))).toEqual(new Set(["chef"]));
+    expect(statuses.some((item) => /^chef=chef · .+ · Building · ticket 02 of 2 · anthropic\/claude-sonnet-5-5 · \$\d+\.\d{2}/.test(item))).toBe(true);
+    expect(statuses.at(-1)).toMatch(/^chef=chef · .+ · Built · 2 of 2 tickets done · run \/review · \$/);
     bindWorkflow(undefined);
   });
 

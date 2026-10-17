@@ -12,8 +12,8 @@ import { budgetState, quotaState, statusFor } from "./budget.js";
 import { done, fail, guard, type WorkflowContext } from "./context.js";
 import { activeTask, displayName, listTasks, unfinishedTasks } from "./tasks.js";
 import { isSecuritySensitive } from "../router/classify.js";
-import { costLabel, reviewLabel } from "./build.js";
-import { cell, formatUsdShort, mdTable } from "./format.js";
+import { costLabel, resultLabel, reviewLabel } from "./build.js";
+import { cell, flat, formatDuration, formatUsd, formatUsdShort, mdTable } from "./format.js";
 
 /** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
 function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.readLedger()): string[] {
@@ -144,7 +144,7 @@ function ticketTable(state: TaskState): string[] {
   if (tickets.length === 0) return [];
   const rows = tickets.map((ticket) => {
     const run = state.ticketRuns?.[ticket.id];
-    const result = run?.status === "done" ? `done${run.commit ? ` ${run.commit.slice(0, 7)}` : ""}` : run?.status === "failed" ? `failed${run.error ? `: ${run.error}` : ""}` : run && run.attempts > 0 ? "in progress" : "pending";
+    const result = resultLabel(run, true);
     return [cell(ticket.id), cell(ticket.title, 60), ticketDifficulty(ticket), cell(run?.provider && run.model ? `${run.provider}/${run.model}` : "-"), cell(reviewLabel(run)), cell(costLabel(run)), cell(result, 80)];
   });
   return ["### Tickets", "", ...mdTable(["#", "Ticket", "Difficulty", "Implementer", "Review", "Cost", "Status"], rows)];
@@ -217,9 +217,62 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
   return { markdown, stateLine: label.line };
 }
 
+/** `/status <ticket>`: one ticket's trail. Every attempt (tier, model, time, cost, outcome) and every review, with its verdict and reasoning. */
+function ticketMarkdown(state: TaskState, ref: string): { markdown: string; line: string } | undefined {
+  const ticket = (state.plan?.tickets ?? []).find((item) => item.id === ref || item.id === ref.padStart(2, "0"));
+  if (!ticket) return undefined;
+  const run = state.ticketRuns?.[ticket.id];
+  const result = resultLabel(run, true);
+  const pairs: [string, string][] = [
+    ["Difficulty", ticketDifficulty(ticket)],
+    ["Now on", run?.tier ? `${run.tier}${run.provider && run.model ? ` · ${run.provider}/${run.model}` : ""}` : "not started"],
+    ["Time", run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"],
+    ["Cost", costLabel(run)],
+    ...(run?.commit ? [["Commit", run.commit] as [string, string]] : []),
+    ...(run?.unverified ? [["Unverified", run.unverified] as [string, string]] : []),
+    ...(run?.status === "failed" && run.error ? [["Last failure", run.error] as [string, string]] : []),
+  ];
+  const attempts = (run?.attemptLog ?? []).map((item) => [
+    String(item.attempt),
+    item.tier,
+    cell(item.provider ? `${item.provider}/${item.model}` : item.model),
+    formatDuration(item.elapsedMs),
+    formatUsd(item.costUsd),
+    cell(item.outcome === "success" ? "success" : `failed${item.failedBy ? ` (${item.failedBy})` : ""}${item.error ? `: ${item.error}` : ""}`, 160),
+  ]);
+  const reviews = (run?.reviews ?? []).map((item) => [
+    `${item.attempt}.${item.round}`,
+    cell(item.reviewer ?? "-"),
+    item.verdict,
+    cell(item.findings.map((finding) => `${finding.severity}: ${finding.file ? `${finding.file}: ` : ""}${finding.issue}`).join("; ") || "-", 400),
+    cell(item.rationale, 300),
+  ]);
+  const markdown = [
+    `## Ticket ${ticket.id} · ${cell(ticket.title, 80)} · ${cell(result, 80)}`,
+    "",
+    "| | |",
+    "| --- | --- |",
+    ...pairs.map(([key, value]) => `| ${key} | ${cell(value, 400)} |`),
+    "",
+    "### Attempts",
+    "",
+    ...(attempts.length ? mdTable(["#", "Tier", "Model", "Time", "Cost", "Outcome"], attempts) : ["None yet."]),
+    "",
+    "### Reviews",
+    "",
+    ...(reviews.length ? mdTable(["Attempt.round", "Reviewer", "Verdict", "Findings", "Reasoning"], reviews) : ["None yet."]),
+  ].join("\n");
+  return { markdown, line: flat(`Ticket ${ticket.id} · ${result}`, 160) };
+}
+
 async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandResult> {
-  if (arg !== "" && arg !== "foundry") return fail("USAGE", "Use /status or /status foundry.");
   const state = await activeTask(ctx);
+  if (arg !== "" && arg !== "foundry") {
+    const found = state ? ticketMarkdown(state, arg) : undefined;
+    if (!found) return fail("USAGE", `Use /status, /status foundry, or /status <ticket id>${state?.plan?.tickets?.length ? ` (${state.plan.tickets.map((item) => item.id).join(", ")})` : ""}.`);
+    ctx.report?.(found.markdown);
+    return done(ctx.report ? found.line : found.markdown, { state });
+  }
   const auth = await Promise.all(PROVIDERS.map((provider) => ctx.authProbe.inspect(provider)));
   const { markdown: base, stateLine } = await statusMarkdown(ctx, state, auth);
   const markdown = arg === "foundry" ? [base, "", ...(await foundrySection(ctx))].join("\n") : base;

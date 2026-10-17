@@ -141,8 +141,9 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     active.bind({
       registry: registry as unknown as UsableRegistry | undefined,
       chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
-      status: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef", text) : undefined,
-      planStatus: ctx.hasUI && ctx.ui.setStatus ? (text) => ctx.ui.setStatus("chef-plan", text) : undefined,
+      // Routes and planning stages redraw the one status line; its text is derived from the task, not passed in.
+      status: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
+      planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
@@ -174,6 +175,19 @@ type CommandContext = ExtensionContext & {
 let replacementCtx: CommandContext | undefined;
 
 /** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
+/**
+ * Redraws the one persistent `chef` status line (task · state and next step · running model · spend), or clears it
+ * with no open task. Uses the stored active task, never git; a failure leaves the line as it was.
+ */
+function refreshStatus(ctx: ExtensionContext): void {
+  if (!ctx.hasUI || !ctx.ui.setStatus) return;
+  try {
+    ctx.ui.setStatus("chef", active?.statusLine());
+  } catch {
+    /* a closed session or an unreadable state file: the next command redraws it */
+  }
+}
+
 function showPlanMessage(ctx: CommandContext, text: string, customType = "chef-plan"): void {
   const message = { customType, content: text, display: true };
   try {
@@ -495,7 +509,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
         try {
           if (!replaced) syncPlanTools(pi);
           if (live.hasUI) {
-            live.ui.setStatus("chef-workflow", result.ok ? result.text.split("\n")[0] : undefined);
+            refreshStatus(live);
             live.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
           }
         } catch {
@@ -534,8 +548,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     toolsBeforePlan = undefined;
     restoreToolsBeforePlan(ctx);
     syncPlanTools(pi);
-    const progress = active?.planningStatus();
-    if (progress && ctx.hasUI) ctx.ui.setStatus("chef-plan", progress);
+    // A /plan resumed after a restart, or a /build ticket's new session, shows where the task stands.
+    refreshStatus(ctx);
     softBudgetShown = false;
     try {
       // Foundry, Vercel, and local models must be in Pi's registry before anything can select them.

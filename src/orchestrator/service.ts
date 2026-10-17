@@ -1,5 +1,5 @@
 import path from "node:path";
-import { loadConfig, type WorkflowConfig } from "../config.js";
+import { loadConfig, modelLabel, type WorkflowConfig } from "../config.js";
 import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
@@ -12,7 +12,9 @@ import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
 import { budgetRemainingUsd, budgetState, checkBudget, quotaState, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
-import type { WorkflowContext } from "./context.js";
+import { active, type WorkflowContext } from "./context.js";
+import { statusLine } from "./state-label.js";
+import { displayName } from "./tasks.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
 import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
@@ -171,6 +173,22 @@ export class Workflow {
 
   planningStatus(): string | undefined {
     return planningStatusText(this.ctx);
+  }
+
+  /** The persistent status line for the stored active task (no git call), or undefined to clear it. */
+  statusLine(): string | undefined {
+    const state = active(this.ctx);
+    if (!state) return undefined;
+    const running = state.build?.currentTicket ? state.ticketRuns?.[state.build.currentTicket] : undefined;
+    const spend = budgetState(this.ctx, state.taskId).task;
+    return statusLine(state, {
+      name: displayName(state),
+      planning: planningStatusText(this.ctx),
+      model: running?.provider && running.model ? modelLabel(this.ctx.config, running.provider, running.model) : undefined,
+      spentUsd: spend.knownUsd,
+      unknownSpend: spend.unknownRecords > 0,
+      budgetUsd: this.ctx.config.budgets.taskUsd,
+    });
   }
 
   /** Validates a round of plan_questions input against the cap and ordering rules and records it as pending. */
@@ -356,7 +374,7 @@ export class Workflow {
     return recordWebSearch(this.ctx, input);
   }
 
-  /** Shows a line in the persistent routing status, if the host bound one. */
+  /** Tells the host something changed (a web_search was ledgered); the host redraws its status line from the task, so `text` is only a hint. */
   showStatus(text: string): void {
     this.ctx.status?.(text);
   }

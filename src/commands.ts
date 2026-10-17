@@ -49,7 +49,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by phase, provider, model, and task against budgets.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
   {
     name: "status", run: (w, args) => w.status(args),
-    description: "Show the task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier, and logins. /status foundry also tabulates your Foundry deployments (runs az) and flags tier entries that have none.",
+    description: "Show the task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier, and logins. /status <ticket> shows one ticket's attempts and reviews. /status foundry also tabulates your Foundry deployments (runs az) and flags tier entries that have none.",
     complete: (prefix) => completeWords(prefix, ["foundry"]),
   },
   {

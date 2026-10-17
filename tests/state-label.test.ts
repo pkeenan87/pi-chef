@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ReviewReport, TaskState, TicketRun } from "../src/domain.js";
-import { clock, reviewOutOfDate, taskState } from "../src/orchestrator/state-label.js";
+import { clock, reviewOutOfDate, statusLine, taskState } from "../src/orchestrator/state-label.js";
 import { sampleTicket } from "./helpers.js";
 
 const hhmm = (iso: string) => clock(iso)!;
@@ -52,9 +52,9 @@ describe("taskState", () => {
 
   it("shows a stopped ticket with a short reason", () => {
     const failed = task({ ticketRuns: { "01": run(), "02": run({ status: "failed", error: "npm test failed:\nexit 1 | 3 tests" }) } });
-    expect(taskState(failed, undefined).line).toBe("Stopped · ticket 02: npm test failed: exit 1 | 3 tests · /build resumes");
+    expect(taskState(failed, undefined).line).toBe("Stopped · ticket 02: npm test failed: exit 1 | 3 tests · /build resumes (/status 02 shows its attempts)");
     const halted = task({ ticketRuns: { "01": run({ status: "in-progress" }) } });
-    expect(taskState(halted, undefined).line).toBe("Stopped · ticket 01: stopped · /build resumes");
+    expect(taskState(halted, undefined).line).toBe("Stopped · ticket 01: stopped · /build resumes (/status 01 shows its attempts)");
   });
 
   it("shows a finished build with no review", () => {
@@ -96,5 +96,21 @@ describe("taskState", () => {
     for (const phase of ["PUBLISHED", "AUTOPILOT", "MERGE_READY"] as const) {
       expect(taskState(task({ phase }), undefined).line).toBe("Published (older task) · a new /plan closes it");
     }
+  });
+});
+
+describe("statusLine", () => {
+  const facts = { name: "retry", spentUsd: 1.239, unknownSpend: false, budgetUsd: 10 };
+  it("shows the task, where it stands, the running model and spend", () => {
+    expect(statusLine(task({ build: { branch: "b", base: "main", baseSha: "a", currentTicket: "02" } }), { ...facts, model: "anthropic/claude-sonnet-5-5" })).toBe(
+      "chef · retry · Building · ticket 02 of 3 · anthropic/claude-sonnet-5-5 · $1.24 of $10",
+    );
+  });
+  it("shows the planning stage while /plan runs, and marks unknown spend", () => {
+    expect(statusLine(task({ phase: "PLANNING" }), { ...facts, planning: "plan · interview round 2 (3/12 questions)", unknownSpend: true })).toBe("chef · retry · plan · interview round 2 (3/12 questions) · $1.24+? of $10");
+  });
+  it("is cleared with no open task", () => {
+    expect(statusLine(undefined, facts)).toBeUndefined();
+    expect(statusLine(task({ phase: "COMPLETE" }), facts)).toBeUndefined();
   });
 });

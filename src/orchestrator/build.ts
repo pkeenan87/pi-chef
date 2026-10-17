@@ -308,7 +308,7 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     }
   }
   ctx.indicator?.stage("committing");
-  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
+  const sha = await ctx.git.commitAll(ctx.git.repoRoot, commitSubject(ticket), [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
   if (credit) {
@@ -316,7 +316,15 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run?.tier ?? "standard", true, ctx.now(), run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
   }
   if (outcome.none) warnings.push(`Ticket ${ticket.id} has no checks and none are configured (checks: in .pi-workflows/config.yaml), so nothing verified it.`);
+  // Recorded on the run (cleared when a later commit is verified), so the tables say Unverified rather than just done.
+  const unverified = [outcome.none ? "no checks" : "", reviewed?.kind === "unavailable" ? "review unavailable" : ""].filter(Boolean).join(", ") || undefined;
+  await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, unverified }));
   return { kind: "committed", sha, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
+}
+
+/** A ticket commit's subject; `nextChunk` finds a commit that /build made but did not record by it. */
+function commitSubject(ticket: Ticket): string {
+  return `${ticket.id}: ${ticket.title}`.replace(/\s+/g, " ").trim();
 }
 
 function attempt(run: TicketRun, startedAt: string, elapsedMs: number, split: CostSplit & { total: number | null }, outcome: TicketAttempt["outcome"], failedBy?: TicketAttempt["failedBy"], error?: string): TicketAttempt {
@@ -342,6 +350,23 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       const ticket = orderedTickets(state.plan.tickets).find((item) => state.ticketRuns?.[item.id]?.status !== "done");
       if (!ticket) return { kind: "done" };
       const run = state.ticketRuns?.[ticket.id];
+      // The ticket was committed, then /build stopped before saving that: record it as done instead of building it again.
+      const committed = run?.status === "in-progress" && run.attemptStart ? await ctx.git.commitWithSubject(run.attemptStart.head, commitSubject(ticket)) : undefined;
+      if (committed) {
+        const spent = ticketSpend(ctx, state.taskId, ticket.id, run!.attemptStart!.at);
+        const { total, ...split } = spent;
+        await patch(
+          ctx,
+          state.taskId,
+          ticket,
+          (previous) => ({ ...previous, status: "done", error: undefined, failedBy: undefined, commit: committed, costUsd: addUsd(previous.costUsd ?? 0, total), costSplit: addSplit(previous.costSplit, split) }),
+          (build) => ({ ...build, currentTicket: undefined, chunkStartedAt: undefined }),
+        );
+        editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "done"));
+        logTicket(ctx, state.taskId, ticket.id);
+        ctx.progress?.(`Ticket ${ticket.id} was committed (${committed.slice(0, 7)}) before /build stopped; marked done`);
+        continue;
+      }
       // A ticket the review failed is not settled by passing checks: it goes to a stronger model, not to a commit.
       if (run && run.attempts > 0 && run.status === "failed" && run.failedBy !== "review" && (await dirtyPaths(ctx)).length > 0) {
         ctx.progress?.(`Ticket ${ticket.id}: re-running checks on the changes in the tree`);
@@ -447,11 +472,12 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const priorWork = !previousFailure && run && run.attempts > 0 ? "Uncommitted changes from an interrupted attempt are in the working tree (see `git status`); build on what fits the ticket as written above, and change or remove what does not." : undefined;
   const prompt = `${BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork })}`;
   const now = iso(ctx);
+  const head = await ctx.git.head().catch(() => undefined);
   await patch(
     ctx,
     state.taskId,
     ticket,
-    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: (unstarted ? 0 : previous.attempts) + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: (unstarted ? undefined : previous.startedAt) ?? now }),
+    (previous) => ({ ...previous, attemptStart: head ? { at: now, head } : undefined, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: (unstarted ? 0 : previous.attempts) + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: (unstarted ? undefined : previous.startedAt) ?? now }),
     (build) => ({ ...build, currentTicket: ticket.id, chunkStartedAt: now }),
   );
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));
@@ -591,6 +617,16 @@ export function shortModel(model: string): string {
 const ordinal = (n: number) => (n === 1 ? "1st" : n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`);
 
 /** The review in one phrase: "pass (2nd) · Astra", "fail", "unavailable", or "-" with no review. */
+/** A ticket's result for the tables: "done abc1234", "unverified abc1234 (no checks)", "failed: …", "in progress", "pending". */
+export function resultLabel(run: TicketRun | undefined, withError = false): string {
+  if (run?.status === "done") {
+    const sha = run.commit ? ` ${run.commit.slice(0, 7)}` : "";
+    return run.unverified ? `unverified${sha} (${run.unverified})` : `done${sha}`;
+  }
+  if (run?.status === "failed") return `failed${withError && run.error ? `: ${run.error}` : ""}`;
+  return run && run.attempts > 0 ? "in progress" : "pending";
+}
+
 export function reviewLabel(run: TicketRun | undefined): string {
   const last = run?.reviews?.[run.reviews.length - 1];
   if (!last) return "-";
@@ -657,7 +693,7 @@ export function buildReport(ctx: WorkflowContext, stopped?: string): string {
   const rows = tickets.map((ticket) => {
     const run = state.ticketRuns?.[ticket.id];
     const model = run?.provider && run.model ? `${run.provider}/${run.model}` : "-";
-    const result = run?.status === "done" ? `done${run.commit ? ` ${run.commit.slice(0, 7)}` : ""}` : run?.status === "failed" ? "failed" : run && run.attempts > 0 ? "in progress" : "pending";
+    const result = resultLabel(run);
     return `| ${ticket.id} | ${ticket.title.replace(/\|/g, "/")} | ${ticketDifficulty(ticket)} | ${model} | ${reviewLabel(run)} | ${run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"} | ${costLabel(run)} | ${result} |`;
   });
   const unreviewed = tickets.flatMap((ticket) => {

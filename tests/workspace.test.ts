@@ -69,6 +69,33 @@ describe("git helpers for the main checkout", () => {
     expect(diff).toContain("+untracked line");
     expect(await git.statusPorcelain()).toContain("?? untracked.txt");
   });
+
+  it("workingDiff leaves out excluded paths, tracked or not", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
+    writeFileSync(path.join(cwd, ".pi-workflows", "tracked.json"), "{}\n");
+    await sh(cwd, "add", "-f", ".pi-workflows/tracked.json");
+    await sh(cwd, "commit", "-qm", "state");
+    writeFileSync(path.join(cwd, ".pi-workflows", "tracked.json"), '{"phase":"x"}\n');
+    writeFileSync(path.join(cwd, ".pi-workflows", "state.json"), "{}\n");
+    writeFileSync(path.join(cwd, "code.txt"), "code\n");
+    const diff = await git.workingDiff("HEAD", [".pi-workflows"]);
+    expect(diff).toContain("+++ b/code.txt");
+    expect(diff).not.toContain(".pi-workflows");
+  });
+
+  it("commitAll never commits an excluded path, even one staged beforehand", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
+    writeFileSync(path.join(cwd, ".pi-workflows", "state.json"), "{}\n");
+    await sh(cwd, "add", "-f", ".pi-workflows/state.json");
+    writeFileSync(path.join(cwd, "code.txt"), "code\n");
+    await git.commitAll(cwd, "ticket", [".pi-workflows"]);
+    const files = (await sh(cwd, "show", "--name-only", "--format=", "HEAD")).stdout.trim().split("\n");
+    expect(files).toEqual(["code.txt"]);
+  });
 });
 
 describe("changedPaths", () => {
