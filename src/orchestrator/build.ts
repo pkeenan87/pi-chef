@@ -308,7 +308,7 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     }
   }
   ctx.indicator?.stage("committing");
-  const sha = await ctx.git.commitAll(ctx.git.repoRoot, `${ticket.id}: ${ticket.title}`, [workspaceName(ctx)]);
+  const sha = await ctx.git.commitAll(ctx.git.repoRoot, commitSubject(ticket), [workspaceName(ctx)]);
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
   if (credit) {
@@ -317,6 +317,11 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
   }
   if (outcome.none) warnings.push(`Ticket ${ticket.id} has no checks and none are configured (checks: in .pi-workflows/config.yaml), so nothing verified it.`);
   return { kind: "committed", sha, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
+}
+
+/** A ticket commit's subject; `nextChunk` finds a commit that /build made but did not record by it. */
+function commitSubject(ticket: Ticket): string {
+  return `${ticket.id}: ${ticket.title}`.replace(/\s+/g, " ").trim();
 }
 
 function attempt(run: TicketRun, startedAt: string, elapsedMs: number, split: CostSplit & { total: number | null }, outcome: TicketAttempt["outcome"], failedBy?: TicketAttempt["failedBy"], error?: string): TicketAttempt {
@@ -342,6 +347,23 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       const ticket = orderedTickets(state.plan.tickets).find((item) => state.ticketRuns?.[item.id]?.status !== "done");
       if (!ticket) return { kind: "done" };
       const run = state.ticketRuns?.[ticket.id];
+      // The ticket was committed, then /build stopped before saving that: record it as done instead of building it again.
+      const committed = run?.status === "in-progress" && run.attemptStart ? await ctx.git.commitWithSubject(run.attemptStart.head, commitSubject(ticket)) : undefined;
+      if (committed) {
+        const spent = ticketSpend(ctx, state.taskId, ticket.id, run!.attemptStart!.at);
+        const { total, ...split } = spent;
+        await patch(
+          ctx,
+          state.taskId,
+          ticket,
+          (previous) => ({ ...previous, status: "done", error: undefined, failedBy: undefined, commit: committed, costUsd: addUsd(previous.costUsd ?? 0, total), costSplit: addSplit(previous.costSplit, split) }),
+          (build) => ({ ...build, currentTicket: undefined, chunkStartedAt: undefined }),
+        );
+        editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "done"));
+        logTicket(ctx, state.taskId, ticket.id);
+        ctx.progress?.(`Ticket ${ticket.id} was committed (${committed.slice(0, 7)}) before /build stopped; marked done`);
+        continue;
+      }
       // A ticket the review failed is not settled by passing checks: it goes to a stronger model, not to a commit.
       if (run && run.attempts > 0 && run.status === "failed" && run.failedBy !== "review" && (await dirtyPaths(ctx)).length > 0) {
         ctx.progress?.(`Ticket ${ticket.id}: re-running checks on the changes in the tree`);
@@ -447,11 +469,12 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const priorWork = !previousFailure && run && run.attempts > 0 ? "Uncommitted changes from an interrupted attempt are in the working tree (see `git status`); build on what fits the ticket as written above, and change or remove what does not." : undefined;
   const prompt = `${BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork })}`;
   const now = iso(ctx);
+  const head = await ctx.git.head().catch(() => undefined);
   await patch(
     ctx,
     state.taskId,
     ticket,
-    (previous) => ({ ...previous, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: (unstarted ? 0 : previous.attempts) + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: (unstarted ? undefined : previous.startedAt) ?? now }),
+    (previous) => ({ ...previous, attemptStart: head ? { at: now, head } : undefined, status: "in-progress", tier: decision.tier, provider: decision.provider, model: decision.model, attempts: (unstarted ? 0 : previous.attempts) + 1, error: undefined, failedBy: undefined, difficulty: ticketDifficulty(ticket), startedAt: (unstarted ? undefined : previous.startedAt) ?? now }),
     (build) => ({ ...build, currentTicket: ticket.id, chunkStartedAt: now }),
   );
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "in-progress"));

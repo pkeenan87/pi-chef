@@ -418,6 +418,8 @@ export interface TicketRun {
   attemptLog?: TicketAttempt[];
   /** Commit that /build made for this ticket. */
   commit?: string;
+  /** When the latest attempt began and HEAD then: a commit after it with the ticket's subject means it was committed. */
+  attemptStart?: { at: string; head: string };
   difficulty?: Difficulty;
   /** Why the ticket last failed, for /build: a review failure is not settled by running the checks again. */
   failedBy?: "checks" | "unrunnable" | "setup" | "review";

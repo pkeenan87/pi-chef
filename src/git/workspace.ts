@@ -101,6 +101,11 @@ export class GitWorkspace {
     const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
     const add = await this.git([...safe, "add", "-A", "--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
+    if (exclude.length > 0) {
+      // `add` skips the excluded paths, but anything already staged there would still be committed.
+      const unstage = await this.git([...safe, "reset", "-q", "--", ...exclude], cwd);
+      if (unstage.code !== 0) throw new WorkflowError("GIT", unstage.stderr);
+    }
     const commit = await this.git([...safe, "commit", "--no-verify", "-m", message], cwd);
     if (commit.code !== 0 && !/nothing to commit/i.test(commit.stdout + commit.stderr)) {
       throw new WorkflowError("GIT", commit.stderr || commit.stdout);
@@ -189,6 +194,17 @@ export class GitWorkspace {
   }
 
   /** How many commits HEAD has that `base` does not. */
+  /** The newest commit in `since..HEAD` whose subject is exactly `subject`, or undefined (also on any git error). */
+  async commitWithSubject(since: string, subject: string): Promise<string | undefined> {
+    const result = await this.git(["log", "--format=%H%x00%s", `${since}..HEAD`, "--"]);
+    if (result.code !== 0) return undefined;
+    for (const line of result.stdout.split("\n")) {
+      const [sha, text] = line.split("\0");
+      if (sha && text?.trim() === subject.trim()) return sha;
+    }
+    return undefined;
+  }
+
   async aheadOf(base: string): Promise<number> {
     const result = await this.git(["rev-list", "--count", `${base}..HEAD`, "--"]);
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not compare with ${base}`);
@@ -197,13 +213,15 @@ export class GitWorkspace {
 
   /**
    * The working tree against the merge base with `base`: commits on the branch, staged and unstaged edits, and
-   * untracked files. Untracked files are diffed against /dev/null, so the index is never touched.
+   * untracked files. Untracked files are diffed against /dev/null, so the index is never touched. `exclude` paths
+   * (repo-relative, such as the workspace dir) are left out.
    */
-  async workingDiff(base: string): Promise<string> {
+  async workingDiff(base: string, exclude: string[] = []): Promise<string> {
     const point = await this.mergeBase(base);
-    const tracked = await this.git(["diff", point, "--"]);
+    const paths = ["--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)];
+    const tracked = await this.git(["diff", point, ...paths]);
     if (tracked.code !== 0) throw new WorkflowError("GIT", tracked.stderr || "git diff failed");
-    const listed = await this.git(["ls-files", "--others", "--exclude-standard", "-z"]);
+    const listed = await this.git(["ls-files", "--others", "--exclude-standard", "-z", ...paths]);
     if (listed.code !== 0) throw new WorkflowError("GIT", listed.stderr || "git ls-files failed");
     const parts = [tracked.stdout];
     for (const file of listed.stdout.split("\0").filter(Boolean)) {

@@ -10,7 +10,7 @@ import { reviewMetricType } from "../router/stats.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
-import { done, guard, iso, type WorkflowContext } from "./context.js";
+import { done, guard, iso, workspaceName, type WorkflowContext } from "./context.js";
 import { activeTask } from "./tasks.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { findingsTable, reviewItems, reviewMarkdown, reviewNotes, type ReviewItem, type ReviewTicketRow } from "./review-report.js";
@@ -217,7 +217,8 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
   const base = state?.build?.base ?? (await ctx.git.defaultBranch());
   const branch = await ctx.git.currentBranch();
   const ref = await baseRef(ctx, base, branch === base);
-  const rawDiff = await ctx.git.workingDiff(ref);
+  // Workflow state is not the user's code: it stays out of the review and out of every model packet.
+  const rawDiff = await ctx.git.workingDiff(ref, [workspaceName(ctx)]);
   if (!rawDiff.trim()) return done(`Nothing to review: no changes against ${base}.`);
   const exhausted = gateBudget(ctx, taskId);
   if (exhausted) return exhausted;

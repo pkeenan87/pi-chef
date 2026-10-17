@@ -447,6 +447,40 @@ describe("/build stops", () => {
     expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "ticketHigh", attempts: 1 });
   });
 
+  it("records a ticket committed just before /build stopped as done, without building it again", async () => {
+    const t = await buildTask({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] });
+    const parent = (await git(t.cwd, "rev-parse", "HEAD")).trim();
+    const first = fakeDriver(t.cwd, (send) => first.write(`f${send.ticket}.txt`));
+    expect((await t.run(first.driver)).ok).toBe(true);
+    const sha = t.load().ticketRuns!["02"]!.commit!;
+    // As if the process died after ticket 02's commit and before its run was saved.
+    const before = (await git(t.cwd, "rev-parse", `${sha}~1`)).trim();
+    expect(before).not.toBe(parent);
+    await t.app.store.update(t.taskId, "crash", (state) => ({
+      ...state,
+      ticketRuns: { ...state.ticketRuns, "02": { ...state.ticketRuns!["02"]!, status: "in-progress", commit: undefined, attemptStart: { at: "2026-01-01T00:00:00.000Z", head: before } } },
+    }));
+    const second = fakeDriver(t.cwd, () => undefined);
+    expect((await t.run(second.driver)).ok).toBe(true);
+    expect(second.sends).toEqual([]);
+    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", commit: sha });
+    expect(t.progress.some((line) => line.includes(`Ticket 02 was committed (${sha.slice(0, 7)}) before /build stopped`))).toBe(true);
+  });
+
+  it("does not count an older commit with the same subject as this attempt's", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    const first = fakeDriver(t.cwd, (send) => first.write(`f${send.ticket}.txt`));
+    expect((await t.run(first.driver)).ok).toBe(true);
+    const head = (await git(t.cwd, "rev-parse", "HEAD")).trim();
+    await t.app.store.update(t.taskId, "revised", (state) => ({
+      ...state,
+      ticketRuns: { ...state.ticketRuns, "01": { ...state.ticketRuns!["01"]!, status: "in-progress", commit: undefined, turns: 1, attemptStart: { at: "2026-01-01T00:00:00.000Z", head } } },
+    }));
+    const second = fakeDriver(t.cwd, (send) => second.write(`g${send.ticket}.txt`));
+    await t.run(second.driver);
+    expect(second.sends.map((send) => send.ticket)).toEqual(["01"]);
+  });
+
   it("restores a failed ticket's earlier run when the retry session never opens", async () => {
     const t = await buildTask({ tickets: [ticket("01")] });
     t.passing.ok = false;
