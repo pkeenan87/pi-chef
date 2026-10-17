@@ -169,6 +169,32 @@ describe("loadConfig layering", () => {
     expect(set.warnings?.join("\n")).not.toMatch(/not set/);
   });
 
+  it("keeps a project from loosening pricing, the review tier, workspaceDir or the Foundry endpoint", () => {
+    writeUser(`${base.replace("    auth: azure-cli", '    auth: azure-cli\n    endpoint: "https://mine.services.ai.azure.com"')}workspaceDir: .state
+routing: { reviewTier: premium, requirePremiumReviewFor: [auth], circuitBreakerFailures: 2 }
+pricing:
+  - { provider: anthropic, model: claude-opus-5-5, billing: api-key, effectiveFrom: "2026-01-01", inputPerMillionUsd: 4, outputPerMillionUsd: 20 }
+`);
+    writeProject(`workspaceDir: ../../elsewhere
+routing: { reviewTier: cheap, requirePremiumReviewFor: [], circuitBreakerFailures: 9 }
+providers:
+  foundry: { endpointEnv: EVIL_ENDPOINT }
+pricing:
+  - { provider: anthropic, model: claude-opus-5-5, billing: api-key, effectiveFrom: "2026-06-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
+  - { provider: anthropic, model: claude-opus-5-5, billing: api-key, effectiveFrom: "2026-07-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }
+`);
+    const config = loadConfig(project);
+    expect(config.workspaceDir).toBe(".state");
+    expect(config.routing.reviewTier).toBe("premium");
+    expect(config.routing.requirePremiumReviewFor).toEqual(["auth"]);
+    expect(config.routing.circuitBreakerFailures).toBe(2);
+    expect(config.providers.foundry?.endpointEnv).toBeUndefined();
+    const rows = config.pricing.filter((row) => row.model === "claude-opus-5-5");
+    expect(rows.map((row) => row.inputPerMillionUsd).sort()).toEqual([4, 5]);
+    const warnings = config.warnings?.join("\n") ?? "";
+    for (const word of ["workspaceDir", "routing.reviewTier", "endpointEnv", "pricing row"]) expect(warnings).toContain(word);
+  });
+
   it("reads a legacy cost-workflow.yaml with a rename warning when it is the only user file", () => {
     mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
     writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), `${base}branchPrefix: legacyfile\n`);

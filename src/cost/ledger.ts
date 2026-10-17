@@ -107,8 +107,9 @@ function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number
     const usd =
       ((record.inputTokens ?? 0) * row.inputPerMillionUsd +
         (record.outputTokens ?? 0) * row.outputPerMillionUsd +
-        (record.cacheReadTokens ?? 0) * (row.cacheReadPerMillionUsd ?? 0) +
-        (record.cacheWriteTokens ?? 0) * (row.cacheWritePerMillionUsd ?? 0)) /
+        // As in estimateUsd: a row without cache rates bills cache tokens at the input rate, never free.
+        (record.cacheReadTokens ?? 0) * (row.cacheReadPerMillionUsd ?? row.inputPerMillionUsd) +
+        (record.cacheWriteTokens ?? 0) * (row.cacheWritePerMillionUsd ?? row.inputPerMillionUsd)) /
       MICRO;
     worst = Math.max(worst, toMicro(usd));
   }

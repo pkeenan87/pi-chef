@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { WorkflowConfig } from "../config.js";
-import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeployment, foundryDeploymentApis, tierCandidates } from "../config.js";
+import { DEFAULT_FOUNDRY_AUDIENCE, DEFAULT_VERCEL_GATEWAY_URL, foundryDeployment, foundryDeploymentApis, isHttpsUrl, tierCandidates } from "../config.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from "../domain.js";
@@ -45,6 +45,8 @@ export function foundryConfigFrom(config: WorkflowConfig, env: NodeJS.ProcessEnv
   if (!endpoint) {
     throw new WorkflowError("CONFIG_INVALID", `Foundry endpoint is not set. Export ${provider?.endpointEnv ?? "the endpointEnv variable"} or set providers.foundry.endpoint.`);
   }
+  // The az token is sent here, so an endpoint from the environment must be https like one from the config.
+  if (!isHttpsUrl(endpoint)) throw new WorkflowError("CONFIG_INVALID", `Foundry endpoint must be an https URL (from ${provider?.endpointEnv && env[provider.endpointEnv] ? provider.endpointEnv : "providers.foundry.endpoint"}).`);
   return {
     endpoint,
     apiVersion: provider?.apiVersion,

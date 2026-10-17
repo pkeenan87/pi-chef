@@ -109,6 +109,8 @@ describe("read-only bash argument checks", () => {
       "sort --compress-program=sh x",
       "git branch newbranch", "git branch -d x", "git branch -D x", "git branch -m a b", "git branch -c a b", "git branch --set-upstream-to=origin/x", "git branch -u origin/x", "git branch --delete x", "git branch foo HEAD",
       "git remote add x y", "git remote remove x", "git remote set-url origin y", "git remote rename a b", "git remote update",
+      "find . $'-delete'", "find . $'-exec' touch pwned {} +", "sort $'-o' src/index.ts src/index.ts", "cat {/etc/passwd,}", "cat $'\\057etc/passwd'", "cat \"$HOME/x\"",
+      "grep root /et?/passwd", "sort /et?/passwd", "grep -f /etc/passwd README.md", "rg --file /etc/passwd src", "git remote -v add evil URL", "git remote -v set-url origin URL", "file -C -m x", "cat 'unterminated",
     ];
     for (const command of denied) expect(isReadOnlyCommand(command, root), command).toBe(false);
   });
@@ -118,6 +120,7 @@ describe("read-only bash argument checks", () => {
       "sort file", "sort -u file | uniq -c", "uniq file", "uniq -c file", "uniq -f 1 file", "tree -L 2", "find . -name '*.ts' -type f", "rg foo src", "rg -n --glob '*.ts' foo",
       "git branch", "git branch -a", "git branch -r", "git branch -l", "git branch --list", "git branch --list 'feat*'", "git branch -v", "git branch -vv", "git branch --show-current", "git branch --contains abc123", "git branch --merged main", "git branch --no-merged main", "git branch -a --contains abc",
       "git remote", "git remote -v", "git remote show origin", "git remote get-url origin", "date", "date -u", "ls src", "cat package.json",
+      "grep -n 'end$' src/a.ts", "ls src/*.ts", "grep -rn \"foo.*bar\" src",
     ];
     for (const command of allowed) expect(isReadOnlyCommand(command, root), command).toBe(true);
   });

@@ -79,6 +79,8 @@ export function isBlockedAddress(address: string): boolean {
   if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return embedded(g[6]!, g[7]!); // ::ffff:a.b.c.d
   if (g.slice(0, 6).every((x) => x === 0)) return embedded(g[6]!, g[7]!); // IPv4-compatible
   if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embedded(g[6]!, g[7]!); // NAT64
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return true; // local-use NAT64 64:ff9b:1::/48
+  if (g[0] === 0x2001 && g[1] === 0) return true; // Teredo 2001::/32 (an obfuscated IPv4 inside)
   if (g[0] === 0x2002) return embedded(g[1]!, g[2]!); // 6to4
   return false;
 }

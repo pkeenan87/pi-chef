@@ -52,7 +52,8 @@ async function runGit(cwd: string, args: string[], identity: Identity): Promise<
     const { stdout, stderr } = await exec("git", [...config, ...args], {
       cwd,
       encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
+      // A large branch diff (or untracked file) must not fail /review with an empty "git diff failed".
+      maxBuffer: 64 * 1024 * 1024,
       env: gitEnv(),
     });
     return { code: 0, stdout, stderr };

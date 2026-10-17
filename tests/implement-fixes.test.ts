@@ -64,6 +64,13 @@ describe("ticket checks at plan time", () => {
     expect(validateTickets([ticket("01", "a", { checks: ["npm test", "make test", "npm ci"] })], options).errors).toEqual([]);
   });
 
+  it("rejects shell syntax, since checks run without a shell", () => {
+    for (const check of ["npm test && npm run typecheck", "npm test | tee x", 'npx vitest run -t "parses dates"', "echo $HOME", "ls *.ts", "npm test > out"]) {
+      const result = validateTickets([ticket("01", "a", { checks: [check] })], options);
+      expect(result.errors.join("\n"), check).toContain("checks run without a shell");
+    }
+  });
+
   it("rejects prose whose first word is not a command on PATH", () => {
     const result = validateTickets([ticket("01", "a", { checks: ["Run the smoke test by hand."] })], options);
     expect(result.errors).toHaveLength(1);
@@ -79,7 +86,7 @@ describe("ticket checks at plan time", () => {
 
   it("tells the planner what checks are", () => {
     const rules = TICKET_RULES(150_000);
-    expect(rules).toContain("shell command lines");
+    expect(rules).toContain("There is no shell");
     expect(rules).toContain("Destructive commands are refused");
     expect(rules).not.toContain("allowlist");
   });
@@ -266,6 +273,7 @@ describe("model review", () => {
 describe("verbose output", () => {
   it("formats durations and token counts", () => {
     expect([formatDuration(800), formatDuration(12_340), formatDuration(261_000), formatDuration(3_720_000)]).toEqual(["0.8s", "12.3s", "4m21s", "1h02m"]);
+    expect([formatDuration(59_970), formatDuration(119_600), formatDuration(3_599_700)]).toEqual(["1m00s", "2m00s", "1h00m"]);
     expect([formatTokens(512), formatTokens(81_000), formatTokens(1_654_094)]).toEqual(["512", "81k", "1.7M"]);
   });
 

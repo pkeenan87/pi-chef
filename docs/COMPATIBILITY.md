@@ -14,7 +14,7 @@ Pi's own docs in the 1.2.0 tarball (`package/docs/extensions.md`, `providers.md`
 
 ## Account login (OpenAI and Anthropic)
 
-Pi implements both account logins. This project does not implement either OAuth flow and does not fall back to API keys.
+Pi implements both account logins. This project does not implement either OAuth flow and does not fall back to an API key stored in Pi unless the user config sets `providers.<name>.apiKeyFallback: true`.
 
 ### OpenAI
 
@@ -90,7 +90,7 @@ From `dist/core/extensions/types.d.ts` and `docs/extensions.md` in coding-agent 
 | Run finished | `pi.on("agent_settled")` | Records `aborted` so Esc stops the build after that turn. `message_end` keeps the last assistant text for the criteria checklist |
 | Runtime model switch | `pi.setModel(model): Promise<boolean>` | False when the provider has no auth. `session_start` calls it with `registry.find(session.model)` when `session.pin` is on and no `/build` model is pending, and warns once on a miss or a false. `/build` sets each ticket's model through the `session_start` slot (the replacement ctx has no `setModel`), then puts `session.model` (or, with pinning off, the user's model) back with the newest instance's `setModel`. **Unverified live** |
 | Compaction summary | `pi.on("session_before_compact")` returning `{ compaction: { summary, firstKeptEntryId, tokensBefore, usage } }` (`SessionBeforeCompactResult`; `docs/compaction.md`) | The messages in `event.preparation.messagesToSummarize` (plus `turnPrefixMessages` for a split turn) go through `serializeConversation(convertToLlm(...))` to a `session.compactionTier` model via `modelRegistry.complete`. The hook returns `undefined`, so Pi compacts with the session model, on any failure or a hard budget. **Unverified live**: that Pi accepts the injected summary and counts `usage` |
-| Budget gate | `pi.on("input")` returning `{ action: "handled" }` or `{ action: "continue" }` (`InputEventResult`) | A hard budget handles a prompt whose `source` is not `extension` and which does not start with `/`; commands always continue. **Unverified live**: that `handled` stops the prompt before any model call and that `/` commands reach their handlers whatever this hook returns |
+| Budget gate | `pi.on("input")` returning `{ action: "handled" }` or `{ action: "continue" }` (`InputEventResult`) | A hard budget handles a prompt whose `source` is not `extension` and whose first word is not a command (`/name` or `/plugin:name`; a path such as `/tmp/x` is not one); commands always continue. **Unverified live**: that `handled` stops the prompt before any model call and that `/` commands reach their handlers whatever this hook returns |
 | Nested model calls (advisor, compaction summary, `/review` model pass) | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
 | Observe usage | `pi.on("message_end")` | Record token metadata. Message text is not copied |
 | Block a tool | `pi.on("tool_call")` returning `{ block: true, reason }` | Destructive shell commands, non-read-only bash while `/plan` runs, and `git push` and branch switches while a `/build` ticket runs. `user_bash` is the documented hook for commands typed by the user |

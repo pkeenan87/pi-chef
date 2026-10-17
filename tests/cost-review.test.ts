@@ -47,7 +47,7 @@ describe("cost and review", () => {
 
     const secret = "sk-live-SECRETVALUE123456";
     const leak = await reviewDiff({
-      diff: `const password = "${secret}";\n`,
+      diff: `+const password = "${secret}";\n`,
       checks: [{ name: "unit", command: "npm", args: ["test"] }],
       cwd: "/tmp",
       planAcceptance: [],
