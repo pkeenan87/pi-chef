@@ -316,6 +316,9 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run?.tier ?? "standard", true, ctx.now(), run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
   }
   if (outcome.none) warnings.push(`Ticket ${ticket.id} has no checks and none are configured (checks: in .pi-workflows/config.yaml), so nothing verified it.`);
+  // Recorded on the run (cleared when a later commit is verified), so the tables say Unverified rather than just done.
+  const unverified = [outcome.none ? "no checks" : "", reviewed?.kind === "unavailable" ? "review unavailable" : ""].filter(Boolean).join(", ") || undefined;
+  await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, unverified }));
   return { kind: "committed", sha, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
 }
 
@@ -614,6 +617,16 @@ export function shortModel(model: string): string {
 const ordinal = (n: number) => (n === 1 ? "1st" : n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`);
 
 /** The review in one phrase: "pass (2nd) · Astra", "fail", "unavailable", or "-" with no review. */
+/** A ticket's result for the tables: "done abc1234", "unverified abc1234 (no checks)", "failed: …", "in progress", "pending". */
+export function resultLabel(run: TicketRun | undefined, withError = false): string {
+  if (run?.status === "done") {
+    const sha = run.commit ? ` ${run.commit.slice(0, 7)}` : "";
+    return run.unverified ? `unverified${sha} (${run.unverified})` : `done${sha}`;
+  }
+  if (run?.status === "failed") return `failed${withError && run.error ? `: ${run.error}` : ""}`;
+  return run && run.attempts > 0 ? "in progress" : "pending";
+}
+
 export function reviewLabel(run: TicketRun | undefined): string {
   const last = run?.reviews?.[run.reviews.length - 1];
   if (!last) return "-";
@@ -680,7 +693,7 @@ export function buildReport(ctx: WorkflowContext, stopped?: string): string {
   const rows = tickets.map((ticket) => {
     const run = state.ticketRuns?.[ticket.id];
     const model = run?.provider && run.model ? `${run.provider}/${run.model}` : "-";
-    const result = run?.status === "done" ? `done${run.commit ? ` ${run.commit.slice(0, 7)}` : ""}` : run?.status === "failed" ? "failed" : run && run.attempts > 0 ? "in progress" : "pending";
+    const result = resultLabel(run);
     return `| ${ticket.id} | ${ticket.title.replace(/\|/g, "/")} | ${ticketDifficulty(ticket)} | ${model} | ${reviewLabel(run)} | ${run?.elapsedMs !== undefined ? formatDuration(run.elapsedMs) : "-"} | ${costLabel(run)} | ${result} |`;
   });
   const unreviewed = tickets.flatMap((ticket) => {

@@ -454,7 +454,7 @@ Routing checks every candidate the way the `/build` preflight does: Pi's model r
 
 ### Showing the chosen model
 
-Every routing decision (`/plan`, each `/build` ticket and escalation, `/review`, `/route`, `/advisor`) sets a status line, for example `standard → foundry/grok-4-7 · lowest expected cost per success ...`, adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
+Every routing decision (`/plan`, each `/build` ticket and escalation, `/review`, `/route`, `/advisor`) adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
 
 ### The main session
 
@@ -525,7 +525,7 @@ Three commands. `/show-plan` re-reads the plan, and approves a draft you saved e
 
 ### /plan
 
-`/plan <request>` runs in your normal Pi session on the session model (Opus by default), with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. Every `/plan <request>` starts a new task (see Tasks and /plans below). If the active task is finished (every ticket built, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), it is closed first with a `Closed <name>.` chat line. An unfinished task is parked, untouched: `Parked <name> (<state>). /plans <name> switches back.` To change the plan you already have, use Request changes in the review picker or in `/show-plan`.
+`/plan <request>` runs in your normal Pi session on the session model (Opus by default), with read-only tools (read, grep, find, ls, read-only bash, `web_search`, `web_fetch`) plus the plan tools (`plan_questions`, `plan_spec`, `plan_consult`, `plan_tickets`). It edits nothing. Every `/plan <request>` starts a new task (see Tasks and /plans below). If the active task is finished (every ticket built and its review passed, or an old file in `PUBLISHED`, `AUTOPILOT`, or `MERGE_READY`), it is closed first with a `Closed <name>.` chat line. An unfinished task is parked, untouched: `Parked <name> (<state>). /plans <name> switches back.` To change the plan you already have, use Request changes in the review picker or in `/show-plan`.
 
 1. **Interview.** The model looks up facts itself and asks you only decisions, through `plan_questions`, in rounds. A round holds every question whose prerequisites are settled (`dependsOn` answered); dependent questions wait for the next round. There are 3 to 7 questions in total (fewer for small tasks), and the tool rejects a round that would pass 7. Each question has 2 to 4 options, one marked `★ Recommended — <reason>` and preselected, and an `Other (type answer)` choice. Press `a` to accept every recommendation in the round. With no UI the recommendations are recorded as the answers. Answers go to `.pi-workflows/tasks/<id>/interview.json` with one `decision` event each, and the interview resumes after a restart (run `/plan` with no request, or with the same request again). The status line reads `plan · interview round N (k/7 questions)`.
 2. **Spec.** The model reads the code that will change, then saves `spec.md` with `plan_spec`: a technical implementation plan (summary, current context, approach with types and signatures, every file to change and how, what to reuse, decisions, assumptions, out of scope, risks, and verification steps) and rates the task (`complexity`, `risk`, `securitySensitive`, `classificationReason`; see [Classification](#classification)). Code rejects a spec without an approach, file changes, or verification.
@@ -610,6 +610,12 @@ Decision = the reviewer's call after the advisors; dropped findings are not sent
 
 `/route <task>` previews tier, provider, and expected cost, plus who serves chat, direct calls, review and each ticket difficulty, and writes nothing. `/status` shows the same routing summary as tables; see below. `/cost`, `/cost json`, and `/cost csv` show the ledger.
 
+**The status line.** One persistent footer line, `chef`, always shows where you are: `chef · <task> · <state and next step> · <model of the running ticket> · $spent of $budget` (`+?` when some spend is unknown), for example `chef · retry-counter · Building · ticket 02 of 4 · anthropic/claude-sonnet-5-5 · $1.24 of $10`. While `/plan` runs it shows the interview stage instead. It is redrawn after every command, every planning stage, and each ticket's new session, and is cleared when no task is open.
+
+**`/status <ticket>`** (for example `/status 02`) shows one ticket's trail: difficulty, current tier and model, time, cost, commit, every attempt (tier, model, time, cost, outcome and why it failed) and every review (reviewer, verdict, findings, reasoning). A stopped build's state line points at it.
+
+A ticket committed without its checks (none configured) or without its review (unavailable) shows `unverified <sha> (no checks)` instead of `done` in the tables.
+
 **`/status`** posts a chat block of tables and returns only the state line, so nothing is clipped. It is cheap: no model call, no `az` (except `/status foundry`), and git only for HEAD and the commits-ahead count. The heading is the **state line**, derived from the plan, tickets and review rather than the raw phase (which stays in the Task row):
 
 ```
@@ -636,7 +642,7 @@ Decision = the reviewer's call after the advisors; dropped findings are not sent
 ...
 ```
 
-The states: `No active task`, `Planning · interview` or `writing tickets`, `Draft v3 · waiting for approval`, `Approved v2 · run /build`, `Building · ticket 02 of 5`, `Stopped · ticket 02: <reason> · /build resumes`, `Built · 5 of 5 tickets done · run /review`, `Reviewed · passed HH:MM` or `Reviewed · N finding(s) to fix`, `Complete`, and the reason for a blocked or paused task. A review made before a later commit gets ` · review is out of date (commits since) · /review again` (the review records the git HEAD it ran at; an older review without one is never flagged). Tasks from the removed publish flow show `Published (older task)`. When other unfinished tasks exist, a line under the overview says `Also open: <n> task(s) — /plans`. A `Warnings` section appears only when there is something to say (config warnings, corrupt event lines, models with no pricing row). Without a chat UI the command returns the whole markdown.
+The states: `No active task`, `Planning · interview` or `writing tickets`, `Draft v3 · waiting for approval`, `Approved v2 · run /build`, `Building · ticket 02 of 5`, `Stopped · ticket 02: <reason> · /build resumes (/status 02 shows its attempts)`, `Built · 5 of 5 tickets done · run /review`, `Reviewed · passed HH:MM` or `Reviewed · N finding(s) to fix`, `Complete`, and the reason for a blocked or paused task. A review made before a later commit gets ` · review is out of date (commits since) · /review again` (the review records the git HEAD it ran at; an older review without one is never flagged). Tasks from the removed publish flow show `Published (older task)`. When other unfinished tasks exist, a line under the overview says `Also open: <n> task(s) — /plans`. A `Warnings` section appears only when there is something to say (config warnings, corrupt event lines, models with no pricing row). Without a chat UI the command returns the whole markdown.
 
 ## Cost
 
@@ -686,13 +692,13 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 | `/route <task>` | Preview routing |
 | `/advisor <question>` | One question to the advisor tier. Costs money, never changes the phase |
 | `/cost [json\|csv]` | Ledger versus budgets |
-| `/status [foundry]` | The task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier (what runs and each skipped model with its reason), and logins. `/status foundry` also runs `az cognitiveservices account deployment list` (only when you ask) and tabulates the deployments, flagging tier entries that have none |
+| `/status [foundry \| <ticket>]` | The task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier (what runs and each skipped model with its reason), and logins. `/status foundry` also runs `az cognitiveservices account deployment list` (only when you ask) and tabulates the deployments, flagging tier entries that have none. `/status <ticket>` shows one ticket's attempts and reviews |
 | `/auth status` and `/auth login <provider>` | Credential metadata, or how to sign in |
 | `/chef` | List the commands |
 
 `help` or `--help` on a command prints its description. Tab completion uses Pi's `getArgumentCompletions` for `/auth`, `/cost`, `/plan`, `/plans` (task names and `close`, `--all`), and `/status`.
 
-Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a finished task; `/plans close` closes any task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
+Phases: `IDLE → PLANNING → AWAITING_PLAN_APPROVAL → IMPLEMENTING → COMPLETE` (a new `/plan` closes a task whose build passed review and parks any other; `/plans close` closes any task). `/review` does not change the phase. `PUBLISHED` is no longer entered; a task loaded from an old file in it can still be built on (`/build` returns it to `IMPLEMENTING`) or closed. Active phases can enter `BLOCKED`, `PAUSED`, or `FAILED`. A draft never becomes a build on its own. The retired phases `REVIEWING`, `PUBLISHED`, `AWAITING_PUBLISH_APPROVAL`, `AUTOPILOT`, and `MERGE_READY` stay in the enum only so old task files load.
 
 ## Layout
 

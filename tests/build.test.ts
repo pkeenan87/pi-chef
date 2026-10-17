@@ -315,6 +315,22 @@ describe("/build failures", () => {
     expect(t.load().ticketRuns!["01"]!.tier).toBe("ticketLow");
   });
 
+  it("shows one ticket's attempts and reviews with /status <ticket>", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
+    t.passing.ok = false;
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    await t.run(d.driver);
+    const result = await t.app.status("1");
+    expect(result.ok, result.text).toBe(true);
+    expect(result.text).toMatch(/^Ticket 01 · failed: Checks failed after a retry: ### unit \(exit 1\)/);
+    expect(result.text).not.toContain("\n");
+    const markdown = t.reports.at(-1)!;
+    expect(markdown).toContain("## Ticket 01 · ");
+    expect(markdown).toMatch(/\| 1 \| ticketLow \| xai\/grok-4\.7 \| .+ \| failed \(checks\)/);
+    expect((await t.app.status("09")).text).toContain("/status <ticket id> (01)");
+    expect((await t.app.status("")).text).toContain("/status 01 shows its attempts");
+  });
+
   it("passes with a warning when no checks exist at all", async () => {
     const t = await buildTask({
       tickets: [ticket("01")],
@@ -325,6 +341,8 @@ describe("/build failures", () => {
     const d = fakeDriver(t.cwd, () => d.write("f.txt"));
     expect((await t.run(d.driver)).ok).toBe(true);
     expect(t.progress.some((line) => line.includes("nothing verified it"))).toBe(true);
+    expect(t.load().ticketRuns!["01"]!.unverified).toBe("no checks");
+    expect(t.reports.at(-1)).toMatch(/\| unverified [0-9a-f]{7} \(no checks\) \|/);
   });
 
   it("uses the ticket's own checks instead of the configured ones, and runs setup once", async () => {
