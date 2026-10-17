@@ -63,7 +63,7 @@ export async function decide(
   });
 }
 
-/** Shows the chosen model in the status line and records a `route` event in the task log. */
+/** Records a `route` event in the task log and tells the host's status callback (which redraws the status line from the task). */
 export async function announce(
   ctx: WorkflowContext,
   taskId: string | undefined,

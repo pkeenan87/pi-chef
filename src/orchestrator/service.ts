@@ -374,7 +374,7 @@ export class Workflow {
     return recordWebSearch(this.ctx, input);
   }
 
-  /** Shows a line in the persistent routing status, if the host bound one. */
+  /** Tells the host something changed (a web_search was ledgered); the host redraws its status line from the task, so `text` is only a hint. */
   showStatus(text: string): void {
     this.ctx.status?.(text);
   }
