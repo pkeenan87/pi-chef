@@ -125,7 +125,7 @@ For a security-sensitive plan it asks you to confirm first.
 
 **When a ticket fails:**
 
-- **It moves up a tier** on the next `/build`: `ticketLow`, then `ticketMedium`, `ticketHigh`, `premium`, at most `routing.maxEscalations` steps and never past `routing.maxTier`. In local mode it does not move: the one local model is the only tier.
+- **It moves up a tier** on the next `/build`: `ticketLow`, then `ticketMedium`, `ticketHigh`, `premium`, at most `routing.maxEscalations` steps and never past `routing.maxTier`. In local mode the local model gets three review rounds, and a ticket it could not pass goes straight to `premium` (Opus) in the same `/build`, which finishes it from the local model's changes; that is the only step.
 - **A check that cannot run, or a failed setup,** does not move it up.
 - **A ticket you fixed by hand** is re-checked and reviewed, then committed with no model turn.
 - **When nothing is left to try,** it stops with `MAX_ESCALATIONS` and says what to do.

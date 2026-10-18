@@ -31,8 +31,8 @@ export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as c
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
 /**
- * The local-mode tier (`/plan --local`): the one local model (Ollama) that builds every ticket. A ticket that still
- * fails there stops; it never goes to a cloud model.
+ * The local-mode tier (`/plan --local`): the one local model (Ollama) that builds every ticket. A ticket it cannot
+ * pass in three review rounds is finished by premium (Opus), the only step up (`LOCAL_LADDER`).
  */
 export const LOCAL_TIERS = ["local"] as const;
 export type LocalTier = (typeof LOCAL_TIERS)[number];
