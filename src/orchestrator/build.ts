@@ -4,7 +4,7 @@ import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
 import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
-import { TICKET_LADDER } from "../router/policy.js";
+import { TICKET_LADDER, escalateImplementation } from "../router/policy.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
 import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
 import { displayName, requireActiveTask } from "./tasks.js";
@@ -436,9 +436,10 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const failedTier: Tier | undefined = modelFailed ? attempted : undefined;
   const resumeTier: Tier | undefined = modelFailed ? undefined : attempted;
   const way = run?.failedBy === "review" ? "Edit the ticket or the plan (/plan), or raise routing.maxEscalations." : "Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.";
-  // premium is the top of the ladder: one more /build would run the same tier again, and again.
-  if (failedTier === "premium") {
-    return { kind: "stopped", code: "MAX_ESCALATIONS", reason: `Ticket ${ticket.id} is still failing on premium, the top of the ladder, so it stays failed and the build stops. ${way.replace(", or raise routing.maxEscalations", "")}` };
+  // No tier above with other models (premium, routing.maxTier, or the same models higher up): one more /build would run
+  // the same models again, and again.
+  if (failedTier && escalateImplementation(failedTier, ctx.config.routing.maxTier, ctx.config) === failedTier) {
+    return { kind: "stopped", code: "MAX_ESCALATIONS", reason: `Ticket ${ticket.id} is still failing on ${failedTier}, the top of the ladder it can climb (routing.maxTier is ${ctx.config.routing.maxTier}), so it stays failed and the build stops. ${way.replace(", or raise routing.maxEscalations", "")}` };
   }
   if (attempted) {
     // routing.maxEscalations: how many tiers a ticket may climb from the one its difficulty starts on.

@@ -297,6 +297,21 @@ describe("/build failures", () => {
     expect(t.app.store.readMetrics().general?.ticketLow).toBeUndefined();
   });
 
+  it("stops at routing.maxTier instead of re-running the capped tier", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })], mutate: (config) => void (config.routing.maxTier = "ticketHigh") });
+    t.passing.ok = false;
+    const used: string[] = [];
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
+      last = await t.run(d.driver);
+      used.push(d.sends[0]?.model.id ?? "none");
+    }
+    expect(used).toEqual(["claude-sonnet-5-5", "gpt-6.1-sol", "none"]);
+    expect(last!.code).toBe("MAX_ESCALATIONS");
+    expect(last!.text).toContain("routing.maxTier is ticketHigh");
+  });
+
   it("keeps a ticket whose check could not run on its tier once the check is fixed", async () => {
     const t = await buildTask({
       tickets: [ticket("01", { difficulty: "low" })],

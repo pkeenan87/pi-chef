@@ -194,7 +194,8 @@ export function decideRoute(
 }
 
 /** Next tier above `failed` whose candidate list differs; returns `failed` if none. */
-function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig): Tier {
+/** The next tier up from `failed` (within `cap`) whose models differ, or `failed` itself when there is none. */
+export function escalateImplementation(failed: Tier, cap: Tier, config: WorkflowConfig): Tier {
   const from = signature(config, failed);
   let cursor: Tier | undefined = nextTier(failed, cap);
   while (cursor) {
