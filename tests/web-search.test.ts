@@ -99,6 +99,16 @@ describe("web_search tool", () => {
     expect(onUsage).toHaveBeenCalledWith({ provider: "anthropic", model: "claude-haiku-5-5", purpose: "web_search", query: "q", inputTokens: 100, outputTokens: 50, webSearchRequests: 2 });
   });
 
+  it("ledgers a billed first request when the continuation fails", async () => {
+    const paused = { stop_reason: "pause_turn", usage: { input_tokens: 10, output_tokens: 5 }, content: [] };
+    let call = 0;
+    const transport: SearchTransport = async () => (call++ === 0 ? { status: 200, body: paused } : { status: 500, body: { error: { message: "boom" } } });
+    const onUsage = vi.fn();
+    const tool = createWebSearchTool({ getAuth: async () => auth, onUsage, transport });
+    await expect(exec(tool, { query: "q" })).rejects.toThrow(/HTTP 500/);
+    expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 10, outputTokens: 5 }));
+  });
+
   it("denies when budgetCheck throws, without any request or auth lookup", async () => {
     const transport = vi.fn();
     const getAuth = vi.fn();

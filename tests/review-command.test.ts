@@ -91,6 +91,18 @@ describe("/review with no task", () => {
     expect(t.dialogs).toEqual([]);
   });
 
+  it("blocks a branch that adds a secret, and keeps the secret out of the report", async () => {
+    const t = await setup();
+    await branchWithCommit(t.cwd);
+    const secret = "sk-live-abcdefghijklmnopqrstuvwxyz";
+    write(t.cwd, "src/key.ts", `export const key = "${secret}";\n`);
+    const result = await t.app.review();
+    expect(sessionReport(t.app).passed).toBe(false);
+    expect(sessionReport(t.app).findings.some((finding) => finding.category === "secrets")).toBe(true);
+    expect(JSON.stringify(sessionReport(t.app))).not.toContain(secret);
+    expect(result.text).not.toContain(secret);
+  });
+
   it("puts uncommitted edits and untracked files in the diff, and commits nothing", async () => {
     const t = await setup();
     await branchWithCommit(t.cwd);

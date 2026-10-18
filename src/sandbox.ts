@@ -1,14 +1,19 @@
 import { WorkflowError } from "./domain.js";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
-const WRAPPERS = new Set(["sudo", "doas", "env", "command", "exec", "nohup", "time", "nice", "xargs"]);
+const WRAPPERS = new Set(["sudo", "doas", "env", "command", "exec", "nohup", "time", "nice", "xargs", "timeout", "setsid", "stdbuf", "ionice", "chrt", "taskset"]);
 /** Wrapper options that consume the next token as their value. */
 const WRAPPER_VALUE_FLAGS = new Set(["-u", "-g"]);
 /** More value-taking options for specific wrappers (`nice -n 5`, `xargs -n 1 -I{}`), which a generic list would get wrong for `sudo -n`. */
 const WRAPPER_EXTRA_VALUE_FLAGS: Record<string, Set<string>> = {
   nice: new Set(["-n"]),
   xargs: new Set(["-n", "-I", "-P", "-L", "-s", "-d", "-a", "-E"]),
+  timeout: new Set(["-s", "-k"]),
+  stdbuf: new Set(["-i", "-o", "-e"]),
+  ionice: new Set(["-c", "-n", "-p"]),
 };
+/** Wrappers that take positional words before the command (`timeout 60 cmd`, `chrt 10 cmd`, `taskset 3 cmd`). */
+const WRAPPER_POSITIONALS: Record<string, number> = { timeout: 1, chrt: 1, taskset: 1 };
 /** git global options that consume the next token as their value. */
 export const GIT_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
 
@@ -78,24 +83,93 @@ export function baseName(token: string): string {
   return parts[parts.length - 1] ?? token;
 }
 
-/** Drops leading VAR=value assignments and wrapper commands such as sudo/env. */
-export function stripWrappers(tokens: string[]): string[] {
+/**
+ * Drops leading VAR=value assignments and wrapper commands such as sudo/env/timeout. `env -S "a b"` is split into
+ * words. `xargs` is true when a wrapper was xargs, whose arguments come from stdin and so cannot be inspected.
+ */
+function unwrap(input: string[]): { argv: string[]; xargs: boolean } {
+  let tokens = input;
+  let xargs = false;
   let i = 0;
   for (;;) {
     while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1;
-    if (i < tokens.length && WRAPPERS.has(baseName(tokens[i]))) {
-      const extra = WRAPPER_EXTRA_VALUE_FLAGS[baseName(tokens[i])];
+    const name = i < tokens.length ? baseName(tokens[i]) : "";
+    if (!WRAPPERS.has(name)) break;
+    if (name === "xargs") xargs = true;
+    const extra = WRAPPER_EXTRA_VALUE_FLAGS[name];
+    i += 1;
+    let split: string | undefined;
+    while (i < tokens.length && tokens[i].startsWith("-") && tokens[i] !== "--") {
+      const flag = tokens[i];
       i += 1;
-      while (i < tokens.length && tokens[i].startsWith("-")) {
-        const flag = tokens[i];
-        i += 1;
-        if (WRAPPER_VALUE_FLAGS.has(flag) || extra?.has(flag)) i += 1;
-      }
+      if (name === "env" && (flag === "-S" || flag === "--split-string")) split = tokens[i++];
+      else if (name === "env" && (flag.startsWith("-S") || flag.startsWith("--split-string="))) split = flag.slice(flag.startsWith("-S") ? 2 : 15);
+      else if (WRAPPER_VALUE_FLAGS.has(flag) || extra?.has(flag)) i += 1;
+    }
+    if (tokens[i] === "--") i += 1;
+    if (split !== undefined) {
+      tokens = [...(splitSegments(split)[0]?.tokens ?? []), ...tokens.slice(i)];
+      i = 0;
       continue;
     }
-    break;
+    i += WRAPPER_POSITIONALS[name] ?? 0;
   }
-  return tokens.slice(i);
+  return { argv: tokens.slice(i), xargs };
+}
+
+export function stripWrappers(tokens: string[]): string[] {
+  return unwrap(tokens).argv;
+}
+
+const MAX_NESTING = 4;
+
+export interface SimpleCommand {
+  /** The command and its arguments, wrappers stripped. */
+  argv: string[];
+  /** True when xargs supplies more arguments from stdin. */
+  xargs: boolean;
+  /** True when the command reads its stdin from a pipe (so a shell may be reading a script). */
+  piped: boolean;
+  /** A nested script left unread because the nesting is too deep. */
+  opaque?: string;
+}
+
+/** The script of `sh -c [--] <script>` (also `-ec`, `-xc`), or undefined. */
+function shellScript(args: string[]): string | undefined {
+  const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
+  if (at < 0) return undefined;
+  return args[at + 1] === "--" ? args[at + 2] : args[at + 1];
+}
+
+function commandsOfArgv(tokens: string[], piped: boolean, depth: number): SimpleCommand[] {
+  const { argv, xargs } = unwrap(tokens);
+  if (argv.length === 0) return [];
+  const out: SimpleCommand[] = [{ argv, xargs, piped }];
+  const name = baseName(argv[0]).toLowerCase();
+  const args = argv.slice(1);
+  const nested = (script: string) => {
+    if (depth + 1 >= MAX_NESTING) out.push({ argv: [], xargs: false, piped: false, opaque: script });
+    else out.push(...commandsIn(script, depth + 1));
+  };
+  if (SHELLS.has(name)) {
+    const script = shellScript(args);
+    if (script !== undefined) nested(script);
+  } else if (name === "eval") nested(args.join(" "));
+  else if (name === "find") {
+    for (let i = 0; i < args.length; i += 1) {
+      if (!/^-(exec|execdir|ok|okdir)$/.test(args[i])) continue;
+      const end = args.findIndex((arg, j) => j > i && (arg === ";" || arg === "+"));
+      const inner = args.slice(i + 1, end < 0 ? undefined : end);
+      if (depth + 1 < MAX_NESTING) out.push(...commandsOfArgv(inner, false, depth + 1));
+      else out.push({ argv: [], xargs: false, piped: false, opaque: inner.join(" ") });
+    }
+  }
+  return out;
+}
+
+/** Every simple command a line runs, descending into `sh -c`, `eval`, `env -S` and `find -exec`. */
+export function commandsIn(line: string, depth = 0): SimpleCommand[] {
+  return splitSegments(line).flatMap((segment) => commandsOfArgv(segment.tokens, segment.piped, depth));
 }
 
 function shortFlags(args: string[]): string {
@@ -111,8 +185,7 @@ function longFlag(args: string[], name: string): boolean {
   return args.some((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`));
 }
 
-function deniedArgv(argv: string[]): boolean {
-  const tokens = stripWrappers(argv);
+function deniedArgv(tokens: string[]): boolean {
   if (tokens.length === 0) return false;
   const cmd = baseName(tokens[0]).toLowerCase();
   const args = tokens.slice(1);
@@ -129,31 +202,21 @@ function deniedArgv(argv: string[]): boolean {
     const recursive = shorts.includes("R") || longFlag(args, "recursive");
     return recursive && args.some((arg) => arg === "777" || arg === "0777" || arg === "a+rwx");
   }
-  if (cmd === "git") {
-    let i = 0;
-    while (i < args.length && args[i].startsWith("-")) {
-      i += GIT_VALUE_FLAGS.has(args[i]) ? 2 : 1;
-    }
-    const sub = args[i];
-    const rest = args.slice(i + 1);
-    if (sub === "push") {
-      return rest.some(
-        (arg) =>
-          arg === "--force" ||
-          arg.startsWith("--force-with-lease") ||
-          arg.startsWith("--force-if-includes") ||
-          (/^-[A-Za-z]+$/.test(arg) && arg.includes("f")) ||
-          /^\+\S/.test(arg),
-      );
-    }
-    if (sub === "reset") return rest.includes("--hard");
-    return false;
+  const call = gitCall(tokens);
+  if (call?.sub === "push") {
+    // A force push, or a remote branch deletion (`--delete`, `-d`, `:branch`).
+    return call.rest.some(
+      (arg) =>
+        arg === "--force" ||
+        arg === "--delete" ||
+        arg.startsWith("--force-with-lease") ||
+        arg.startsWith("--force-if-includes") ||
+        (/^-[A-Za-z]+$/.test(arg) && /[fd]/.test(arg)) ||
+        /^\+\S/.test(arg) ||
+        /^:\S/.test(arg),
+    );
   }
-  if (SHELLS.has(cmd)) {
-    // `bash -c "<script>"` and `bash <(curl ...)` carry a nested command line.
-    const idx = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
-    if (idx >= 0 && args[idx + 1] !== undefined) return isDeniedCommand(args[idx + 1]);
-  }
+  if (call?.sub === "reset") return call.rest.includes("--hard");
   return false;
 }
 
@@ -168,12 +231,12 @@ export function isDeniedCommand(line: string): boolean {
   if (/<\(\s*(curl|wget)\b/i.test(line) || /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/i.test(line)) {
     return true;
   }
+  const commands = commandsIn(line);
+  if (commands.some((command) => deniedArgv(command.argv) || (command.opaque !== undefined && isDeniedCommand(command.opaque)))) return true;
   const segments = splitSegments(line);
-  for (let i = 0; i < segments.length; i += 1) {
-    const segment = segments[i];
-    if (deniedArgv(segment.tokens)) return true;
-    if (segment.piped && i > 0 && isDownloader(segments[i - 1].tokens)) {
-      const stripped = stripWrappers(segment.tokens);
+  for (let i = 1; i < segments.length; i += 1) {
+    if (segments[i].piped && isDownloader(segments[i - 1].tokens)) {
+      const stripped = stripWrappers(segments[i].tokens);
       if (stripped.length > 0 && SHELLS.has(baseName(stripped[0]).toLowerCase())) return true;
     }
   }
@@ -187,52 +250,67 @@ export function commandLine(command: string, args: string[]): string {
 /** Refuses destructive commands (rm -rf, force push, reset --hard, piping a download into a shell) unless `approved`. Everything else may run. */
 export function assertCommandSafe(command: string, args: string[], approved = false): void {
   const line = commandLine(command, args);
-  if ((isDeniedCommand(line) || deniedArgv([command, ...args])) && !approved) {
+  if ((isDeniedCommand(line) || commandsOfArgv([command, ...args], false, 0).some((call) => deniedArgv(call.argv))) && !approved) {
     throw new WorkflowError("COMMAND_DENIED", `Blocked destructive command: ${line}`);
   }
 }
 
 /** Matches `git push` (also `git -C dir push`, `git -c k=v push`) anywhere in a command line. */
 const GIT_PUSH = /(^|[;&|(\n`]|\$\()\s*(\S*\/)?git(\s+(-[cC]\s+\S+|--[\w-]+(=\S+)?|-\w+))*\s+push\b/;
-const MAX_NESTING = 4;
 
-/** The git subcommand and its arguments for one segment, or undefined when the segment is not git. */
-function gitCall(tokens: string[]): { sub: string | undefined; rest: string[] } | undefined {
-  const stripped = stripWrappers(tokens);
-  const first = stripped[0];
-  if (!first || baseName(first).toLowerCase() !== "git") return undefined;
-  const args = stripped.slice(1);
-  let i = 0;
-  while (i < args.length && args[i]!.startsWith("-")) i += GIT_VALUE_FLAGS.has(args[i]!) ? 2 : 1;
-  return { sub: args[i], rest: args.slice(i + 1) };
+interface GitCall {
+  sub: string | undefined;
+  rest: string[];
 }
 
-/** True for `git switch`, `git checkout -b|-B|--orphan|--detach`, and `git checkout <ref>` (a `--` before the paths means a file restore). */
-function movesBranch(call: { sub: string | undefined; rest: string[] }): boolean {
+/**
+ * The git subcommand and its arguments for a stripped argv, or undefined when it is not git. An alias defined inline
+ * (`git -c alias.p=push p`, `-c alias.p='!git push'`) is expanded.
+ */
+function gitCall(argv: string[]): GitCall | undefined {
+  const first = argv[0];
+  if (!first || baseName(first).toLowerCase() !== "git") return undefined;
+  const args = argv.slice(1);
+  const aliases = new Map<string, string>();
+  let i = 0;
+  while (i < args.length && args[i]!.startsWith("-")) {
+    const alias = args[i] === "-c" ? /^alias\.([^=]+)=(.*)$/i.exec(args[i + 1] ?? "") : null;
+    if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
+    i += GIT_VALUE_FLAGS.has(args[i]!) ? 2 : 1;
+  }
+  const sub = args[i];
+  const rest = args.slice(i + 1);
+  const expansion = sub === undefined ? undefined : aliases.get(sub.toLowerCase());
+  if (expansion === undefined) return { sub, rest };
+  const words = expansion.replace(/^!\s*/, "").trim().split(/\s+/);
+  if (words[0] === "git") words.shift();
+  return { sub: words[0], rest: [...words.slice(1), ...rest] };
+}
+
+/** True for `git switch`, `git checkout -b|-B|--orphan|--detach|-|<ref>` (a `--` before the paths means a file restore), and `git symbolic-ref HEAD <ref>`. */
+function movesBranch(call: GitCall): boolean {
   if (call.sub === "switch") return true;
+  if (call.sub === "symbolic-ref") return call.rest.filter((arg) => !arg.startsWith("-")).length >= 2;
   if (call.sub !== "checkout") return false;
   if (call.rest.some((arg) => /^-[A-Za-z]*[bB][A-Za-z]*$/.test(arg) || arg === "--orphan" || arg === "--detach")) return true;
   const dash = call.rest.indexOf("--");
-  const before = dash < 0 ? call.rest : call.rest.slice(0, dash);
-  return dash < 0 ? before.some((arg) => !arg.startsWith("-")) : false;
+  return dash < 0 && call.rest.some((arg) => arg === "-" || !arg.startsWith("-"));
 }
 
-/** Walks a command line, descending into `sh -c "..."` and `eval`, and reports whether `test` holds for any git call. */
-function anyGitCall(command: string, test: (call: { sub: string | undefined; rest: string[] }, segmentTokens: string[]) => boolean, depth = 0): boolean {
-  if (depth >= MAX_NESTING) return false;
-  for (const segment of splitSegments(command)) {
-    const tokens = stripWrappers(segment.tokens);
-    const first = tokens[0];
-    if (!first) continue;
-    const name = baseName(first).toLowerCase();
-    const args = tokens.slice(1);
-    const call = gitCall(segment.tokens);
-    if (call && test(call, segment.tokens)) return true;
-    if (SHELLS.has(name)) {
-      const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
-      const script = at >= 0 ? args[at + 1] : undefined;
-      if (script !== undefined && anyGitCall(script, test, depth + 1)) return true;
-    } else if (name === "eval" && anyGitCall(args.join(" "), test, depth + 1)) return true;
+/**
+ * True when the command line may run git with `test` true. Conservative: a git call fed by xargs, a shell reading a
+ * piped script, or a script nested too deep counts when the line contains `word` at all.
+ */
+function mayRunGit(command: string, word: RegExp, test: (call: GitCall) => boolean): boolean {
+  for (const simple of commandsIn(command)) {
+    if (simple.opaque !== undefined) {
+      if (word.test(simple.opaque)) return true;
+      continue;
+    }
+    const call = gitCall(simple.argv);
+    if (call && test(call)) return true;
+    const first = simple.argv[0] ?? "";
+    if ((simple.xargs || (simple.piped && SHELLS.has(baseName(first).toLowerCase()) && shellScript(simple.argv.slice(1)) === undefined)) && word.test(command)) return true;
   }
   return false;
 }
@@ -241,33 +319,16 @@ function anyGitCall(command: string, test: (call: { sub: string | undefined; res
  * True when the command line may run `git push`. Conservative: command substitution or a variable next to the word
  * `push` cannot be inspected, so it counts. Defense in depth only; the real push controls are elsewhere.
  */
-export function runsGitPush(command: string, depth = 0): boolean {
+export function runsGitPush(command: string): boolean {
   if (GIT_PUSH.test(command)) return true;
   if (/\bpush\b/.test(command) && (/\$\(|`/.test(command) || /(^|[;&|(\n])\s*\\?\$\{?\w/.test(command))) return true;
-  if (depth >= MAX_NESTING) return /\bpush\b/.test(command);
-  for (const segment of splitSegments(command)) {
-    const tokens = stripWrappers(segment.tokens);
-    const first = tokens[0];
-    if (!first) continue;
-    const name = baseName(first).toLowerCase();
-    const args = tokens.slice(1);
-    if (first.includes("$") && args.some((arg) => arg === "push")) return true;
-    if (name === "git") {
-      if (gitCall(segment.tokens)?.sub === "push") return true;
-    } else if (SHELLS.has(name)) {
-      const at = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
-      const script = at >= 0 ? args[at + 1] : undefined;
-      if (script !== undefined) {
-        if (runsGitPush(script, depth + 1)) return true;
-      } else if (segment.piped && /\bpush\b/.test(command)) return true;
-    } else if (name === "eval" && runsGitPush(args.join(" "), depth + 1)) return true;
-  }
-  return false;
+  if (commandsIn(command).some((simple) => (simple.argv[0] ?? "").includes("$") && simple.argv.includes("push"))) return true;
+  return mayRunGit(command, /\bpush\b/, (call) => call.sub === "push");
 }
 
 /** True when the command line switches branches: `git switch`, `git checkout -b|-B|<branch>` (also inside `sh -c`). */
 export function switchesBranch(command: string): boolean {
-  return anyGitCall(command, (call) => movesBranch(call));
+  return mayRunGit(command, /\b(switch|checkout|symbolic-ref)\b/, movesBranch);
 }
 
 /** Why a bash command is refused while a /build ticket runs, or undefined. */

@@ -295,7 +295,8 @@ async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: Exten
 function gateInput(event: InputEvent, ctx: ExtensionContext): InputEventResult {
   const proceed = { action: "continue" as const };
   try {
-    if (event.source === "extension" || event.text.trimStart().startsWith("/")) return proceed;
+    // A command is `/name` or `/plugin:name` as the first word; `/tmp/app.log shows an error` is a prompt.
+    if (event.source === "extension" || /^\/[\w-]+(:[\w-]+)?(\s|$)/.test(event.text.trimStart())) return proceed;
     const workflow = active ?? tryWorkflowFor(cwd);
     const status = workflow?.budgetStatus(workflow.activeTaskId());
     if (status === "hard") {

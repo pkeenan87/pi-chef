@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -258,6 +258,21 @@ describe("/build failures", () => {
     expect(t.load().ticketRuns!["01"]!.tier).toBe("premium");
   });
 
+  it("stops a ticket still failing on premium instead of re-running premium on every /build", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "high" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]) });
+    t.passing.ok = false;
+    const used: string[] = [];
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
+      last = await t.run(d.driver);
+      used.push(d.sends[0]?.model.id ?? "none");
+    }
+    expect(used).toEqual(["gpt-6.1-sol", "claude-opus-5-5", "none"]);
+    expect(last!.code).toBe("MAX_ESCALATIONS");
+    expect(last!.text).toContain("top of the ladder");
+  });
+
   it("starts a security-sensitive plan's tickets on their own difficulty tier", async () => {
     const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], approve: true });
     await t.app.store.update(t.taskId, "test", (state) => ({ ...state, plan: { ...state.plan!, securitySensitive: true } }));
@@ -280,6 +295,24 @@ describe("/build failures", () => {
     expect(d.sends).toHaveLength(1);
     expect(t.load().ticketRuns!["01"]!.status).toBe("failed");
     expect(t.app.store.readMetrics().general?.ticketLow).toBeUndefined();
+  });
+
+  it("keeps a ticket whose check could not run on its tier once the check is fixed", async () => {
+    const t = await buildTask({
+      tickets: [ticket("01", { difficulty: "low" })],
+      mutate: (config) => {
+        config.checks = [{ name: "wipe", command: "rm", args: ["-rf", "/"] }];
+      },
+    });
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    const stopped = await t.run(first.driver);
+    expect(stopped.text).toContain("stays on ticketLow");
+    t.app.config.checks = [{ name: "unit", command: "npm", args: ["test"] }];
+    rmSync(path.join(t.cwd, "f.txt"));
+    const second = fakeDriver(t.cwd, () => second.write("f.txt"));
+    expect((await t.run(second.driver)).ok).toBe(true);
+    expect(second.sends[0]!.model.id).toBe("grok-4.7");
+    expect(t.load().ticketRuns!["01"]!.tier).toBe("ticketLow");
   });
 
   it("passes with a warning when no checks exist at all", async () => {
@@ -423,7 +456,10 @@ describe("/build stops", () => {
     expect(failed.status).toBe("failed");
     const driver: BuildDriver = { async fresh() { return { stopped: "nope" }; }, async finish() {} };
     await t.run(driver);
-    expect(t.load().ticketRuns!["01"]).toEqual(failed);
+    // The run is as it was, except that the re-run checks on the tree left their fresh output as the error.
+    const { error, ...rest } = t.load().ticketRuns!["01"]!;
+    expect(rest).toEqual({ ...failed, error: undefined });
+    expect(error).toContain("### unit (exit 1)");
     expect(t.load().build!.currentTicket).toBeUndefined();
   });
 

@@ -68,6 +68,9 @@ export function commandOnPath(command: string, env: NodeJS.ProcessEnv = process.
 
 /** Why a ticket check cannot run (deny rules, or a first word that is not a command), or undefined when it can. */
 export function checkLineProblem(line: string, onPath: (command: string) => boolean = commandOnPath): string | undefined {
+  // Checks run without a shell, so these would reach the command as literal arguments and fail every time.
+  const shell = /&&|\|\||[|;<>`$"'*?]/.exec(line);
+  if (shell) return `checks run without a shell, so "${shell[0]}" does not work; use one plain command per entry`;
   const { command, args } = splitCheckLine(line);
   try {
     assertCommandSafe(command, args);

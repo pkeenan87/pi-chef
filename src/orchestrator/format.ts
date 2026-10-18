@@ -3,9 +3,12 @@
 /** "0.8s", "12.3s", "4m21s", "1h02m". */
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "?";
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
+  // Below 59.95s, toFixed(1) cannot round up to "60.0s".
+  if (ms < 59_950) return `${(ms / 1000).toFixed(1)}s`;
+  // Round once, then split, so 119.6s is 2m00s and not 1m60s.
+  const total = Math.round(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
   if (minutes < 60) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;

@@ -75,7 +75,7 @@ async function followBranch(ctx: WorkflowContext, task: TaskState): Promise<stri
   if (!(await ctx.git.branchExists(branch))) return `Its branch ${branch} no longer exists, so the checkout was not changed.`;
   if ((await dirtyPaths(ctx)).length > 0) {
     const owner = listTasks(ctx).find((other) => other.taskId !== task.taskId && !isClosed(other) && other.build?.branch === current);
-    return `The branch was not changed: the working tree has uncommitted changes. /build needs a clean tree to switch to ${branch}; commit or stash, then /plans ${displayName(task)} again.${owner ? ` You are on ${current}, which belongs to ${displayName(owner)}, so that task stays active until you switch branches.` : ""}`;
+    return `The branch was not changed: the working tree has uncommitted changes. /build needs a clean tree to switch to ${branch}; commit or stash, then /plans ${displayName(task)} again.${owner ? ` You are still on ${current}, which belongs to ${displayName(owner)}; ${displayName(task)} is active now, and the next branch checkout picks the active task again.` : ""}`;
   }
   try {
     await ctx.git.switchTo(branch);

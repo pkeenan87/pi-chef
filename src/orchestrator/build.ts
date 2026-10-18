@@ -273,7 +273,9 @@ function ticketSpend(ctx: WorkflowContext, taskId: string, ticketId: string, sin
 
 const addUsd = (a: number | null, b: number | null): number | null => (a === null || b === null ? null : fromMicroUsd(toMicroUsd(a) + toMicroUsd(b)));
 const sumSplit = (split: CostSplit): number | null => addUsd(addUsd(split.implementer, split.review), split.advisors);
-const addSplit = (a: CostSplit | undefined, b: CostSplit): CostSplit => ({ implementer: addUsd(a?.implementer ?? 0, b.implementer), review: addUsd(a?.review ?? 0, b.review), advisors: addUsd(a?.advisors ?? 0, b.advisors) });
+// No earlier split is a known $0; an earlier unknown part (null) stays unknown.
+const addSplit = (a: CostSplit | undefined, b: CostSplit): CostSplit =>
+  a === undefined ? { ...b } : { implementer: addUsd(a.implementer, b.implementer), review: addUsd(a.review, b.review), advisors: addUsd(a.advisors, b.advisors) };
 
 // ---------------------------------------------------------------------------------------------------------------------
 // settling a ticket: checks, commit, bookkeeping
@@ -378,7 +380,8 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
         // The failure text goes to the next model.
         if (settled.kind === "failed") await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, error: clip(settled.detail) }));
       }
-      return await prepare(ctx, state, ticket);
+      // Reloaded: the patch above put the fresh check output in `error`, which the prompt passes to the model.
+      return await prepare(ctx, ctx.store.load(state.taskId) ?? state, ticket);
     }
   } catch (error) {
     return { kind: "stopped", code: (error as { code?: string }).code ?? "ERROR", reason: redact((error as Error).message || "Could not pick the next ticket.") };
@@ -402,8 +405,16 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   // The tier the ticket is on: the latest attempt's, whatever its status. A failed one escalates from it; an aborted or
   // in-progress one resumes on it (no escalation, no reset to the start tier).
   const attempted = run && run.attempts > 0 ? (run.tier ?? run.attemptLog?.at(-1)?.tier) : undefined;
-  const failedTier: Tier | undefined = run?.status === "failed" ? attempted : undefined;
-  const resumeTier: Tier | undefined = run?.status === "failed" ? undefined : attempted;
+  // Only a model-attributable failure (checks or review) escalates. A check that cannot run or a broken setup is the
+  // plan's fault, and a pricier model cannot fix it, so the ticket stays on its tier.
+  const modelFailed = run?.status === "failed" && (run.failedBy === undefined || run.failedBy === "checks" || run.failedBy === "review");
+  const failedTier: Tier | undefined = modelFailed ? attempted : undefined;
+  const resumeTier: Tier | undefined = modelFailed ? undefined : attempted;
+  const way = run?.failedBy === "review" ? "Edit the ticket or the plan (/plan), or raise routing.maxEscalations." : "Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.";
+  // premium is the top of the ladder: one more /build would run the same tier again, and again.
+  if (failedTier === "premium") {
+    return { kind: "stopped", code: "MAX_ESCALATIONS", reason: `Ticket ${ticket.id} is still failing on premium, the top of the ladder, so it stays failed and the build stops. ${way.replace(", or raise routing.maxEscalations", "")}` };
+  }
   if (attempted) {
     // routing.maxEscalations: how many tiers a ticket may climb from the one its difficulty starts on.
     const from = TICKET_LADDER.indexOf(startTier(ticket));
@@ -414,7 +425,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
       return {
         kind: "stopped",
         code: "MAX_ESCALATIONS",
-        reason: `Ticket ${ticket.id} is still failing on ${failedTier} after climbing ${climbed} tier(s) from ${startTier(ticket)} (routing.maxEscalations is ${limit}), so it stays failed and the build stops. Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.`,
+        reason: `Ticket ${ticket.id} is still failing on ${failedTier} after climbing ${climbed} tier(s) from ${startTier(ticket)} (routing.maxEscalations is ${limit}), so it stays failed and the build stops. ${way}`,
       };
     }
   }
@@ -523,7 +534,7 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
       }, release);
       logTicket(ctx, state.taskId, ticketId);
       const done = ctx.store.load(state.taskId)?.ticketRuns?.[ticketId];
-      return { kind: "committed", sha: settled.sha, elapsedMs: done?.elapsedMs ?? m.elapsed, costUsd: done?.costUsd ?? m.spent.total, costSplit: done?.costSplit ?? { implementer: m.spent.implementer, review: m.spent.review, advisors: m.spent.advisors }, ...(done?.reviews?.length ? { review: reviewLabel(done) } : {}), ...(settled.warning ? { warning: settled.warning } : {}) };
+      return { kind: "committed", sha: settled.sha, elapsedMs: done?.elapsedMs ?? m.elapsed, costUsd: done ? done.costUsd : m.spent.total, costSplit: done?.costSplit ?? { implementer: m.spent.implementer, review: m.spent.review, advisors: m.spent.advisors }, ...(done?.reviews?.length ? { review: reviewLabel(done) } : {}), ...(settled.warning ? { warning: settled.warning } : {}) };
     }
 
     if (settled.kind === "review-failed" && !settled.final) {
@@ -553,7 +564,13 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
       await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run.tier ?? "standard", false, ctx.now(), run.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
     }
     const stop = failedBy === "review" ? { code: "REVIEW_FAILED", head: `Ticket ${ticketId} failed its review at ${run.tier ?? "this tier"} after a retry.` } : { code: failedBy === "checks" ? "CHECKS_FAILED" : "CHECKS_UNRUNNABLE", head: `Ticket ${ticketId} failed. ${reason.split("\n")[0]}` };
-    return { kind: "stopped", code: stop.code, reason: `${stop.head} Fix it in the chat and run /build again, or just run /build to retry on a stronger model.` };
+    const next =
+      failedBy === "review"
+        ? "Run /build to retry on a stronger model (a hand fix does not settle a failed review)."
+        : failedBy === "checks"
+          ? "Fix it in the chat and run /build again, or just run /build to retry on a stronger model."
+          : `Fix the plan's ${failedBy === "setup" ? "setup" : "checks"} and run /build again; the ticket stays on ${run.tier ?? "its tier"}.`;
+    return { kind: "stopped", code: stop.code, reason: `${stop.head} ${next}` };
   } catch (error) {
     return { kind: "stopped", code: (error as { code?: string }).code ?? "ERROR", reason: redact((error as Error).message || "Could not finish the ticket.") };
   } finally {
