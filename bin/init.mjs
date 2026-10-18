@@ -5,6 +5,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, copyFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,6 +30,7 @@ Options:
   --global         Install for every project (~/.pi/agent/settings.json) instead of -l.
   --dir <path>     Target project directory. Default: current directory.
   --force          Overwrite an existing .pi-workflows/config.yaml.
+                   (~/.pi/agent/chef.yaml is written only when you have no user config, never overwritten.)
   --no-install     Skip "pi install"; only write config and .gitignore.
   --dry-run        Print what would happen and change nothing.
   -h, --help       Show this help.`;
@@ -110,6 +112,21 @@ function writeConfig(opts, log) {
   copyFileSync(path.join(packageRoot, ".pi-workflows", "config.yaml"), target);
 }
 
+// The commented user config: every personal setting as an example, nothing active. Never overwritten.
+function writeUserConfig(opts, log) {
+  const dir = path.join(homedir(), ".pi", "agent");
+  const target = path.join(dir, "chef.yaml");
+  const shown = "~/.pi/agent/chef.yaml";
+  if (["chef.yaml", "chef.yml", "cost-workflow.yaml", "cost-workflow.yml"].some((name) => existsSync(path.join(dir, name)))) {
+    log(`${shown} (or an older user config) exists; kept it`);
+    return;
+  }
+  log(`create ${shown} (every setting commented out; uncomment what you want to change)`);
+  if (opts.dryRun) return;
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(path.join(packageRoot, "templates", "chef.yaml"), target);
+}
+
 function updateGitignore(opts, log) {
   const target = path.join(opts.dir, ".gitignore");
   const current = existsSync(target) ? readFileSync(target, "utf8") : "";
@@ -138,12 +155,13 @@ export function run(argv, log = console.log) {
   let installed = true;
   if (opts.install) installed = installPackage(resolveSource(opts), opts, log);
   writeConfig(opts, log);
+  writeUserConfig(opts, log);
   updateGitignore(opts, log);
 
   log(`
 Next:
   1. Edit .pi-workflows/config.yaml: set checks:, setup:, and pricing rows.
-  2. Keep endpoints, base URLs, and env-var names in ~/.pi/agent/chef.yaml.
+  2. Your own settings (budgets, models, endpoints) go in ~/.pi/agent/chef.yaml: uncomment and edit.
   3. In Pi: /login openai, /login anthropic (and az login for Foundry), then /auth status.
   4. Grant project trust when Pi asks, so it reads .pi/settings.json.`);
   return installed ? 0 : 1;

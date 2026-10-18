@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -203,6 +203,31 @@ pricing:
     writeUser(`${base}advisors: { fromDifficulty: medium }\n`);
     writeProject(`${base}advisors: { fromDifficulty: high }\n`);
     expect(loadConfig(project).advisors.fromDifficulty).toBe("high");
+  });
+
+  it("loads the commented chef.yaml template as the defaults, with no warning", () => {
+    const template = readFileSync(path.resolve(__dirname, "..", "templates", "chef.yaml"), "utf8");
+    writeUser(template);
+    // Alongside the sample project config, as init writes them.
+    writeProject(readFileSync(path.resolve(__dirname, "..", ".pi-workflows", "config.yaml"), "utf8"));
+    const config = loadConfig(project);
+    expect(config.warnings ?? []).toEqual([]);
+    expect(config.budgets.taskUsd).toBe(20);
+  });
+
+  it("keeps every example in the chef.yaml template valid and equal to the defaults it names", () => {
+    const template = readFileSync(path.resolve(__dirname, "..", "templates", "chef.yaml"), "utf8");
+    // Uncomment every setting line ("# key"), keep the "##" explanations.
+    const uncommented = template.split("\n").map((line) => line.replace(/^# /, "")).join("\n");
+    const config = parseConfig(uncommented);
+    expect(config.budgets).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: 0.05 });
+    expect(config.session).toEqual({ model: "anthropic/claude-opus-5-5", pin: true, compactionTier: "cheap" });
+    expect(config.routing).toMatchObject({ selection: "ordered", reviewTier: "premium", maxTier: "premium", maxEscalations: 3, circuitBreakerFailures: 3, attemptOverheadUsd: 0.02 });
+    expect(config.advisors).toMatchObject({ fromDifficulty: "high", tickets: true, plan: true, maxPlanConsults: 2, maxDiffChars: 40000 });
+    expect(config.review).toEqual({ model: true, maxDiffChars: 120000, maxChunks: 6, timeoutMs: 300000 });
+    expect(config.workers).toEqual({ ticketContextTokens: 150000, tokenBudget: 8000 });
+    expect(config.localMode).toEqual({ default: false });
+    expect(config.tiers.local?.[0]).toMatchObject({ provider: "local", model: "qwen3.5:9b", contextWindow: 65536 });
   });
 
   it("reads a legacy cost-workflow.yaml with a rename warning when it is the only user file", () => {
