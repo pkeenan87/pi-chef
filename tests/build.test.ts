@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { Ticket } from "../src/domain.js";
 import { BUILD_CHUNK_RULES, runBuild, type BuildDriver, type ModelRef } from "../src/orchestrator/build.js";
-import { checkRunner, readyAuth, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
+import { checkRunner, contextOf, readyAuth, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
 import type { WorkflowOptions } from "../src/orchestrator/types.js";
 
 const exec = promisify(execFile);
@@ -741,18 +741,35 @@ describe("/build in local mode", () => {
     expect(d.sends[0]!.text).not.toContain("## Spec (technical plan and decisions)");
   });
 
-  it("stops a ticket that still fails on the local model: never a cloud model", async () => {
-    const t = await localTask([ticket("01", { difficulty: "low" })]);
-    t.passing.ok = false;
-    const used: string[] = [];
-    let last;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
-      last = await t.run(d.driver);
-      used.push(d.sends[0] ? `${d.sends[0].model.provider}/${d.sends[0].model.id}` : "none");
-    }
-    expect(used).toEqual(["local/qwen3.5:9b", "none"]);
-    expect(last!.code).toBe("MAX_ESCALATIONS");
+  it("gives the local model three review rounds, then has Opus finish the ticket from its changes, in the same /build", async () => {
+    let reviews = 0;
+    const t = await localTask([ticket("01", { difficulty: "low" })], {
+      mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]),
+    });
+    const ctx = contextOf(t.app);
+    const systems: string[] = [];
+    ctx.chat = async (candidate, request) => {
+      reviews += 1;
+      systems.push(request.messages.find((message) => message.role === "system")?.content ?? "");
+      // Rounds 1-3 review the local model's work; round 4 reviews Opus's.
+      const pass = reviews > 3;
+      return { text: JSON.stringify({ verdict: pass ? "pass" : "fail", summary: "s", findings: pass ? [] : [{ severity: "high", file: "f01.txt", issue: "in f01.txt write ok" }], questions: [] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, requests: 1 }, provider: candidate.provider, model: candidate.model };
+    };
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}-${send.model.id.replace(/[^a-z0-9]/gi, "")}-${send.turn}.txt`));
+    const result = await t.run(d.driver);
+    expect(d.sends.map((send) => `${send.model.id}:${send.turn}`)).toEqual(["qwen3.5:9b:0", "qwen3.5:9b:1", "qwen3.5:9b:2", "claude-opus-5-5:0"]);
+    // The local model got the exact-edit rule; Opus got the full prompt with the review's findings.
+    expect(d.sends[1]!.text).toContain("Make each of these edits exactly as written");
+    expect(d.sends[3]!.text).toContain("## Previous attempt failed");
+    expect(d.sends[3]!.text).toContain("in f01.txt write ok");
+    expect(d.sends[3]!.text).not.toContain("[BUILD CHUNK · LOCAL MODEL]");
+    expect(t.progress.some((line) => line.includes("the local model did not pass (review); Opus finishes it"))).toBe(true);
+    expect(result.ok, result.text).toBe(true);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "premium" });
+    expect(reviews).toBe(4);
+    // Rounds 1-3 judged a small model: only real problems fail it, as exact edits. Opus's work got the normal review.
+    expect(systems.slice(0, 3).every((text) => text.includes("The implementer is a small local model"))).toBe(true);
+    expect(systems[3]).not.toContain("The implementer is a small local model");
   });
 
   it("stops with a clear reason when the local server is down, instead of using a cloud model", async () => {

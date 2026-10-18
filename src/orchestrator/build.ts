@@ -309,7 +309,9 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     await patch(ctx, state.taskId, ticket, (previous) => ({ ...previous, reviews: [...(previous.reviews ?? []), reviewed.record] }));
     if (reviewed.kind === "fail") {
       const run = state.ticketRuns?.[ticket.id];
-      return { kind: "review-failed", record: reviewed.record, text: reviewed.text, final: (run?.reviews ?? []).some((item) => item.tier === reviewed.record.tier && item.verdict === "fail") };
+      // Review rounds per tier: two, or three on the local model (its turns are free, and it needs more help).
+      const fails = (run?.reviews ?? []).filter((item) => item.tier === reviewed.record.tier && item.verdict === "fail").length;
+      return { kind: "review-failed", record: reviewed.record, text: reviewed.text, final: fails >= (reviewed.record.tier === "local" ? 2 : 1) };
     }
     if (reviewed.kind === "unavailable") {
       ctx.progress?.(reviewed.warning);
@@ -483,7 +485,9 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   });
   const previousFailure = run?.status === "failed" ? run.error : undefined;
   const priorWork = !previousFailure && run && run.attempts > 0 ? "Uncommitted changes from an interrupted attempt are in the working tree (see `git status`); build on what fits the ticket as written above, and change or remove what does not." : undefined;
-  const prompt = `${local ? LOCAL_CHUNK_RULES : BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork, local })}`;
+  // Only the local model gets the short local prompt; Opus finishing a local ticket gets the full one with the spec.
+  const onLocal = decision.tier === "local";
+  const prompt = `${onLocal ? LOCAL_CHUNK_RULES : BUILD_CHUNK_RULES}\n\n${ticketPrompt({ ticket, spec: ctx.store.readText(state.taskId, SPEC_FILE), blockers, repoRules: repoRules(ctx), previousFailure, priorWork, local: onLocal })}`;
   const now = iso(ctx);
   const head = await ctx.git.head().catch(() => undefined);
   await patch(
@@ -602,7 +606,7 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
     if (failedBy === "checks" || failedBy === "review") {
       await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run.tier ?? "standard", false, ctx.now(), run.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
     }
-    const stop = failedBy === "review" ? { code: "REVIEW_FAILED", head: `Ticket ${ticketId} failed its review at ${run.tier ?? "this tier"} after a retry.` } : { code: failedBy === "checks" ? "CHECKS_FAILED" : "CHECKS_UNRUNNABLE", head: `Ticket ${ticketId} failed. ${reason.split("\n")[0]}` };
+    const stop = failedBy === "review" ? { code: "REVIEW_FAILED", head: `Ticket ${ticketId} failed its review at ${run.tier ?? "this tier"} after ${run.tier === "local" ? "three rounds" : "a retry"}.` } : { code: failedBy === "checks" ? "CHECKS_FAILED" : "CHECKS_UNRUNNABLE", head: `Ticket ${ticketId} failed. ${reason.split("\n")[0]}` };
     const next =
       failedBy === "review"
         ? "Run /build to retry on a stronger model (a hand fix does not settle a failed review)."
@@ -810,6 +814,11 @@ export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDr
         const split = result.review ? ` (impl ${usdCell(result.costSplit.implementer)} · review ${usdCell(result.costSplit.review)} · advisors ${usdCell(result.costSplit.advisors)})` : "";
         workflow.progress(`Ticket ${chunk.ticket.id} · ${ticketDifficulty(chunk.ticket)} · ${chunk.model.provider}/${chunk.model.id} · ${formatDuration(workflow.now().getTime() - began)} · ${formatUsd(result.costUsd)}${split} · checks passed${result.review ? ` · review ${result.review}` : ""} · committed ${result.sha.slice(0, 7)}`);
         if (result.warning) workflow.progress(result.warning);
+        continue;
+      }
+      // Local mode: a ticket the local model could not pass goes straight on to Opus (the next step of the local ladder).
+      if (result.kind === "stopped" && chunk.tier === "local" && (result.code === "REVIEW_FAILED" || result.code === "CHECKS_FAILED")) {
+        workflow.progress(`Ticket ${chunk.ticket.id} · the local model did not pass (${result.code === "REVIEW_FAILED" ? "review" : "checks"}); Opus finishes it from its changes`);
         continue;
       }
       stopped = result.kind === "stopped" ? result.reason : "The ticket needs another attempt.";

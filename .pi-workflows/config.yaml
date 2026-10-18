@@ -77,8 +77,8 @@ tiers:
   ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
     - { provider: foundry, model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: openai-responses }
-  # Local mode (/plan --local): the one Ollama model on providers.local that builds every ticket; a ticket that
-  # still fails stops, it never goes to a cloud model. Use the tag `ollama list` shows: its size ("9b", "27b") tells
+  # Local mode (/plan --local): the one Ollama model on providers.local that builds every ticket. It gets three
+  # review rounds; a ticket it still cannot pass is finished by premium (Opus) in the same /build. Use the tag `ollama list` shows: its size ("9b", "27b") tells
   # the planner how small to make the tickets. Set contextWindow to what Ollama runs (OLLAMA_CONTEXT_LENGTH=65536).
   local:
     - { provider: local, model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65536 }

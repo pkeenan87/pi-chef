@@ -151,7 +151,7 @@ export interface WorkflowConfig {
   session: SessionConfig;
   /**
    * Local mode (`/plan --local`, or every plan with `default: true`): every ticket is written for and built by the
-   * one model in tiers.local, and never goes to a cloud model. How small the tickets must be comes from that model
+   * one model in tiers.local; a ticket it cannot pass in three review rounds is finished by premium (Opus). How small the tickets must be comes from that model
    * (`localProfile`). Planning and the per-ticket review stay on the session and review models.
    */
   localMode: { default: boolean };

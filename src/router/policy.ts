@@ -10,8 +10,11 @@ export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
 const ORDER: Tier[] = [...BASE_TIERS];
 /** The /build ladder: a ticket starts on its difficulty tier and moves one step up after each failure. */
 export const TICKET_LADDER: Tier[] = [...TICKET_TIERS, "premium"];
-/** The local-mode ladder: the one local tier, then stop. It never reaches a cloud tier. */
-export const LOCAL_LADDER: Tier[] = [...LOCAL_TIERS];
+/**
+ * The local-mode ladder: the local model, then premium (Opus) to finish a ticket the local model could not pass, by
+ * the user's decision. Then stop.
+ */
+export const LOCAL_LADDER: Tier[] = [...LOCAL_TIERS, "premium"];
 
 /** Strength of a tier for the maxTier cap. The ticket tiers sit between standard and premium; the local tiers count as cheap. */
 function capRank(tier: Tier): number {
@@ -107,7 +110,8 @@ export function decideRoute(
     // security-heavy tickets high). Unavailable or blocked tiers move up the same ladder below. The proven-tier
     // shortcut does not apply: it could only pick another tier.
     tier = options.ticketTier;
-    if (breaker(tier) || probe(tier).blocked?.code === "circuit_open") {
+    // The local tier has no circuit escalation: a new local ticket always starts on the local model.
+    if (tier !== "local" && (breaker(tier) || probe(tier).blocked?.code === "circuit_open")) {
       const escalated = escalateImplementation(tier, cap, config);
       if (escalated !== tier) reasons.push(`circuit_escalated_from_${tier}`);
       tier = escalated;
@@ -140,7 +144,8 @@ export function decideRoute(
   const movable = (code: string) => code === "excluded" || code === "no_candidates" || code === "circuit_open" || (code === "unavailable" && options.strictAvailability === true);
   // What each tier tried before the ladder moved up, so a final stop names every candidate and its reason.
   const tried: string[] = [];
-  while (selection.blocked && tier !== "deterministic" && movable(selection.blocked.code)) {
+  // A down local server never moves a local ticket on: Opus finishes only a ticket the local model tried and failed.
+  while (selection.blocked && tier !== "deterministic" && tier !== "local" && movable(selection.blocked.code)) {
     const escalated = escalateImplementation(tier, cap, config);
     if (escalated === tier) break;
     if (selection.blocked.code === "unavailable") tried.push(selection.blocked.message);
