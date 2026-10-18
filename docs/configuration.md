@@ -14,7 +14,7 @@ Every config file and every setting: where the files live, how a project file la
   - Each file may also be named `.yml`. When both exist, `.yaml` wins and a warning names the ignored file.
   - The files are read again whenever one changes, so edits apply to the next command with no restart.
 - **When no file exists,** the built-in defaults below apply.
-- **Creating the project file.** `npx github:pkeenan87/pi-chef init` copies the sample `.pi-workflows/config.yaml` into a project. The sample is the best starting point: it prices every built-in model.
+- **Creating the files.** `npx github:pkeenan87/pi-chef init` copies the sample `.pi-workflows/config.yaml` into a project; it is the best starting point because it prices every built-in model. When you have no user config, init also writes `~/.pi/agent/chef.yaml` with every personal setting commented out at its default (the template is `templates/chef.yaml`): uncomment a line and its section header to change it. A file that is empty or all comments loads as an empty config.
 - **No secrets.** No file may contain a secret, API key or token: a file that does is rejected. Credentials stay with Pi (`/login`), `az`, the Vercel CLI, or an environment variable you name.
 
 Other files pi-chef reads that are not its config:

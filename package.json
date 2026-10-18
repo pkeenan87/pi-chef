@@ -19,7 +19,7 @@
   "bin": {
     "pi-chef-init": "./bin/init.mjs"
   },
-  "files": ["src", "skills", "bin", ".pi-workflows/config.yaml", "README.md", "docs"],
+  "files": ["src", "skills", "bin", "templates", ".pi-workflows/config.yaml", "README.md", "docs"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

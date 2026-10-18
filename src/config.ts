@@ -1177,7 +1177,8 @@ function readConfigFile(file: string, warnings: string[]): Record<string, unknow
       const first = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable";
       throw new WorkflowError("CONFIG_INVALID", `${displayPath(file)}: YAML could not be read (${first})`);
     }
-    return normalizeRaw(parsed, file, warnings, true);
+    // An empty file, or one that is all comments (the commented chef.yaml template), is an empty config.
+    return normalizeRaw(parsed ?? {}, file, warnings, true);
   } catch (error) {
     if (error instanceof ConfigFileError) throw error;
     const code = error instanceof WorkflowError ? error.code : "CONFIG_INVALID";

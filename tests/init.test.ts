@@ -23,8 +23,11 @@ function fakePi(exitCode = 0): { bin: string; log: string } {
   return { bin: dir, log };
 }
 
-async function init(args: string[], cwd: string, pathDir?: string) {
-  const env = { ...process.env, PATH: pathDir ? `${pathDir}${path.delimiter}${process.env.PATH}` : "/nonexistent" };
+/** A throwaway HOME, so init never writes the real ~/.pi/agent/chef.yaml. */
+const testHome = mkdtempSync(path.join(tmpdir(), "pi-chef-home-"));
+
+async function init(args: string[], cwd: string, pathDir?: string, home = testHome) {
+  const env = { ...process.env, HOME: home, PATH: pathDir ? `${pathDir}${path.delimiter}${process.env.PATH}` : "/nonexistent" };
   try {
     const { stdout } = await exec(process.execPath, [script, ...args], { cwd, env });
     return { code: 0, stdout };
@@ -35,6 +38,20 @@ async function init(args: string[], cwd: string, pathDir?: string) {
 }
 
 describe("pi-chef-init", () => {
+  it("writes the commented user config once, and never overwrites one you have", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "pi-chef-home-"));
+    const user = path.join(home, ".pi", "agent", "chef.yaml");
+    const dry = await init(["--no-install", "--dry-run"], project(), undefined, home);
+    expect(dry.stdout).toContain("create ~/.pi/agent/chef.yaml");
+    expect(existsSync(user)).toBe(false);
+    await init(["--no-install"], project(), undefined, home);
+    expect(readFileSync(user, "utf8")).toBe(readFileSync("templates/chef.yaml", "utf8"));
+    writeFileSync(user, "budgets: { taskUsd: 50 }\n");
+    const again = await init(["--no-install", "--force"], project(), undefined, home);
+    expect(again.stdout).toContain("kept it");
+    expect(readFileSync(user, "utf8")).toBe("budgets: { taskUsd: 50 }\n");
+  });
+
   it("installs locally from package.json's repository, writes config and .gitignore", async () => {
     const cwd = project();
     const pi = fakePi();

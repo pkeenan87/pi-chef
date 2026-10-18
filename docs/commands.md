@@ -290,7 +290,8 @@ What it does:
 
 1. Runs `pi install` for this package.
 2. Copies the sample config to `.pi-workflows/config.yaml`.
-3. Adds the workflow-state lines to `.gitignore`.
+3. Creates `~/.pi/agent/chef.yaml` when you have no user config: every personal setting commented out with its default, ready to uncomment and edit. It never overwrites one you have.
+4. Adds the workflow-state lines to `.gitignore`.
 
 | Option | Meaning |
 |---|---|
@@ -298,9 +299,9 @@ What it does:
 | `--ref <ref>` | Tag or commit to pin, appended as `@<ref>` to a git source |
 | `--global` | Install for every project (`~/.pi/agent/settings.json`) instead of this project only |
 | `--dir <path>` | Target project directory. Default: the current directory |
-| `--force` | Overwrite an existing `.pi-workflows/config.yaml` |
+| `--force` | Overwrite an existing `.pi-workflows/config.yaml` (never `~/.pi/agent/chef.yaml`) |
 | `--no-install` | Skip `pi install`; only write the config and `.gitignore` |
-| `--dry-run` | Print what would happen and change nothing |
+| `--dry-run` | Print what would happen and change nothing, for both files |
 | `-h`, `--help` | Show the options |
 
 If `pi` is missing or `pi install` fails, it still writes the config, prints the install command, and exits 1. More install methods are in [install.md](install.md).

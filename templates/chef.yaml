@@ -1,0 +1,140 @@
+## pi-chef user config: ~/.pi/agent/chef.yaml
+##
+## Your personal settings, for every project. Everything is commented out, so the built-in defaults apply.
+## To change a setting, uncomment its line AND its section header (remove the "# " at the start), then edit it.
+## Lines starting "##" are explanations. Changes apply to the next command; no restart is needed.
+##
+## The project file .pi-workflows/config.yaml layers on top of this one, but it can only tighten your policy:
+## the lower budget wins, advisors can only be switched off, and credentials and endpoints come from here only.
+## So to RAISE a limit, raise it here and also raise or remove it in the project file.
+## Every setting is described in docs/configuration.md. Never put a secret, API key or token in this file.
+
+## ---------------------------------------------------------------------------------------------------------------
+## Budgets: hard stops on spend, in USD. A prompt, ticket or advisor call does not start at the limit.
+
+# budgets:
+#   taskUsd: 20             # one task's spend
+#   dailyUsd: 75            # all spend today
+#   softWarningRatio: 0.8   # warn at 80%; above it, advisors and batch summaries are skipped
+#   unknownCallUsd: 0.05    # what a call with an unknown cost counts as, in budget math only
+
+## ---------------------------------------------------------------------------------------------------------------
+## The main session: the model you chat with and that plans (/plan).
+
+# session:
+#   model: anthropic/claude-opus-5-5   # provider/id
+#   pin: true                          # false: keep the model you pick with /model
+#   compactionTier: cheap              # cheap | standard | premium: who writes compaction summaries
+
+## ---------------------------------------------------------------------------------------------------------------
+## Local mode: /plan --local writes every ticket for the local model in tiers.local (below) and builds it there.
+
+# localMode:
+#   default: false   # true: every /plan is local unless you pass --cloud
+
+## ---------------------------------------------------------------------------------------------------------------
+## Routing: which tier and model run each job.
+
+# routing:
+#   selection: ordered        # ordered: the first usable model in each tier's list | adaptive: cost per success
+#   reviewTier: premium       # cheap | standard | premium: the review that gates each /build commit, and /review
+#   maxTier: premium          # the highest tier any route may use
+#   maxEscalations: 3         # tier steps a failed ticket may climb
+#   circuitBreakerFailures: 3 # failures with no success that make routing skip a tier
+#   attemptOverheadUsd: 0.02  # adaptive selection only: ranking weight, never billed
+#   requirePremiumReviewFor:  # reviewed on premium, and you confirm before /build
+#     - auth
+#     - permissions
+#     - secrets
+#     - security-sensitive
+
+## ---------------------------------------------------------------------------------------------------------------
+## Advisors: second opinions from other vendors' models. They advise; they never gate.
+
+# advisors:
+#   fromDifficulty: high    # high: only high tickets consult advisors | medium: medium ones get one too
+#   tickets: true           # false: no per-ticket review in /build at all
+#   plan: true              # false: skip the advisor consult on each plan
+#   summarizeCut: true      # summarize files cut from a long diff, on the batch tier
+#   adHocMinLines: 400      # with fromDifficulty: medium, a branch with no plan gets an advisor above this
+#   maxPlanConsults: 2      # consults per plan version
+#   maxDiffChars: 40000     # the diff sent to the reviewer and advisors
+#   maxOutputTokens: 1500   # answer length an advisor is asked to keep to
+#   timeoutMs: 180000       # per call
+
+## ---------------------------------------------------------------------------------------------------------------
+## The model pass of /review.
+
+# review:
+#   model: true             # false: checks and the static scan only
+#   maxDiffChars: 120000    # one call's diff; a bigger diff is split by file
+#   maxChunks: 6            # at most this many calls
+#   timeoutMs: 300000       # per call
+
+## ---------------------------------------------------------------------------------------------------------------
+## Workers: how tickets are sized and calls priced.
+
+# workers:
+#   ticketContextTokens: 150000   # the context one cloud ticket must fit (local tickets: half the model's window)
+#   tokenBudget: 8000             # tokens one call is priced at when ranking models
+
+## ---------------------------------------------------------------------------------------------------------------
+## Which providers may see your code. An empty list means all.
+
+# orgProviderAllowlist: [anthropic, openai]   # any of: openai, anthropic, xai, foundry, vercel, local
+# proprietaryCode: false                      # true: only allowlisted providers (needs orgProviderAllowlist)
+
+## ---------------------------------------------------------------------------------------------------------------
+## Providers. OpenAI, Anthropic and xAI need no block: sign in with Pi's /login. Foundry, Vercel and a local
+## server need theirs. Setup: docs/providers.md.
+
+# providers:
+#   anthropic:
+#     apiKeyFallback: false   # true: use an API key saved in Pi when no account login is present (billed per token)
+#   openai:
+#     apiKeyFallback: false
+#   xai:
+#     apiKeyFallback: false
+#   foundry:                  # Azure AI Foundry, signed in with `az login`
+#     endpointEnv: AZURE_AI_ENDPOINT                   # a variable holding the endpoint, or set endpoint:
+#     endpoint: https://my-resource.services.ai.azure.com
+#     audience: https://ai.azure.com
+#     resourceGroup: my-resource-group                 # lets /status foundry list your deployments
+#     deployments:                                     # tier model name -> your deployment name
+#       gpt-6.1-sol: my-sol
+#   vercel:                   # Vercel AI Gateway, signed in with `vercel login && vercel link`
+#     projectDir: .
+#     envFile: .env.local
+#   local:                    # an OpenAI-compatible server on this machine, such as Ollama
+#     baseUrl: http://127.0.0.1:11434/v1
+
+## ---------------------------------------------------------------------------------------------------------------
+## Tiers: which models serve each job, in order (the first usable one runs; the rest are fallbacks).
+## A tier you list replaces the built-in list for that tier only. Price any new model under pricing.
+
+# tiers:
+#   local:                    # local mode: the one model that builds every ticket. Its size ("9b") sizes the tickets.
+#     - { provider: local, model: "qwen3.5:9b", contextWindow: 65536 }   # match OLLAMA_CONTEXT_LENGTH
+#   ticketLow:
+#     - { provider: xai, model: "grok-4.7" }
+#   ticketMedium:
+#     - { provider: anthropic, model: claude-sonnet-5-5 }
+#   ticketHigh:
+#     - { provider: openai, model: "gpt-6.1-sol" }
+#   premium:
+#     - { provider: anthropic, model: claude-opus-5-5 }
+
+## ---------------------------------------------------------------------------------------------------------------
+## Pricing: USD per million tokens. A model with no row has an unknown cost (a local model is $0).
+## The project's sample config already prices the built-in models; add rows here for models only you use.
+## billing: api-key prices a model while its provider is on an API key (apiKeyFallback). The price is an example:
+## take yours from the provider's rate card.
+
+# pricing:
+#   - { provider: anthropic, model: claude-sonnet-5-5, billing: api-key, effectiveFrom: "2026-10-01", inputPerMillionUsd: 2, outputPerMillionUsd: 10 }
+
+## ---------------------------------------------------------------------------------------------------------------
+## Everything else.
+
+# branchPrefix: chef            # /build names its branch <branchPrefix>/<task name>
+# workspaceDir: .pi-workflows   # where task state, the ledger and metrics live, in each project

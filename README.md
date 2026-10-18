@@ -35,11 +35,12 @@ From the project directory:
 npx github:pkeenan87/pi-chef init
 ```
 
-`init` (the `pi-chef-init` bin) does three things:
+`init` (the `pi-chef-init` bin) does four things:
 
 1. Runs `pi install -l git:github.com/pkeenan87/pi-chef`. The source comes from `repository` in `package.json`.
 2. Copies the sample config to `.pi-workflows/config.yaml`. It keeps an existing file unless you pass `--force`.
-3. Adds any missing workflow-state lines to `.gitignore`. Lines already there are not added twice.
+3. Creates your user config, `~/.pi/agent/chef.yaml`, when you have none: every personal setting (budgets, session model, routing, advisors, providers, tiers, local mode) as a commented-out example with its default. Uncomment a line and its section header to change it. An existing user config is never overwritten, `--force` included.
+4. Adds any missing workflow-state lines to `.gitignore`. Lines already there are not added twice.
 
 If `pi` is missing or `pi install` fails, it still writes the config, prints the install command to run yourself, and exits 1.
 

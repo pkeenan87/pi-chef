@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Pi extension that plans, builds and reviews coding work with the right model for each job (/plan, /build, /review), with role-based routing and cost tracking. See README.md for user-facing behavior, and `docs/` for commands (`commands.md`), configuration (`configuration.md`: every setting), providers (`providers.md`), install and layout (`install.md`), and the Pi API surface (`COMPATIBILITY.md`). This file is for agents working on this repo. When a change alters user-facing behavior, update the doc that describes it; a new command or argument goes in `docs/commands.md`, a new config key in the settings reference of `docs/configuration.md`.
+Pi extension that plans, builds and reviews coding work with the right model for each job (/plan, /build, /review), with role-based routing and cost tracking. See README.md for user-facing behavior, and `docs/` for commands (`commands.md`), configuration (`configuration.md`: every setting), providers (`providers.md`), install and layout (`install.md`), and the Pi API surface (`COMPATIBILITY.md`). This file is for agents working on this repo. When a change alters user-facing behavior, update the doc that describes it; a new command or argument goes in `docs/commands.md`, a new config key in the settings reference of `docs/configuration.md` and, if it is a personal setting, commented out at its default in `templates/chef.yaml` (the user config `init` writes; a test uncomments it and checks the defaults).
 
 ## Commands
 
