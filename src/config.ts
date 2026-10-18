@@ -150,12 +150,11 @@ export interface WorkflowConfig {
   /** The main chat session: a normal Pi model, pinned at session start, with compaction on a cheap tier. */
   session: SessionConfig;
   /**
-   * Local mode (`/plan --local`, or every plan with `default: true`): tickets are written for and built by the
-   * local models in tiers.localSmall (low tickets) and tiers.localLarge (medium), and never go to a cloud model.
-   * `ticketContextTokens` is the size a local ticket must fit (system prompt and tools included); `maxFilesPerTicket`
-   * caps the files one ticket may touch. Planning and the per-ticket review stay on the session and review models.
+   * Local mode (`/plan --local`, or every plan with `default: true`): every ticket is written for and built by the
+   * one model in tiers.local, and never goes to a cloud model. How small the tickets must be comes from that model
+   * (`localProfile`). Planning and the per-ticket review stay on the session and review models.
    */
-  localMode: { default: boolean; ticketContextTokens: number; maxFilesPerTicket: number };
+  localMode: { default: boolean };
   workers: {
     /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
@@ -234,10 +233,9 @@ export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
     { provider: "openai", model: "gpt-6.1-sol" },
     { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
   ],
-  // Local mode (/plan --local): the Ollama tags of the two local models. Set tiers.localSmall / localLarge to yours.
-  // contextWindow must match what Ollama runs (OLLAMA_CONTEXT_LENGTH), or Pi overfills a smaller window.
-  localSmall: [{ provider: "local", model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65_536 }],
-  localLarge: [{ provider: "local", model: "qwen3.5:27b", label: "Qwen 3.5 27B (local)", contextWindow: 65_536 }],
+  // Local mode (/plan --local): the Ollama model that builds every ticket. Its size (the "9b" in the tag) decides
+  // how small the planner makes the tickets. contextWindow must match what Ollama runs (OLLAMA_CONTEXT_LENGTH).
+  local: [{ provider: "local", model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65_536 }],
   advisor: [
     { provider: "openai", model: "gpt-6-astra" },
     { provider: "anthropic", model: "claude-fable-5-1" },
@@ -260,7 +258,7 @@ const DEFAULTS: WorkflowConfig = {
     selection: "ordered",
   },
   session: DEFAULT_SESSION,
-  localMode: { default: false, ticketContextTokens: 32_000, maxFilesPerTicket: 3 },
+  localMode: { default: false },
   workers: {
     tokenBudget: 8000,
     ticketContextTokens: 150000,
@@ -668,8 +666,6 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   const localMode = section(raw, "localMode", where);
   if (localMode) {
     if (localMode.default !== undefined && typeof localMode.default !== "boolean") invalid(where, "localMode.default", "must be a boolean");
-    checkNumber(localMode, "ticketContextTokens", where, { min: 8000, integer: true }, "localMode");
-    checkNumber(localMode, "maxFilesPerTicket", where, { min: 1, integer: true }, "localMode");
   }
   if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
     invalid(where, "branchPrefix", "must be a plain branch-name prefix such as chef");
@@ -1314,6 +1310,43 @@ export function estimateUsd(
     (usage.cacheRead ?? 0) * toMicroUsd(row.cacheReadPerMillionUsd ?? row.inputPerMillionUsd) +
     (usage.cacheWrite ?? 0) * toMicroUsd(row.cacheWritePerMillionUsd ?? row.inputPerMillionUsd);
   return fromMicroUsd(Math.round(scaled / MICRO));
+}
+
+/** How small local-mode tickets must be, read from the local model itself: its size from the tag, its window from contextWindow. */
+export interface LocalProfile {
+  /** `provider/model` of the model in tiers.local. */
+  model: string;
+  /** Billions of parameters from the tag (`qwen3.5:9b` is 9), or undefined when the tag does not say. */
+  sizeB?: number;
+  /** "9B model", or "small model" when the size is unknown. */
+  label: string;
+  /** Under 14B, or unknown: low tickets only and fewer files. */
+  small: boolean;
+  difficulties: ("low" | "medium")[];
+  maxFiles: number;
+  /** The size a ticket must fit: half the model's context window (system prompt and tools included). */
+  targetTokens: number;
+}
+
+/** The parameter count in a model tag: `qwen3.5:9b` 9, `gemma3:27b` 27, `llama3.1:8b-instruct` 8, `phi-4-14B` 14. */
+export function modelSizeB(model: string): number | undefined {
+  const match = /(?:^|[^a-z0-9.])(\d+(?:\.\d+)?)b(?![a-z])/i.exec(model);
+  return match ? Number(match[1]) : undefined;
+}
+
+export function localProfile(config: WorkflowConfig): LocalProfile {
+  const candidate = tierCandidates(config, "local")[0];
+  const sizeB = candidate ? modelSizeB(candidate.model) : undefined;
+  const small = sizeB === undefined || sizeB < 14;
+  return {
+    model: candidate ? `${candidate.provider}/${candidate.model}` : "(none: set tiers.local)",
+    ...(sizeB !== undefined ? { sizeB } : {}),
+    label: sizeB !== undefined ? `${sizeB}B model` : "small model",
+    small,
+    difficulties: small ? ["low"] : ["low", "medium"],
+    maxFiles: small ? 2 : 3,
+    targetTokens: Math.max(8_000, Math.floor((candidate?.contextWindow ?? 32_768) / 2)),
+  };
 }
 
 /**

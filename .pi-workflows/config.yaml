@@ -77,25 +77,22 @@ tiers:
   ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
     - { provider: foundry, model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: openai-responses }
-  # Local mode (/plan --local): Ollama models on providers.local. low tickets run on localSmall, medium on
-  # localLarge; a failed ticket climbs small -> large and stops, never to a cloud model. Use the tags `ollama list`
-  # shows, and set contextWindow to the context Ollama runs them with (OLLAMA_CONTEXT_LENGTH=65536).
-  localSmall:
+  # Local mode (/plan --local): the one Ollama model on providers.local that builds every ticket; a ticket that
+  # still fails stops, it never goes to a cloud model. Use the tag `ollama list` shows: its size ("9b", "27b") tells
+  # the planner how small to make the tickets. Set contextWindow to what Ollama runs (OLLAMA_CONTEXT_LENGTH=65536).
+  local:
     - { provider: local, model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65536 }
-  localLarge:
-    - { provider: local, model: "qwen3.5:27b", label: "Qwen 3.5 27B (local)", contextWindow: 65536 }
   advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
     - { provider: openai, model: gpt-6-astra }
     - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
 
-# Local mode. /plan --local (or default: true) has the session model write tickets a small local model can finish
-# alone (low or medium, few files, numbered steps, a check each); /build runs them on the local tiers only. Planning
-# and the per-ticket review stay on the session and review models. Local models are priced at $0.
+# Local mode. /plan --local (or default: true) has the session model write tickets the tiers.local model can finish
+# alone, sized from that model: under 14B (or no size in the tag) low tickets in up to 2 files, 14B and up low or
+# medium in up to 3; numbered steps, a check each, half its contextWindow. /build runs them on that model only.
+# Planning and the per-ticket review stay on the session and review models. Local models are priced at $0.
 localMode:
   default: false              # true: every /plan is local unless you pass --cloud
-  ticketContextTokens: 32000  # a local ticket must fit this, system prompt and tools included
-  maxFilesPerTicket: 3
 
 routing:
   maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium

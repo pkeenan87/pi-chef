@@ -87,6 +87,9 @@ function strings(value: unknown): string[] {
 
 /** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
 export interface LocalTicketRules {
+  /** "9B model": named in the errors, so the planner knows why. */
+  label: string;
+  difficulties: string[];
   maxFiles: number;
   /** True when the config sets no checks, so each ticket must bring its own. */
   needChecks: boolean;
@@ -95,9 +98,9 @@ export interface LocalTicketRules {
 /** What a local-mode ticket must have so a small model can finish it: low or medium, few listed files, numbered steps, a check. */
 function localTicketProblems(label: string, item: { difficulty?: string; files: string[]; implementation: string; checks: string[] }, rules: LocalTicketRules): string[] {
   const errors: string[] = [];
-  if (item.difficulty !== "low" && item.difficulty !== "medium") errors.push(`Ticket ${label}: local mode needs difficulty low or medium${item.difficulty ? ` (not ${item.difficulty})` : ""}; split a harder ticket into low and medium ones.`);
+  if (!item.difficulty || !rules.difficulties.includes(item.difficulty)) errors.push(`Ticket ${label}: for the local ${rules.label}, difficulty must be ${rules.difficulties.join(" or ")}${item.difficulty ? ` (not ${item.difficulty})` : ""}; split a harder ticket.`);
   if (item.files.length === 0) errors.push(`Ticket ${label}: local mode needs files: every file the ticket touches (at most ${rules.maxFiles}).`);
-  else if (item.files.length > rules.maxFiles) errors.push(`Ticket ${label}: touches ${item.files.length} files; local mode allows at most ${rules.maxFiles} (localMode.maxFilesPerTicket). Split it.`);
+  else if (item.files.length > rules.maxFiles) errors.push(`Ticket ${label}: touches ${item.files.length} files; the local ${rules.label} gets at most ${rules.maxFiles}. Split it.`);
   const steps = item.implementation.split("\n").filter((line) => /^\s*\d+[.)]\s+\S/.test(line)).length;
   if (steps < 2) errors.push(`Ticket ${label}: local mode needs implementation as numbered steps ("1. ", "2. "), at least two, each naming the file and the exact function, type or test to change.`);
   if (rules.needChecks && item.checks.length === 0) errors.push(`Ticket ${label}: local mode needs at least one check (a targeted test command), because the config sets no checks.`);

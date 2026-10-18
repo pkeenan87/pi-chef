@@ -10,7 +10,7 @@ export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
 const ORDER: Tier[] = [...BASE_TIERS];
 /** The /build ladder: a ticket starts on its difficulty tier and moves one step up after each failure. */
 export const TICKET_LADDER: Tier[] = [...TICKET_TIERS, "premium"];
-/** The local-mode ladder: small, then large, then stop. It never reaches a cloud tier. */
+/** The local-mode ladder: the one local tier, then stop. It never reaches a cloud tier. */
 export const LOCAL_LADDER: Tier[] = [...LOCAL_TIERS];
 
 /** Strength of a tier for the maxTier cap. The ticket tiers sit between standard and premium; the local tiers count as cheap. */

@@ -190,17 +190,19 @@ A check that cannot run (no such command, a denied command, or a failing `setup`
 
 ### Local mode
 
-`/plan --local <request>` plans as usual on your session model (Opus), but writes the tickets for two local models served by Ollama: a 9B model (`tiers.localSmall`) builds `low` tickets and a 27B model (`tiers.localLarge`) builds `medium` ones. `/build` then runs every ticket on those local models and nothing else: a failed `low` ticket is retried once on the 27B model, and a ticket still failing there stops with `MAX_ESCALATIONS` instead of going to a cloud model. If Ollama is down the build stops with `NO_CANDIDATE` and says so. Set `localMode.default: true` to make every plan local; `--cloud` overrides it for one plan.
+`/plan --local <request>` plans as usual on your session model (Opus), but writes every ticket for the one local model in `tiers.local` (Ollama), and `/build` runs them all on it and nothing else. A ticket that still fails there stops with `MAX_ESCALATIONS` for you to fix; it never goes to a cloud model. If Ollama is down the build stops with `NO_CANDIDATE` and says so. Set `localMode.default: true` to make every plan local; `--cloud` overrides it for one plan.
 
-The planner is told who builds the tickets and why that matters: small models follow instructions literally, have small context windows, and are not sent the spec. `plan_tickets` enforces it, and sends back any ticket that does not fit:
+There is no size switch: the size is read from the model's tag (`qwen3.5:9b` is 9B, `gemma3:27b` is 27B), and the planner is told it. A model under 14B, or one whose tag gives no size, gets the strictest tickets. `plan_tickets` enforces them and sends back any ticket that does not fit:
 
-- difficulty `low` or `medium` only (a harder ticket is split);
-- at most `localMode.maxFilesPerTicket` files (default 3), all listed;
-- `implementation` as numbered steps, each naming the file and the exact function, type or test, with signatures and the existing lines it attaches to;
-- at least one check (a targeted test command) when the config has none;
-- the `localMode.ticketContextTokens` target (default 32,000, system prompt and tools included) instead of `workers.ticketContextTokens`.
+| | Under 14B (or unknown) | 14B and up |
+|---|---|---|
+| difficulty | `low` only | `low` or `medium` |
+| files per ticket (all listed) | at most 2 | at most 3 |
+| context target (system prompt and tools included) | half the model's `contextWindow` | half the model's `contextWindow` |
 
-Each local ticket's prompt has short literal rules and no spec, and its blocker summaries, repo rules and previous failure are clipped to fit. The per-ticket review stays on `routing.reviewTier` (Opus), which reads the ticket's diff in the cloud; compaction of a local ticket's session is left to Pi on the local model, so the transcript stays local. Local models cost $0 (an unpriced `local` model is a known $0, never unknown). The status line shows `local` after the task name, and `/status` adds a Mode row. Setup is in [docs/providers.md](docs/providers.md#local-inference).
+Every local ticket also needs `implementation` as numbered steps, each naming the file and the exact function, type or test with signatures and the existing lines it attaches to, and at least one check (a targeted test command) when the config has none. The planner is told that small models follow instructions literally, have small context windows, and are not sent the spec.
+
+Each local ticket's prompt has short literal rules and no spec, and its blocker summaries, repo rules and previous failure are clipped to fit. The per-ticket review stays on `routing.reviewTier` (Opus), which reads the ticket's diff in the cloud; compaction of a local ticket's session is left to Pi on the local model, so the transcript stays local. Local models cost $0 (an unpriced `local` model is a known $0, never unknown). The status line shows `local` after the task name, and `/status` adds a Mode row with the model and its ticket limits. Setup is in [docs/providers.md](docs/providers.md#local-inference).
 
 ### /review
 
@@ -291,7 +293,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 
 | Command | Effect |
 |---|---|
-| `/plan [--no-questions] [--local \| --cloud] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits. `--local` writes the tickets for the local models and `/build` runs them there only ([Local mode](#local-mode)) |
+| `/plan [--no-questions] [--local \| --cloud] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits. `--local` writes the tickets for the local model in `tiers.local`, sized from its tag, and `/build` runs them there only ([Local mode](#local-mode)) |
 | `/show-plan` | Show the active task's full plan under its name and state. A draft opens the review so you can approve it |
 | `/plans [--all]`, `/plans <name>`, `/plans close <name>` | List tasks (the active one marked), switch to one (checks out its branch when clean, shows its plan), or close one (files and branches kept). `/plan` always starts a new task and parks an unfinished one |
 | `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then an Opus review (with advisors for medium and high tickets), then a commit, on one branch. Run again to resume |

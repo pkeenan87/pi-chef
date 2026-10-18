@@ -37,20 +37,29 @@ The spec is saved. Break the work into tickets, consult the advisors on the draf
 - whatToBuild states the end-to-end behavior. implementation is the technical how: the files to create or change, the functions, types and signatures to add (with names), how they wire into existing code, and the tests to write. Name real paths and symbols from the code you read.
 - List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
-${local ? "- difficulty is low or medium and picks the local model; see LOCAL MODE TICKETS below. Set it on every ticket. A failed low ticket is retried once on the larger local model." : "- difficulty (low, medium or high) picks the model that builds the ticket: low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting, tricky logic, concurrency, or a large blast radius. Rate a ticket high when it touches auth, secrets, untrusted input, or egress; the difficulty picks the implementer. Set it on every ticket. A failed ticket is retried on the next stronger model."}
+${local ? "- difficulty: see LOCAL MODE TICKETS below. Set it on every ticket. Every ticket runs on the same local model, and one that still fails stops the build for you to fix." : "- difficulty (low, medium or high) picks the model that builds the ticket: low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting, tricky logic, concurrency, or a large blast radius. Rate a ticket high when it touches auth, secrets, untrusted input, or egress; the difficulty picks the implementer. Set it on every ticket. A failed ticket is retried on the next stronger model."}
 - checks is optional: command lines /build runs in the repo root after the ticket, one command per entry with plain space-separated arguments. There is no shell: no &&, |, ;, redirects, quotes, $VARS or globs (use two entries instead of &&). Destructive commands are refused. Verification steps that are not a command belong in implementation.
 - Before plan_tickets, call plan_consult with the draft \`tickets\` and 2-3 specific \`questions\` about the riskiest parts (design risks, ordering, missing cases). Every advisor answers in parallel. Resolve any disagreement yourself, then call plan_tickets with the final tickets and \`advisorResolution\`: what you accepted, what you rejected, and why. plan_tickets refuses without it. plan_consult runs once per draft.
 plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves on the review screen (or later with /show-plan) and then runs /build. Do not implement anything.`;
 
-/** Added to every planning prompt of a local-mode task, so the spec is shaped for small implementers from the start. */
-export const LOCAL_PLAN_NOTE = `[LOCAL MODE]
-This plan will be built by small local models, not by you: a 9B model for low tickets and a 27B model for medium ones. They follow instructions literally, have small context windows, explore little, and are not sent the spec. Make the approach concrete enough to hand over as small, exact steps: decide every name, type, signature, error message and edge case in the spec.`;
+/** What the planner is told about the local model, from `localProfile`. */
+export interface LocalPlanTarget {
+  label: string;
+  small: boolean;
+  difficulties: string[];
+  maxFiles: number;
+  targetTokens: number;
+}
 
-/** The ticket rules for a local-mode plan: replaces the cloud difficulty rule and adds what a small model needs. */
-export const LOCAL_TICKET_RULES = (target: number, maxFiles: number) => `[LOCAL MODE TICKETS]
-Write every ticket so a small local model can finish it alone in one try:
-- difficulty is low or medium only; plan_tickets rejects high. low = one mechanical change in one or two files (the 9B model); medium = one contained behavior in up to ${maxFiles} files (the 27B model). Split anything harder until every piece is low or medium.
-- files lists every file the ticket touches, at most ${maxFiles}. The context target is ${target} tokens, system prompt and tools included, so keep tickets small.
+/** Added to every planning prompt of a local-mode task, so the spec is shaped for the local model from the start. */
+export const LOCAL_PLAN_NOTE = (target: LocalPlanTarget) => `[LOCAL MODE]
+This plan will be built by a ${target.label} running locally, not by you. It follows instructions literally, has a small context window, explores little, and is not sent the spec. Make the approach concrete enough to hand over as small, exact steps: decide every name, type, signature, error message and edge case in the spec.`;
+
+/** The ticket rules for a local-mode plan, sized to the local model: replaces the cloud difficulty rule. */
+export const LOCAL_TICKET_RULES = (target: LocalPlanTarget) => `[LOCAL MODE TICKETS]
+Every ticket is built by the same ${target.label}. Write each one so it can finish it alone in one try:
+- difficulty: ${target.difficulties.join(" or ")} only; plan_tickets rejects anything else. ${target.small ? "low = one mechanical change in one or two files. Split anything bigger until every piece is that small." : "low = one mechanical change; medium = one contained behavior. Split anything harder until every piece is low or medium."}
+- files lists every file the ticket touches, at most ${target.maxFiles}. The context target is ${target.targetTokens} tokens, system prompt and tools included, so keep tickets small${target.small ? " and prefer more, smaller tickets" : ""}.
 - implementation is a numbered list ("1. ", "2. ", at least two steps), one change per step, in order. Each step names the file and the exact function, type, export or test to add or edit, with its full signature, and says where it goes (after which function, inside which describe block). Quote the existing lines the change attaches to (an import, a signature), so the model does not have to search.
 - Leave no decision to the implementer: names, types, return values, error messages and edge cases are written in the ticket. Repeat any spec detail the ticket needs; the spec is not sent.
 - whatToBuild is 2-4 sentences. acceptanceCriteria are observable and covered by the checks.

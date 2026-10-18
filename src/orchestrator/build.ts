@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
-import { DIFFICULTY_TIER, LOCAL_DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
+import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { LOCAL_LADDER, TICKET_LADDER, escalateImplementation } from "../router/policy.js";
@@ -424,7 +424,7 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
 
 /** The ticket tier a first attempt starts on: its own difficulty. A security-sensitive plan does not raise it; the planner rates such tickets high. */
 function startTier(ticket: Ticket, local = false): Tier {
-  return local ? LOCAL_DIFFICULTY_TIER[ticketDifficulty(ticket)] : DIFFICULTY_TIER[ticketDifficulty(ticket)];
+  return local ? "local" : DIFFICULTY_TIER[ticketDifficulty(ticket)];
 }
 
 /** Routes the ticket (its difficulty tier, one step up the ticket ladder after a failure), gates the budget, builds the prompt, and marks the ticket running. */

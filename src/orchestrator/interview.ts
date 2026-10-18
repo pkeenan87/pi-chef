@@ -1,3 +1,4 @@
+import { localProfile } from "../config.js";
 import { isDifficulty, WorkflowError, type AcceptedClassification, type CommandResult, type Complexity, type TaskState } from "../domain.js";
 import { redact, redactUnknown } from "../redact.js";
 import { classifyKeywords, isSecuritySensitive, plannerClassification, type PlannerRating } from "../router/classify.js";
@@ -167,8 +168,10 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     await announce(ctx, state.taskId, "interview", routing);
     showStatus(ctx);
-    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${localMode ? " (local mode: the tickets go to local models)" : ""}:\n\n${safe}`);
-    const where = localMode ? " Local mode: tickets will be written for and built by the local models." : "";
+    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${localMode ? " (local mode: every ticket goes to the local model)" : ""}:\n\n${safe}`);
+    const profile = localMode ? localProfile(ctx.config) : undefined;
+    // Say which model and size the tickets are written for, so a wrong tiers.local is caught before planning.
+    const where = profile ? ` Local mode: tickets will be written for a ${profile.label} (${profile.model}) and built only there.` : "";
     return done(
       `${noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`}${where}`,
       { taskId: state.taskId, routing },
@@ -422,7 +425,7 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const found = activePlanning(ctx);
   if (!found) return undefined;
   const text = stagePrompt(ctx, found);
-  return found.task.localMode ? `${text}\n\n${LOCAL_PLAN_NOTE}` : text;
+  return found.task.localMode ? `${text}\n\n${LOCAL_PLAN_NOTE(localProfile(ctx.config))}` : text;
 }
 
 function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof activePlanning>>): string {
@@ -432,7 +435,7 @@ function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof 
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
     const rules = task.localMode
-      ? [TICKET_RULES(ctx.config.localMode.ticketContextTokens, true), "", LOCAL_TICKET_RULES(ctx.config.localMode.ticketContextTokens, ctx.config.localMode.maxFilesPerTicket)]
+      ? [TICKET_RULES(localProfile(ctx.config).targetTokens, true), "", LOCAL_TICKET_RULES(localProfile(ctx.config))]
       : [TICKET_RULES(ctx.config.workers.ticketContextTokens)];
     return [...rules, ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
   }

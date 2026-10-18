@@ -1,4 +1,4 @@
-import { modelLabel, tierCandidates } from "../config.js";
+import { localProfile, modelLabel, tierCandidates } from "../config.js";
 import { selectCandidate } from "../router/select.js";
 import { foundrySection } from "./status-foundry.js";
 import { LOCAL_TIERS, PROVIDERS, TIER_KEYS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type RoutingDecision, type TaskState } from "../domain.js";
@@ -177,7 +177,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
   ].join(" · ");
   const pairs: [string, string][] = [
     ["Task", state ? `${displayName(state)} (${state.taskId})` : "none"],
-    ...(state?.localMode ? [["Mode", `local: tickets run on ${[...new Set(["localSmall", "localLarge"].flatMap((tier) => tierCandidates(ctx.config, tier as "localSmall").map((item) => modelLabel(ctx.config, item.provider, item.model))))].join(", ")} only; review stays on ${ctx.config.routing.reviewTier}`] as [string, string]] : []),
+    ...(state?.localMode ? [["Mode", ((profile) => `local: every ticket runs on ${profile.model} (tickets sized for a ${profile.label}: ${profile.difficulties.join("/")}, at most ${profile.maxFiles} files, ${profile.targetTokens} tokens); review stays on ${ctx.config.routing.reviewTier}`)(localProfile(ctx.config))] as [string, string]] : []),
     ["Plan", plan],
     ["Branch", state?.build ? `${state.build.branch} (base ${state.build.base})${ahead !== undefined ? ` · ${ahead} commit${ahead === 1 ? "" : "s"} ahead` : ""}` : "not started"],
     ["Review", reviewSummary(state?.review, git)],

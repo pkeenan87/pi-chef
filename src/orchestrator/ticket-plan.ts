@@ -1,3 +1,4 @@
+import { localProfile } from "../config.js";
 import { WorkflowError, type PlanAdvisorReview, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
 import { remember } from "./budget.js";
 import { active, iso, knownZero, type WorkflowContext } from "./context.js";
@@ -10,11 +11,11 @@ import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validat
 /** Validates model- or person-written tickets against the config's context target and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
   // The stored task (no git: plan tools run mid-turn). A local-mode task gets the local target and rules.
-  const local = active(ctx)?.localMode === true;
+  const local = active(ctx)?.localMode === true ? localProfile(ctx.config) : undefined;
   return validateTickets(input, {
-    target: local ? ctx.config.localMode.ticketContextTokens : ctx.config.workers.ticketContextTokens,
+    target: local ? local.targetTokens : ctx.config.workers.ticketContextTokens,
     fileSize: (file) => projectFileSize(ctx.cwd, file),
-    ...(local ? { local: { maxFiles: ctx.config.localMode.maxFilesPerTicket, needChecks: ctx.config.checks.length === 0 } } : {}),
+    ...(local ? { local: { label: local.label, difficulties: local.difficulties, maxFiles: local.maxFiles, needChecks: ctx.config.checks.length === 0 } } : {}),
   });
 }
 

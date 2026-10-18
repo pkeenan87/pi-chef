@@ -31,10 +31,10 @@ export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as c
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
 /**
- * Local-mode ticket tiers (`/plan --local`): a small and a large local model (Ollama). A low ticket starts small, a
- * medium one large; a failed ticket climbs small to large and then stops. It never goes to a cloud model.
+ * The local-mode tier (`/plan --local`): the one local model (Ollama) that builds every ticket. A ticket that still
+ * fails there stops; it never goes to a cloud model.
  */
-export const LOCAL_TIERS = ["localSmall", "localLarge"] as const;
+export const LOCAL_TIERS = ["local"] as const;
 export type LocalTier = (typeof LOCAL_TIERS)[number];
 /**
  * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
@@ -51,8 +51,6 @@ export function isDifficulty(value: string): value is Difficulty {
 }
 /** The ticket tier a difficulty starts on. */
 export const DIFFICULTY_TIER: Record<Difficulty, TicketTier> = { low: "ticketLow", medium: "ticketMedium", high: "ticketHigh" };
-/** The local tier a difficulty starts on in local mode. Local plans have no high tickets; an old one runs large. */
-export const LOCAL_DIFFICULTY_TIER: Record<Difficulty, LocalTier> = { low: "localSmall", medium: "localLarge", high: "localLarge" };
 /** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
 export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
   if (ticket.difficulty) return ticket.difficulty;
@@ -159,7 +157,7 @@ export interface Ticket {
 
 export interface PlanDocument {
   version: number;
-  /** Written for local mode: its tickets are built by tiers.localSmall and tiers.localLarge. */
+  /** Written for local mode: its tickets are built by the model in tiers.local. */
   localMode?: boolean;
   createdAt: string;
   summary: string;
@@ -543,7 +541,7 @@ export interface TaskState {
   /** Set when the task was closed (a person, or a new /plan after it finished). Its files and branch are kept. */
   closedAt?: string;
   closedReason?: string;
-  /** Local mode, chosen at /plan: tickets are written for and built by the local tiers only (localSmall, localLarge). */
+  /** Local mode, chosen at /plan: tickets are written for and built by the model in tiers.local only. */
   localMode?: boolean;
   phase: Phase;
   planning?: PlanningProgress;

@@ -731,27 +731,27 @@ describe("/build in local mode", () => {
     return t;
   };
 
-  it("builds low tickets on the small local model and medium ones on the large one, with the local rules and no spec", async () => {
+  it("builds every ticket, whatever its difficulty, on the one local model, with the local rules and no spec", async () => {
     const t = await localTask([ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })]);
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends.map((send) => `${send.model.provider}/${send.model.id}`)).toEqual(["local/qwen3.5:9b", "local/qwen3.5:27b"]);
+    expect(d.sends.map((send) => `${send.model.provider}/${send.model.id}`)).toEqual(["local/qwen3.5:9b", "local/qwen3.5:9b"]);
     expect(d.sends[0]!.text).toContain("[BUILD CHUNK · LOCAL MODEL]");
     expect(d.sends[0]!.text).toContain("Do the Implementation steps in order");
     expect(d.sends[0]!.text).not.toContain("## Spec (technical plan and decisions)");
   });
 
-  it("climbs from the small to the large local model, then stops: never a cloud model", async () => {
+  it("stops a ticket that still fails on the local model: never a cloud model", async () => {
     const t = await localTask([ticket("01", { difficulty: "low" })]);
     t.passing.ok = false;
     const used: string[] = [];
     let last;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
       last = await t.run(d.driver);
       used.push(d.sends[0] ? `${d.sends[0].model.provider}/${d.sends[0].model.id}` : "none");
     }
-    expect(used).toEqual(["local/qwen3.5:9b", "local/qwen3.5:27b", "none"]);
+    expect(used).toEqual(["local/qwen3.5:9b", "none"]);
     expect(last!.code).toBe("MAX_ESCALATIONS");
   });
 
