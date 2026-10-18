@@ -34,8 +34,9 @@ providers:
     baseUrl: http://127.0.0.1:11434/v1
     model: qwen2.5-coder:7b
 
-# Candidates per tier. Within a tier the router picks by learned expected cost per success
-# (Thompson sampling over per-model successes and failures), breaking ties by the order here.
+# Candidates per tier. With routing.selection: ordered (the default) the first usable entry runs and the
+# rest are fallbacks, in this order. With selection: adaptive the router picks by learned expected cost per
+# success (Thompson sampling over per-model successes and failures), breaking ties by the order here.
 # A candidate is skipped when its provider is not signed in, an org allowlist excludes it,
 # its circuit is open, or its expected cost exceeds the remaining budget.
 # Who does what:
@@ -84,6 +85,7 @@ tiers:
 routing:
   maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium
   maxTier: premium
+  selection: ordered    # first usable model in each tier's order; adaptive = cost per success, sampled
   reviewTier: premium   # the /review model pass; a failed part falls back to standard
   requirePremiumReviewFor:
     - auth
@@ -108,15 +110,16 @@ workers:
 #   /plan     plan_consult puts the draft tickets and 2-3 questions to every advisor (one per provider), once per
 #             plan version; plan_tickets then needs Opus's advisorResolution.
 #   /build    after a ticket's checks pass, Opus reads the ticket and its own diff and may put 2-3 questions to the
-#             advisor tier. Medium tickets consult one advisor from another provider than the implementer; high
-#             tickets consult every advisor in parallel; low tickets none. Opus gives the final verdict.
-#   /review   by the branch's highest ticket difficulty: high both, medium one from another vendor than the reviewer,
-#             low none. With no plan: Astra above adHocMinLines changed lines. Opus resolves the findings.
+#             advisor tier. High tickets consult every advisor in parallel; low and medium none (fromDifficulty:
+#             medium gives medium tickets one advisor from another provider). Opus gives the final verdict.
+#   /review   a branch with a high ticket consults both; otherwise none (fromDifficulty: medium: one from another
+#             vendor for a medium branch, and Astra above adHocMinLines changed lines with no plan).
 # Skipped when the budget is soft or exhausted. Astra is $0 on a ChatGPT subscription; Fable is billed per token on
 # an API key (see the api-key pricing rows).
 advisors:
   # tickets / plan / summarizeCut default to true; a project can only turn them off (false), never on.
-  adHocMinLines: 400    # /review on a branch with no plan: Astra only above this many changed lines
+  fromDifficulty: high  # advisors for high tickets only; medium adds one advisor for medium tickets (more calls)
+  adHocMinLines: 400    # with fromDifficulty: medium, /review on a branch with no plan: Astra above this many changed lines
   timeoutMs: 180000     # per advisor or review call
   maxDiffChars: 40000   # the ticket diff sent to the reviewer and advisors; the rest is listed as cut
   maxOutputTokens: 1500 # visible answer an advisor is asked to stay within (the request adds room for reasoning)
