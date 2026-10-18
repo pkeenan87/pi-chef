@@ -25,7 +25,8 @@ describe("difficulty in the plan", () => {
       "| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |",
       "| --- | --- | --- | --- | --- | --- |",
       "| 01 | Scaffold the project | low | xai/grok-4.7 | — | none |",
-      "| 02 | Add the parser | medium | anthropic/claude-sonnet-5-5 | foundry/gpt-6-astra | 01 |",
+      // advisors.fromDifficulty defaults to high: a medium ticket gets no advisor.
+      "| 02 | Add the parser | medium | anthropic/claude-sonnet-5-5 | — | 01 |",
       "| 03 | Harden auth | high | openai/gpt-6.1-sol | both | 02 |",
     ]);
     expect(markdown).toContain("### 01 · low · Scaffold the project");

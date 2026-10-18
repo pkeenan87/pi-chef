@@ -11,8 +11,14 @@ import { seededRng, tempRepo, tieredConfig, workflow } from "./helpers.js";
 const at = new Date("2026-10-14T12:00:00.000Z");
 
 /** Two standard candidates: A costs about twice B per call. */
+/** Adaptive selection: these tests cover the cost-per-success ranking. Ordered selection has its own block below. */
+function adaptive<T extends { routing: { selection: string } }>(config: T): T {
+  config.routing.selection = "adaptive";
+  return config;
+}
+
 function pair(extraTop = "", extraPricing = "") {
-  return parseConfig(`
+  return adaptive(parseConfig(`
 providers:
   anthropic: { type: anthropic, auth: account-login }
   openai: { type: openai, auth: account-login }
@@ -27,7 +33,7 @@ workers: { tokenBudget: 8000 }
 pricing:
   - { provider: anthropic, model: a, effectiveFrom: "2026-01-01", inputPerMillionUsd: 1, outputPerMillionUsd: 4 }
   - { provider: openai, model: b, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.5, outputPerMillionUsd: 2 }
-${extraPricing}`);
+${extraPricing}`));
 }
 
 function cells(a: [number, number], b: [number, number]): SuccessTable {
@@ -221,7 +227,7 @@ describe("review fixes", () => {
 
 /** Two $0 subscription candidates in the standard tier with quota shadow prices: a on anthropic, b on openai. */
 function subscriptions(quota = "", tokenBudget = 8000) {
-  return parseConfig(`
+  return adaptive(parseConfig(`
 providers:
   anthropic: { type: anthropic, auth: account-login }
   openai: { type: openai, auth: account-login }
@@ -235,7 +241,7 @@ workers: { tokenBudget: ${tokenBudget} }
 pricing:
   - { provider: anthropic, model: a, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: openai, model: b, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
-${quota}`);
+${quota}`));
 }
 
 const weights = (a: number, b: number, extra = "") => `
@@ -488,5 +494,30 @@ describe("review outcomes are keyed apart from implementation", () => {
     // Review picks read the review record: a's 30 review failures open its circuit there.
     const review = decideRoute(classification, config, withReviewFailures, { purpose: "review", at, rng: seededRng(1) });
     expect(review.model).toBe("b");
+  });
+});
+
+describe("ordered selection (the default)", () => {
+  const ordered = () => {
+    const config = pair();
+    config.routing.selection = "ordered";
+    return config;
+  };
+  it("is the default", () => {
+    expect(parseConfig("branchPrefix: chef").routing.selection).toBe("ordered");
+    expect(() => parseConfig("routing: { selection: random }")).toThrow(/routing.selection/);
+  });
+  it("takes the first usable candidate in the tier's order, whatever the price or the record", () => {
+    // b is cheaper and has the better record; ordered still picks a, the first entry.
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const picked = run(ordered(), cells([1, 5], [9, 0]), {}, seed);
+      expect(picked.candidate?.model).toBe("a");
+      expect(picked.reason).toContain("first in the tier's order");
+    }
+  });
+  it("falls back to the next entry and says why", () => {
+    const picked = run(ordered(), {}, { availability: { anthropic: { ok: false, detail: "not signed in" } }, strictAvailability: true });
+    expect(picked.candidate?.model).toBe("b");
+    expect(picked.reason).toMatch(/fallback 1 in the tier's order \(anthropic\/a not signed in\)/);
   });
 });

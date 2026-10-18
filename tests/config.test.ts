@@ -195,6 +195,16 @@ pricing:
     for (const word of ["workspaceDir", "routing.reviewTier", "endpointEnv", "pricing row"]) expect(warnings).toContain(word);
   });
 
+  it("lets a project raise advisors.fromDifficulty to high but not lower it to medium", () => {
+    writeProject(`${base}advisors: { fromDifficulty: medium }\n`);
+    const config = loadConfig(project);
+    expect(config.advisors.fromDifficulty).toBe("high");
+    expect(config.warnings?.join("\n")).toContain("advisors.fromDifficulty");
+    writeUser(`${base}advisors: { fromDifficulty: medium }\n`);
+    writeProject(`${base}advisors: { fromDifficulty: high }\n`);
+    expect(loadConfig(project).advisors.fromDifficulty).toBe("high");
+  });
+
   it("reads a legacy cost-workflow.yaml with a rename warning when it is the only user file", () => {
     mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
     writeFileSync(path.join(home, ".pi", "agent", "cost-workflow.yaml"), `${base}branchPrefix: legacyfile\n`);

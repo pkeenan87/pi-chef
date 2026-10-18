@@ -16,9 +16,17 @@ const git = async (cwd: string, ...args: string[]) => (await exec("git", args, {
 const astra: AdvisorCandidate = { provider: "openai", model: "gpt-6-astra" };
 const fable: AdvisorCandidate = { provider: "anthropic", model: "claude-fable-5-1" };
 const both = [astra, fable];
-const rule = (extra: Partial<Parameters<typeof reviewAdvisorsFor>[0]>) => reviewAdvisorsFor({ changedLines: 10, adHocMinLines: 400, reviewerProvider: "anthropic", candidates: both, ...extra });
+const rule = (extra: Partial<Parameters<typeof reviewAdvisorsFor>[0]>) => reviewAdvisorsFor({ changedLines: 10, adHocMinLines: 400, reviewerProvider: "anthropic", candidates: both, fromDifficulty: "medium", ...extra });
 
 describe("reviewAdvisorsFor", () => {
+  it("by default (advisors.fromDifficulty: high) gives medium and large ad-hoc branches no advisor, and says why", () => {
+    const medium = rule({ maxDifficulty: "medium", fromDifficulty: undefined });
+    expect(medium.advisors).toEqual([]);
+    expect(medium.reason).toContain("advisors start at high (advisors.fromDifficulty)");
+    expect(rule({ changedLines: 900, fromDifficulty: undefined }).advisors).toEqual([]);
+    expect(rule({ maxDifficulty: "high", fromDifficulty: undefined }).advisors).toHaveLength(2);
+  });
+
   it("high ticket: both advisors", () => {
     expect(rule({ maxDifficulty: "high" })).toEqual({ advisors: [astra, fable], reason: "branch has a high ticket" });
   });
