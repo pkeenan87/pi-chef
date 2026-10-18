@@ -1,5 +1,5 @@
 import { tierCandidates, type WorkflowConfig } from "../config.js";
-import { BASE_TIERS, modelMetricKey, TICKET_TIERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
+import { BASE_TIERS, LOCAL_TIERS, modelMetricKey, TICKET_TIERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
 import { selectCandidate, type Availability, type CandidateCheck, type Selection } from "./select.js";
 import type { QuotaUsage } from "../cost/quota.js";
 import { circuitOpenFor, rankingCost, rate, reviewMetricType, SUCCESS_PRIOR, tierCost, type SuccessTable } from "./stats.js";
@@ -10,14 +10,17 @@ export type { AttemptOutcome, SuccessCell, SuccessTable } from "./stats.js";
 const ORDER: Tier[] = [...BASE_TIERS];
 /** The /build ladder: a ticket starts on its difficulty tier and moves one step up after each failure. */
 export const TICKET_LADDER: Tier[] = [...TICKET_TIERS, "premium"];
+/** The local-mode ladder: small, then large, then stop. It never reaches a cloud tier. */
+export const LOCAL_LADDER: Tier[] = [...LOCAL_TIERS];
 
-/** Strength of a tier for the maxTier cap. The ticket tiers sit between standard and premium. */
+/** Strength of a tier for the maxTier cap. The ticket tiers sit between standard and premium; the local tiers count as cheap. */
 function capRank(tier: Tier): number {
+  if ((LOCAL_TIERS as readonly string[]).includes(tier)) return ORDER.indexOf("cheap");
   return (TICKET_TIERS as readonly string[]).includes(tier) ? ORDER.indexOf("standard") : ORDER.indexOf(tier);
 }
 
 export function nextTier(tier: Tier, maxTier: Tier): Tier | undefined {
-  const ladder = TICKET_LADDER.includes(tier) ? TICKET_LADDER : ORDER;
+  const ladder = LOCAL_LADDER.includes(tier) ? LOCAL_LADDER : TICKET_LADDER.includes(tier) ? TICKET_LADDER : ORDER;
   const index = ladder.indexOf(tier);
   const next = index < 0 ? undefined : ladder[index + 1];
   return next && capRank(next) <= capRank(maxTier) ? next : undefined;

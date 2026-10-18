@@ -93,6 +93,8 @@ export function taskState(state: TaskState | undefined, review: ReviewReport | u
 export interface StatusFacts {
   /** The task's display name. */
   name: string;
+  /** A local-mode task: shown as "local" after the name. */
+  local?: boolean;
   /** The interview or ticket stage while /plan runs (planningStatusText). */
   planning?: string;
   /** provider/model of the ticket running now. */
@@ -112,5 +114,5 @@ export function statusLine(state: TaskState | undefined, facts: StatusFacts): st
   if (!state || state.phase === "IDLE" || state.phase === "COMPLETE") return undefined;
   const where = facts.planning ?? taskState(state, state.review).line;
   const spend = `$${facts.spentUsd.toFixed(2)}${facts.unknownSpend ? "+?" : ""} of $${facts.budgetUsd}`;
-  return ["chef", facts.name, where, facts.model, spend].filter(Boolean).join(" · ");
+  return ["chef", facts.name, facts.local ? "local" : "", where, facts.model, spend].filter(Boolean).join(" · ");
 }

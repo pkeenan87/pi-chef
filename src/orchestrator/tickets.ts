@@ -86,7 +86,25 @@ function strings(value: unknown): string[] {
 }
 
 /** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
-export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean }): TicketCheck {
+export interface LocalTicketRules {
+  maxFiles: number;
+  /** True when the config sets no checks, so each ticket must bring its own. */
+  needChecks: boolean;
+}
+
+/** What a local-mode ticket must have so a small model can finish it: low or medium, few listed files, numbered steps, a check. */
+function localTicketProblems(label: string, item: { difficulty?: string; files: string[]; implementation: string; checks: string[] }, rules: LocalTicketRules): string[] {
+  const errors: string[] = [];
+  if (item.difficulty !== "low" && item.difficulty !== "medium") errors.push(`Ticket ${label}: local mode needs difficulty low or medium${item.difficulty ? ` (not ${item.difficulty})` : ""}; split a harder ticket into low and medium ones.`);
+  if (item.files.length === 0) errors.push(`Ticket ${label}: local mode needs files: every file the ticket touches (at most ${rules.maxFiles}).`);
+  else if (item.files.length > rules.maxFiles) errors.push(`Ticket ${label}: touches ${item.files.length} files; local mode allows at most ${rules.maxFiles} (localMode.maxFilesPerTicket). Split it.`);
+  const steps = item.implementation.split("\n").filter((line) => /^\s*\d+[.)]\s+\S/.test(line)).length;
+  if (steps < 2) errors.push(`Ticket ${label}: local mode needs implementation as numbered steps ("1. ", "2. "), at least two, each naming the file and the exact function, type or test to change.`);
+  if (rules.needChecks && item.checks.length === 0) errors.push(`Ticket ${label}: local mode needs at least one check (a targeted test command), because the config sets no checks.`);
+  return errors;
+}
+
+export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean; local?: LocalTicketRules }): TicketCheck {
   const errors: string[] = [];
   const tickets: Ticket[] = [];
   if (!Array.isArray(input) || input.length === 0) return { tickets, errors: ["tickets must be a non-empty array."] };
@@ -131,9 +149,10 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       const problem = checkLineProblem(check, options.commandExists);
       if (problem === undefined) continue;
       errors.push(
-        `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are shell command lines the parent runs after the ticket, one command per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
+        `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are command lines /build runs after the ticket without a shell, one command with plain arguments per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
       );
     }
+    if (options.local) errors.push(...localTicketProblems(label, { difficulty, files, implementation, checks }, options.local));
     tickets.push({
       id,
       slug,

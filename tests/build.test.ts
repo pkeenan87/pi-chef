@@ -5,7 +5,8 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { Ticket } from "../src/domain.js";
 import { BUILD_CHUNK_RULES, runBuild, type BuildDriver, type ModelRef } from "../src/orchestrator/build.js";
-import { checkRunner, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
+import { checkRunner, readyAuth, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
+import type { WorkflowOptions } from "../src/orchestrator/types.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd })).stdout.trim();
@@ -52,7 +53,7 @@ function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<
   return { driver, sends, state, write };
 }
 
-async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string; confirm?: (title: string, message: string) => Promise<boolean> } = {}) {
+async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string; confirm?: (title: string, message: string) => Promise<boolean>; auth?: WorkflowOptions["auth"] } = {}) {
   const cwd = await tempRepo();
   if (options.branch) await git(cwd, "switch", "-c", options.branch);
   const progress: string[] = [];
@@ -69,6 +70,7 @@ async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<type
       report: (markdown) => void reports.push(markdown),
       notify: (message) => void notices.push(message),
       ...(options.confirm ? { confirm: options.confirm } : {}),
+      ...(options.auth ? { auth: options.auth } : {}),
       runner: options.runner ?? checkRunner(async () => (passing.ok ? { code: 0, stdout: "ok", stderr: "" } : { code: 1, stdout: "", stderr: "AssertionError: expected 1" })),
     },
     { approve: options.approve, cwd },
@@ -719,5 +721,48 @@ describe("/build branch and approval", () => {
     const result = await runBuild(() => app, d.driver);
     expect(result.code).toBe("NO_TICKETS");
     expect(result.text).toContain("Re-plan");
+  });
+});
+
+describe("/build in local mode", () => {
+  const localTask = async (tickets: Ticket[], extra: Parameters<typeof buildTask>[0] = {}) => {
+    const t = await buildTask({ tickets, ...extra });
+    await t.app.store.update(t.taskId, "local", (state) => ({ ...state, localMode: true }));
+    return t;
+  };
+
+  it("builds low tickets on the small local model and medium ones on the large one, with the local rules and no spec", async () => {
+    const t = await localTask([ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })]);
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends.map((send) => `${send.model.provider}/${send.model.id}`)).toEqual(["local/qwen3.5:9b", "local/qwen3.5:27b"]);
+    expect(d.sends[0]!.text).toContain("[BUILD CHUNK · LOCAL MODEL]");
+    expect(d.sends[0]!.text).toContain("Do the Implementation steps in order");
+    expect(d.sends[0]!.text).not.toContain("## Spec (technical plan and decisions)");
+  });
+
+  it("climbs from the small to the large local model, then stops: never a cloud model", async () => {
+    const t = await localTask([ticket("01", { difficulty: "low" })]);
+    t.passing.ok = false;
+    const used: string[] = [];
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
+      last = await t.run(d.driver);
+      used.push(d.sends[0] ? `${d.sends[0].model.provider}/${d.sends[0].model.id}` : "none");
+    }
+    expect(used).toEqual(["local/qwen3.5:9b", "local/qwen3.5:27b", "none"]);
+    expect(last!.code).toBe("MAX_ESCALATIONS");
+  });
+
+  it("stops with a clear reason when the local server is down, instead of using a cloud model", async () => {
+    const down = readyAuth();
+    const auth = { inspect: async (provider: Parameters<NonNullable<typeof down>["inspect"]>[0]) => (provider === "local" ? { provider, status: "unavailable" as const, method: "local" as const, detail: "Local endpoint is not reachable." } : down!.inspect(provider)) };
+    const t = await localTask([ticket("01", { difficulty: "low" })], { auth: auth as WorkflowOptions["auth"] });
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    const result = await t.run(d.driver);
+    expect(d.sends).toEqual([]);
+    expect(result.code).toBe("NO_CANDIDATE");
+    expect(result.text).toContain("not reachable");
   });
 });

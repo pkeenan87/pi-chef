@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
 import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
+import { contextOf, readyAuth, sampleTicket, singleTaskRequest, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string };
@@ -228,6 +228,15 @@ describe("session_before_compact", () => {
       ) as Promise<{ compaction?: { summary: string; firstKeptEntryId: string; tokensBefore: number; usage: { input: number; output: number } } } | undefined>;
     return { app, calls, run };
   }
+
+  it("leaves a local-mode ticket's compaction to Pi (the local model), so its transcript never reaches the cloud tier", async () => {
+    const { app, calls, run } = await setup();
+    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
+    const id = app.activeTaskId()!;
+    await app.store.update(id, "local ticket", (state) => ({ ...state, localMode: true, build: { branch: "b", base: "main", baseSha: "a", currentTicket: "01" } }));
+    expect(await run()).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
 
   it("summarizes the discarded messages with the compaction tier (Haiku) and returns Pi's compaction shape", async () => {
     const { app, calls, run } = await setup();

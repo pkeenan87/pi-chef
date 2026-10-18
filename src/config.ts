@@ -149,6 +149,13 @@ export interface WorkflowConfig {
   };
   /** The main chat session: a normal Pi model, pinned at session start, with compaction on a cheap tier. */
   session: SessionConfig;
+  /**
+   * Local mode (`/plan --local`, or every plan with `default: true`): tickets are written for and built by the
+   * local models in tiers.localSmall (low tickets) and tiers.localLarge (medium), and never go to a cloud model.
+   * `ticketContextTokens` is the size a local ticket must fit (system prompt and tools included); `maxFilesPerTicket`
+   * caps the files one ticket may touch. Planning and the per-ticket review stay on the session and review models.
+   */
+  localMode: { default: boolean; ticketContextTokens: number; maxFilesPerTicket: number };
   workers: {
     /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
@@ -227,6 +234,10 @@ export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
     { provider: "openai", model: "gpt-6.1-sol" },
     { provider: "foundry", model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: "openai-responses" },
   ],
+  // Local mode (/plan --local): the Ollama tags of the two local models. Set tiers.localSmall / localLarge to yours.
+  // contextWindow must match what Ollama runs (OLLAMA_CONTEXT_LENGTH), or Pi overfills a smaller window.
+  localSmall: [{ provider: "local", model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65_536 }],
+  localLarge: [{ provider: "local", model: "qwen3.5:27b", label: "Qwen 3.5 27B (local)", contextWindow: 65_536 }],
   advisor: [
     { provider: "openai", model: "gpt-6-astra" },
     { provider: "anthropic", model: "claude-fable-5-1" },
@@ -249,6 +260,7 @@ const DEFAULTS: WorkflowConfig = {
     selection: "ordered",
   },
   session: DEFAULT_SESSION,
+  localMode: { default: false, ticketContextTokens: 32_000, maxFilesPerTicket: 3 },
   workers: {
     tokenBudget: 8000,
     ticketContextTokens: 150000,
@@ -609,6 +621,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
           if (item.provider !== "foundry") invalid(where, `${field}.api`, "applies only to foundry candidates");
         }
         if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
+        if (item.contextWindow !== undefined && (typeof item.contextWindow !== "number" || !Number.isInteger(item.contextWindow) || item.contextWindow < 4096)) invalid(where, `${field}.contextWindow`, "must be an integer of at least 4096");
       });
     }
   }
@@ -651,6 +664,12 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   if (workers) {
     checkNumber(workers, "tokenBudget", where, { exclusiveMin: 0 }, "workers");
     checkNumber(workers, "ticketContextTokens", where, { min: 20000, integer: true }, "workers");
+  }
+  const localMode = section(raw, "localMode", where);
+  if (localMode) {
+    if (localMode.default !== undefined && typeof localMode.default !== "boolean") invalid(where, "localMode.default", "must be a boolean");
+    checkNumber(localMode, "ticketContextTokens", where, { min: 8000, integer: true }, "localMode");
+    checkNumber(localMode, "maxFilesPerTicket", where, { min: 1, integer: true }, "localMode");
   }
   if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
     invalid(where, "branchPrefix", "must be a plain branch-name prefix such as chef");
@@ -771,6 +790,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     tiers: normalizeTiers(obj("tiers")),
     routing: { ...DEFAULTS.routing, ...obj("routing") } as WorkflowConfig["routing"],
     session: { ...DEFAULTS.session, ...obj("session") } as WorkflowConfig["session"],
+    localMode: { ...DEFAULTS.localMode, ...obj("localMode") } as WorkflowConfig["localMode"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
@@ -808,6 +828,7 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
       };
       if (typeof entry.label === "string") candidate.label = entry.label;
       if (typeof entry.api === "string" && (CHAT_APIS as readonly string[]).includes(entry.api)) candidate.api = entry.api as ChatApi;
+      if (typeof entry.contextWindow === "number") candidate.contextWindow = entry.contextWindow;
       return candidate;
     });
   }
@@ -974,7 +995,7 @@ export function layerConfigs(
     else delete merged.workspaceDir;
   }
 
-  for (const key of ["models", "tiers", "routing", "session", "workers", "advisors"]) {
+  for (const key of ["models", "tiers", "routing", "session", "workers", "advisors", "localMode"]) {
     const projectSection =
       key === "advisors"
         ? restrictAdvisors(user.advisors, project.advisors, warnings)
@@ -1251,7 +1272,8 @@ export function priceFor(
 ): PricingRow | undefined {
   if (Number.isNaN(at.getTime())) return undefined;
   const list = priceIndex(pricing).byKey.get(priceKey(provider, model, billing));
-  if (!list) return undefined;
+  // A model on your own machine has no per-token charge: an unpriced local model is a known $0, not unknown.
+  if (!list) return provider === "local" ? { provider, model, effectiveFrom: "1970-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 } : undefined;
   const day = at.toISOString().slice(0, 10);
   let lo = 0;
   let hi = list.length;
@@ -1397,7 +1419,7 @@ export function unpricedTierModels(config: WorkflowConfig): string[] {
   for (const tier of Object.keys(DEFAULT_TIERS) as TierKey[]) {
     for (const candidate of tierCandidates(config, tier)) {
       const name = `${candidate.provider}/${candidate.model}`;
-      if (!priced.has(name)) out.add(name);
+      if (!priced.has(name) && candidate.provider !== "local") out.add(name);
     }
   }
   return [...out];

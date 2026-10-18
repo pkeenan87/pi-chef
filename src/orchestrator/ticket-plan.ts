@@ -9,7 +9,13 @@ import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validat
 
 /** Validates model- or person-written tickets against the config's context target and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
-  return validateTickets(input, { target: ctx.config.workers.ticketContextTokens, fileSize: (file) => projectFileSize(ctx.cwd, file) });
+  // The stored task (no git: plan tools run mid-turn). A local-mode task gets the local target and rules.
+  const local = active(ctx)?.localMode === true;
+  return validateTickets(input, {
+    target: local ? ctx.config.localMode.ticketContextTokens : ctx.config.workers.ticketContextTokens,
+    fileSize: (file) => projectFileSize(ctx.cwd, file),
+    ...(local ? { local: { maxFiles: ctx.config.localMode.maxFilesPerTicket, needChecks: ctx.config.checks.length === 0 } } : {}),
+  });
 }
 
 /** Throws unless a task is at the ticket stage (spec saved). */
@@ -48,6 +54,7 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
     overlap: parsed.overlap,
     securitySensitive: routing?.requireHumanApproval ?? false,
     tickets,
+    ...(task.localMode ? { localMode: true } : {}),
     ...(advisorReview ? { advisorReview } : {}),
   };
 }
@@ -82,7 +89,7 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
   }
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
-  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config).join("\n") };
+  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config, task.localMode === true).join("\n") };
 }
 
 /**

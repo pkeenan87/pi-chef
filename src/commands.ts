@@ -19,11 +19,16 @@ const PROVIDER_VALUES = ["openai", "anthropic", "xai", "foundry", "vercel", "loc
 export const COMMANDS: CommandSpec[] = [
   {
     name: "plan", run: (w, args) => {
-      const noQuestions = /(^|\s)--no-questions(\s|$)/.test(args);
-      return w.startPlan(args.replace(/(^|\s)--no-questions(?=\s|$)/g, " ").trim(), { noQuestions });
+      const flag = (name: string) => new RegExp(`(^|\\s)--${name}(\\s|$)`).test(args);
+      const noQuestions = flag("no-questions");
+      // --local writes the tickets for the local models and builds them there; --cloud overrides localMode.default.
+      const local = flag("local") ? true : flag("cloud") ? false : undefined;
+      if (local === true && flag("cloud")) return Promise.resolve({ ok: false, code: "USAGE", text: "Use --local or --cloud, not both." });
+      const request = args.replace(/(^|\s)--(no-questions|local|cloud)(?=\s|$)/g, " ").trim();
+      return w.startPlan(request, { noQuestions, ...(local !== undefined ? { local } : {}) });
     },
-    description: "Plan a task: a short interview of decisions (3-7 questions with recommendations), a spec, then tickets for approval. --no-questions skips the interview. Does not edit the repo.",
-    complete: (prefix) => completeWords(prefix, ["--no-questions"]),
+    description: "Plan a task: a short interview of decisions (3-7 questions with recommendations), a spec, then tickets for approval. --no-questions skips the interview. --local writes the tickets for the local models (tiers.localSmall and localLarge) and /build runs them there only; --cloud overrides localMode.default. Does not edit the repo.",
+    complete: (prefix) => completeWords(prefix, ["--no-questions", "--local", "--cloud"]),
   },
   { name: "show-plan", run: (w) => w.showPlan(), description: "Show the active task's full plan (technical spec and tickets), under its name and state.", complete: () => [] },
   {

@@ -77,10 +77,25 @@ tiers:
   ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
     - { provider: foundry, model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: openai-responses }
+  # Local mode (/plan --local): Ollama models on providers.local. low tickets run on localSmall, medium on
+  # localLarge; a failed ticket climbs small -> large and stops, never to a cloud model. Use the tags `ollama list`
+  # shows, and set contextWindow to the context Ollama runs them with (OLLAMA_CONTEXT_LENGTH=65536).
+  localSmall:
+    - { provider: local, model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65536 }
+  localLarge:
+    - { provider: local, model: "qwen3.5:27b", label: "Qwen 3.5 27B (local)", contextWindow: 65536 }
   advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
     - { provider: openai, model: gpt-6-astra }
     - { provider: anthropic, model: claude-fable-5-1 }
     - { provider: foundry, model: gpt-6-astra, label: "GPT Astra (Foundry deployment)" }
+
+# Local mode. /plan --local (or default: true) has the session model write tickets a small local model can finish
+# alone (low or medium, few files, numbered steps, a check each); /build runs them on the local tiers only. Planning
+# and the per-ticket review stay on the session and review models. Local models are priced at $0.
+localMode:
+  default: false              # true: every /plan is local unless you pass --cloud
+  ticketContextTokens: 32000  # a local ticket must fit this, system prompt and tools included
+  maxFilesPerTicket: 3
 
 routing:
   maxEscalations: 3     # a failed ticket climbs low -> medium -> high -> premium

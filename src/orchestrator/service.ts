@@ -157,7 +157,7 @@ export class Workflow {
   }
 
   /** `/plan`: starts or resumes the model-run interview (or drafts directly for a literal ```tasks request). */
-  startPlan(request: string, options: { noQuestions?: boolean } = {}): Promise<CommandResult> {
+  startPlan(request: string, options: { noQuestions?: boolean; local?: boolean } = {}): Promise<CommandResult> {
     return startPlan(this.ctx, request, options);
   }
 
@@ -183,6 +183,7 @@ export class Workflow {
     const spend = budgetState(this.ctx, state.taskId).task;
     return statusLine(state, {
       name: displayName(state),
+      local: state.localMode === true,
       planning: planningStatusText(this.ctx),
       model: running?.provider && running.model ? modelLabel(this.ctx.config, running.provider, running.model) : undefined,
       spentUsd: spend.knownUsd,

@@ -31,11 +31,17 @@ export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as c
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
 /**
+ * Local-mode ticket tiers (`/plan --local`): a small and a large local model (Ollama). A low ticket starts small, a
+ * medium one large; a failed ticket climbs small to large and then stops. It never goes to a cloud model.
+ */
+export const LOCAL_TIERS = ["localSmall", "localLarge"] as const;
+export type LocalTier = (typeof LOCAL_TIERS)[number];
+/**
  * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
  * diff clip cut). Not part of any ladder; a config without it runs them on `cheap`.
  */
 export const BATCH_TIERS = ["batch"] as const;
-export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...BATCH_TIERS] as const;
+export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...LOCAL_TIERS, ...BATCH_TIERS] as const;
 export type Tier = (typeof TIERS)[number];
 
 export const DIFFICULTIES = ["low", "medium", "high"] as const;
@@ -45,6 +51,8 @@ export function isDifficulty(value: string): value is Difficulty {
 }
 /** The ticket tier a difficulty starts on. */
 export const DIFFICULTY_TIER: Record<Difficulty, TicketTier> = { low: "ticketLow", medium: "ticketMedium", high: "ticketHigh" };
+/** The local tier a difficulty starts on in local mode. Local plans have no high tickets; an old one runs large. */
+export const LOCAL_DIFFICULTY_TIER: Record<Difficulty, LocalTier> = { low: "localSmall", medium: "localLarge", high: "localLarge" };
 /** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
 export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
   if (ticket.difficulty) return ticket.difficulty;
@@ -76,6 +84,8 @@ export interface TierCandidate {
   label?: string;
   /** Foundry only: overrides `providers.foundry.api` for this deployment (for example Sol needs openai-responses for tools). */
   api?: ChatApi;
+  /** The context window Pi is told for this model (default 128000). Set it to what the server runs, for example Ollama's context length. */
+  contextWindow?: number;
 }
 
 /** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */
@@ -149,6 +159,8 @@ export interface Ticket {
 
 export interface PlanDocument {
   version: number;
+  /** Written for local mode: its tickets are built by tiers.localSmall and tiers.localLarge. */
+  localMode?: boolean;
   createdAt: string;
   summary: string;
   risks: string[];
@@ -531,6 +543,8 @@ export interface TaskState {
   /** Set when the task was closed (a person, or a new /plan after it finished). Its files and branch are kept. */
   closedAt?: string;
   closedReason?: string;
+  /** Local mode, chosen at /plan: tickets are written for and built by the local tiers only (localSmall, localLarge). */
+  localMode?: boolean;
   phase: Phase;
   planning?: PlanningProgress;
   /** A freshly drafted plan that has not been shown yet: the extension posts it and asks for the decision when the planning turn settles. */
