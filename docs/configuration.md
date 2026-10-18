@@ -1,57 +1,294 @@
 # Configuration
 
-How pi-chef is configured: the files, how a project config layers over yours, every key, the tiers and how a model is chosen, and budgets. Provider sign-in and setup are in [providers.md](providers.md).
+Every config file and every setting: where the files live, how a project file layers over yours, and each key with its type, default and layering rule. Then how tiers and models are chosen, and how cost is counted. Commands are in [commands.md](commands.md); provider sign-in and setup are in [providers.md](providers.md).
 
-## Configuration
+## Config files
 
-**Layering.** `~/.pi/agent/chef.yaml` (user) is the base. `.pi-workflows/config.yaml` (project) layers on top: sections such as `tiers`, `routing`, and `workers` merge field by field with the project winning (except the `routing` fields in the table below), and `pricing` rows merge by provider, model, and date. A project file ships with a cloned repo, so it is untrusted for credentials and policy, as follows.
+| File | Scope | Notes |
+|---|---|---|
+| `~/.pi/agent/chef.yaml` | **User config.** Applies to every project | The base. The only file that can raise limits or set credentials, endpoints and the session model |
+| `.pi-workflows/config.yaml` | **Project config.** This repo only | Layered on top of the user config. It ships with a cloned repo, so it is trusted only to tighten policy (see [How the files layer](#how-the-files-layer)) |
+| `~/.pi/agent/cost-workflow.yaml` | Legacy user config | Read only when `chef.yaml` does not exist, with a warning to rename it |
 
-**User-config-only fields.** `baseUrl`, `endpoint`, `endpointEnv`, `apiKeyEnv`, `audience`, `projectDir`, `envFile`, and `resourceGroup` under `providers.*` are read from the user config only. In a project file they are ignored with a warning (shown by `/status`), unless the user does not define that provider and the value is the built-in default. Remote endpoints must be `https`, including a Foundry endpoint read from the `endpointEnv` variable. Only `local.baseUrl` may be `http`, and only for a loopback address. The top-level `workspaceDir` (where task state, the ledger and metrics live) is user-config-only too.
+- **File names and reloading.**
+  - Each file may also be named `.yml`. When both exist, `.yaml` wins and a warning names the ignored file.
+  - The files are read again whenever one changes, so edits apply to the next command with no restart.
+- **When no file exists,** the built-in defaults below apply.
+- **Creating the project file.** `npx github:pkeenan87/pi-chef init` copies the sample `.pi-workflows/config.yaml` into a project. The sample is the best starting point: it prices every built-in model.
+- **No secrets.** No file may contain a secret, API key or token: a file that does is rejected. Credentials stay with Pi (`/login`), `az`, the Vercel CLI, or an environment variable you name.
 
-**Config errors.** Session start always shows a config problem through a warning, redacted, naming the file and the key. A bad section drops only itself, with a warning, and the rest of the file loads: an invalid `tiers.<name>` list or entry (the built-in tier applies), an invalid `session` or `quota` section, and a tier that names a provider the file does not define. A file that cannot be used at all is rejected: unreadable YAML, a secret, `approvals.merge` other than `manual`, an invalid provider, budget, or routing value. The notice then reads "<path> was ignored; built-in tiers are in use, and chef commands stay stopped until it is fixed" plus the reason, because the file also carries your policy (budgets, allowlists) and the commands do not run without it. A provider Pi refuses to register is reported by name and the others still register. `foundry`, `vercel`, and `local` blocks do not need a `type`.
+Other files pi-chef reads that are not its config:
 
-**Policy fields a project can only tighten.**
+- Pi's `~/.pi/agent/auth.json`: account logins, read-only.
+- The env file `vercel env pull` writes (`providers.vercel.envFile`).
+- The environment variables you name in `providers.foundry.endpointEnv` and `providers.local.apiKeyEnv`.
 
-| Field | Layering rule |
+**Errors.** Session start shows every config problem as a warning, redacted, naming the file and the key. `/status` repeats them under Warnings.
+
+- **Dropped with a warning while the rest of the file loads:**
+  - a bad `tiers.<name>` (the built-in list applies);
+  - a bad `session` or `quota` section (the defaults apply);
+  - a tier that names an undefined provider.
+- **The whole file is rejected,** and pi-chef commands stop until it is fixed, for:
+  - unreadable YAML or a secret;
+  - `approvals.merge` other than `manual`;
+  - an invalid provider, budget or routing value;
+  - `proprietaryCode` without `orgProviderAllowlist`.
+
+## How the files layer
+
+The user file is the base and the project file is laid over it. Each key below lists its rule:
+
+| Rule | Meaning |
 |---|---|
-| `orgProviderAllowlist` | An empty list means all providers. A project list can restrict that, but once the user names providers the user's list is final |
-| `proprietaryCode` | On if either file sets it (OR). It requires `orgProviderAllowlist` |
-| `approvals` | Plan approval stays required and merge stays `manual`. `approvals.publish` from an older file is accepted, ignored, and warned about: nothing pushes |
-| `budgets` | The lower of the user and project value for each limit (a lower `softWarningRatio` warns earlier). When the user sets none, the project value is compared with the default (`taskUsd` 20, `dailyUsd` 75, `softWarningRatio` 0.8), so a project can only tighten. The exception is `unknownCallUsd`: the higher of the two wins (the user's value, or the default 0.05 when the user sets none), because a lower estimate would loosen the budget |
-| `advisors` | A project can only turn `tickets`, `plan` and `summarizeCut` off, never on, and can only raise `fromDifficulty` to `high`. `maxDiffChars`, `maxOutputTokens`, `timeoutMs` and `maxPlanConsults` take the lower of the user and project value (the default when the user sets none), because they raise cost or the data sent. `adHocMinLines` takes the higher, since a higher threshold means fewer advisor calls. Anything else is ignored with a warning |
-| `session` | `model` and `compactionTier` are user-config-only. A project may only set `pin: false`. Ignored values get a warning in `/status` |
-| `routing` | `reviewTier` (the tier of the review that gates every ticket commit and of `/review`) is user-config-only. A project's `requirePremiumReviewFor` adds to the user's list (or the default), never replaces it. `circuitBreakerFailures` takes the lower value. The other routing fields merge with the project winning |
-| `pricing` | A project row cheaper than a user row for the same provider, model and billing (any token rate lower; a missing cache rate counts as the input rate) is ignored with a warning, because a lower price would loosen your budgets. A project may add rows for models you do not price, and raise prices |
+| **project wins** | A value in the project file replaces the user's |
+| **merged** | A section merged key by key, the project winning per key. Keys you do not set keep the user's value |
+| **replaced** | The project's whole value replaces the user's. Keys the project leaves out take the built-in default, not the user's value |
+| **lower wins** / **higher wins** | The stricter of the two. When the user sets nothing, the project is compared with the built-in default |
+| **off only** | A project can turn the switch off, never on |
+| **user only** | Read from the user file only; a project value is ignored with a warning |
 
-The YAML must not contain secrets, API keys, or tokens.
+For example, to raise `budgets.taskUsd` you raise it in `~/.pi/agent/chef.yaml` and also raise or remove it in the project file, because the lower of the two wins.
 
-**Other top-level keys.**
+## Settings reference
 
-| Key | Meaning |
+Every key the loader reads.
+
+- **Types:** `int` is an integer, `USD` a number in dollars, and `ms` milliseconds.
+- **"Project"** is the layering rule above.
+- **Built-in default:** a key you do not set uses it.
+
+### Top level
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `workspaceDir` | path | `.pi-workflows` | user only | Where task state, the cost ledger, metrics and reports live, relative to the project root |
+| `branchPrefix` | branch-name prefix | `chef` | project wins | `/build` creates `<branchPrefix>/<task name>` when it starts from the default branch |
+| `orgProviderAllowlist` | list of providers | `[]` (all) | restricts only | Providers any route or advisor may use. Empty means all. A project list can restrict an empty user list; once the user names providers, the user's list is final |
+| `proprietaryCode` | bool | `false` | on if either sets it | Marks the code proprietary: only allowlisted providers may see it. Requires `orgProviderAllowlist` |
+| `checks` | list of commands | `[]` | replaced | The commands that verify work: run by `/review`, and by `/build` for a ticket with no checks of its own. Each entry is `{ name, command, args }` |
+| `setup` | list of commands | `[]` | replaced | Same shape. Runs once per build before the first checks, and before every `/review`'s checks (an install, for example) |
+| `schemaVersion` | — | `1` | — | Accepted and ignored |
+
+Each `checks` / `setup` entry:
+
+| Key | Type | What it is |
+|---|---|---|
+| `name` | string | Label in reports |
+| `command` | string | The program, on `PATH` or a path |
+| `args` | list of strings | Its arguments |
+
+- **Execution.** Commands run in the repo root with no shell, so `&&`, pipes, redirects and globs do not work.
+- **Refused:** destructive commands, such as `rm -rf`, a force push, `reset --hard`, or piping a download into a shell.
+- **Limits.** A command is stopped after 30 minutes or 64 MB of output.
+
+### session
+
+The main chat session: a normal Pi model.
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `session.model` | `provider/id` | `anthropic/claude-opus-5-5` | user only | The session's model. Set at session start when `pin` is on |
+| `session.pin` | bool | `true` | may only set `false` | Switch the session to `session.model` at session start. `false` leaves the model you chose with `/model`, and `/build` puts that model back when it finishes |
+| `session.compactionTier` | `cheap` \| `standard` \| `premium` | `cheap` | user only | Tier that writes compaction summaries. If none can, Pi compacts on the session model |
+
+### localMode
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `localMode.default` | bool | `false` | merged | Make every `/plan` local, unless `--cloud` is passed. The model is `tiers.local`; the ticket limits come from its tag and `contextWindow` ([Local mode](../README.md#local-mode)) |
+
+### workers
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `workers.tokenBudget` | number > 0 | `8000` | merged | The tokens one call is priced at when ranking models (4 input to 1 output) |
+| `workers.ticketContextTokens` | int ≥ 20000 | `150000` | merged | The context size one cloud ticket must fit. `plan_tickets` sends back a ticket estimated above it. Local tickets use half the local model's `contextWindow` instead |
+
+### budgets
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `budgets.taskUsd` | USD > 0 | `20` | lower wins | Hard limit on one task's spend. At it, no prompt, ticket or advisor call starts |
+| `budgets.dailyUsd` | USD > 0 | `75` | lower wins | Hard limit on all spend today |
+| `budgets.softWarningRatio` | 0 to 1 | `0.8` | lower wins | Warn once a budget reaches this share. Above it, advisors and batch summaries are skipped |
+| `budgets.unknownCallUsd` | USD ≥ 0 | `0.05` | higher wins | What one call with an unknown cost and nothing to price it from counts as, in budget math only. The ledger keeps it as unknown |
+
+Unknown cost is never counted as $0: a call with token counts but no price is estimated at the provider's dearest configured price.
+
+### approvals
+
+| Key | Allowed | Default | What it does |
+|---|---|---|---|
+| `approvals.plan` | `required` | `required` | A plan must be approved before `/build`. Cannot be changed |
+| `approvals.merge` | `manual` | `manual` | Nothing merges, pushes or opens a PR. Any other value rejects the file |
+
+### routing
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `routing.selection` | `ordered` \| `adaptive` | `ordered` | merged | How a tier picks its model. `ordered`: the first usable entry in the tier's list, so later entries are fallbacks. `adaptive`: the lowest expected cost per success, with Thompson sampling (the choice varies) |
+| `routing.maxEscalations` | int ≥ 0 | `3` | merged | Tier steps a failed ticket may climb from its difficulty tier |
+| `routing.maxTier` | a tier, not `batch` | `premium` | merged | The highest tier any route may use. A ticket still failing there stops with `MAX_ESCALATIONS` |
+| `routing.reviewTier` | `cheap` \| `standard` \| `premium` | `premium` | user only | Tier of the per-ticket review that gates each commit, and of `/review`'s model pass |
+| `routing.requirePremiumReviewFor` | list of strings | `auth`, `permissions`, `secrets`, `security-sensitive` | adds to the user's list | Task types and capabilities whose review always runs on premium and that need your confirmation before `/build` |
+| `routing.circuitBreakerFailures` | int ≥ 1 | `3` | lower wins | Failures with no success, per task type and tier, that open the tier's circuit: it is skipped and routing moves up |
+| `routing.attemptOverheadUsd` | USD ≥ 0 | `0.02` | merged | Ranking only, in `adaptive` selection: added to each model's price before dividing by its success rate. Never billed |
+
+### tiers
+
+Which models serve each job. Each tier is a list of candidates in preference order. A tier you list replaces the built-in list for that tier only (merged per tier: a project's list replaces the user's). Tiers you do not list keep the built-in models (see [Tiers and who serves them](#tiers-and-who-serves-them)).
+
+| Tier | Serves |
 |---|---|
-| `branchPrefix` (default `chef`) | `/build` names the branch `<branchPrefix>/<task name>` (for example `chef/retry-ingest-parser`) when they start from the default branch. A task that already has a build branch keeps it |
-| `checks` | Commands `/build` (when a ticket has none of its own) and `/review` run in the repo root, without a shell. Any command runs except destructive ones (`rm -rf`, force push, `reset --hard`, piping a download into a shell), which are refused. A check that runs longer than 30 minutes or prints more than 64 MB is stopped and fails, with a note saying which |
-| `setup` | Same shape as `checks`. Runs once per build before the first ticket's checks, and before the checks of every `/review` |
-| `workers.tokenBudget`, `workers.ticketContextTokens` | The token mix the router prices a call at, and the size a ticket must fit (default 150000) |
-| `session.model` (default `anthropic/claude-opus-5-5`) | The main chat session's model, as `provider/id`. Set on `session_start` when the session started on another model |
-| `session.pin` (default `true`) | Whether `session.model` is set at session start. `false` leaves the model you picked with `/model` alone, and `/build` puts that model back when it finishes |
-| `session.compactionTier` (default `cheap`) | Tier that writes compaction summaries (`session_before_compact`). One of `cheap`, `standard`, `premium` |
-| `routing.reviewTier` (default `premium`) | Tier of the per-ticket review that gates each `/build` commit and of the `/review` model pass (user config only). A failed `/review` part falls back to `standard` candidates once this tier has none left |
-| `routing.maxEscalations` (default 3) | Tier steps a failed ticket may climb from its difficulty tier (low, medium, high, then premium). Only a failure of the checks or the review climbs; a check that cannot run or a failed setup keeps the ticket on its tier. When the steps are used up, or the ticket fails on premium (the top of the ladder), it stays `failed` and `/build` stops with `MAX_ESCALATIONS`. The message says what works: fix it in the chat (a checks failure), edit the ticket or plan (a review failure), or raise the limit |
-| `tiers.ticketLow`, `tiers.ticketMedium`, `tiers.ticketHigh` | Models for tickets of difficulty `low`, `medium`, `high`. A config that lists `tiers` without them runs those tickets on `cheap`, `standard` and `premium`, with a warning in `/status` |
-| `routing.maxTier` (default `premium`) | The highest tier any route may use. Escalation stops there: a ticket still failing on it stops with `MAX_ESCALATIONS` |
-| `routing.requirePremiumReviewFor` (default `auth`, `permissions`, `secrets`, `security-sensitive`) | Task types and capabilities whose review always runs on premium, and which need your confirmation before `/build`. A project can add to the list, never remove from it |
-| `routing.circuitBreakerFailures` (default 3) | Failures with no success, for one task type and tier, that open its circuit breaker: the tier is skipped and routing moves up. A project can only lower it |
-| `localMode` | Local mode ([README](../README.md#local-mode)): `default` (false; true makes every `/plan` local unless `--cloud`). The model is `tiers.local`; the ticket limits come from its size and `contextWindow` |
-| `tiers.<tier>[].contextWindow` | The context window Pi is told for that model (default 128000). Set it for local models to the context the server runs them with, or Pi fills a window the server truncates |
-| `routing.selection` (default `ordered`) | How a tier picks its model. `ordered`: the first usable candidate in the tier's listed order, so the same model runs every time and later entries are fallbacks. `adaptive`: the lowest expected cost per success, with Thompson sampling over each model's record (it explores, so the choice varies) |
-| `routing.attemptOverheadUsd` (default 0.02, at least 0) | Ranking only. Added to each candidate's price before it is divided by its success rate, so a $0 model with a poor record does not always win. Never billed, never in a budget |
-| `advisors` | Second opinions: `tickets` (default true; false turns the per-ticket review in `/build` off), `plan` (default true; false skips `plan_consult` and its requirement), `fromDifficulty` (default `high`; the lowest ticket difficulty that gets advisors in the per-ticket review and `/review`. `medium` adds one advisor from another vendor for medium tickets and for ad-hoc branches over `adHocMinLines`; a project can only raise it to `high`), `adHocMinLines` (default 400; with `fromDifficulty: medium`, an ad-hoc branch with more changed lines than this gets one advisor in `/review`), `summarizeCut` (default true; the batch tier writes a one-line summary of each file a diff clip cut), `timeoutMs` (default 180000, per call), `maxDiffChars` (default 40000, the diff sent to advisors), `maxOutputTokens` (default 1500, the visible answer an advisor is asked to stay within), `maxPlanConsults` (default 2; plan consults per draft version, a project can only lower it). Advisors obey the same hard rules as model selection (`orgProviderAllowlist`, `proprietaryCode`, an open circuit, the budget); an excluded advisor is never called and is listed with its reason (`org_allowlist`, `proprietary_code_policy`, `circuit_open`, `over_budget`) in `advisorsSkipped` |
-| `review` | The advisory model pass of `/review`: `model` (on by default), `maxDiffChars`, `maxChunks`, `timeoutMs` |
+| `deterministic` | Plans made of literal edits (a ```` ```tasks ```` block), on a local model when one answers |
+| `cheap` | Compaction summaries (`session.compactionTier`) and small in-session jobs |
+| `standard` | `/route` previews of an ordinary request (a security-sensitive one previews on `premium`), and the fallback for a failed `/review` part |
+| `premium` | The review gate and `/review` (`routing.reviewTier`), and the last step of the ticket ladder |
+| `ticketLow`, `ticketMedium`, `ticketHigh` | `/build` tickets of difficulty low, medium and high |
+| `local` | Every ticket of a local-mode task |
+| `batch` | Standalone jobs, such as one-line summaries of files cut from a diff. Uses `cheap` when unset |
+| `advisor` | Second opinions: `plan_consult`, high tickets' reviews, `/review`, `/advisor` |
 
-Old keys load with a warning (shown by `/status`) and are otherwise ignored: `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, `budgets.autopilotPrUsd`, `routing.sessionTier`, `routing.directTier`, `routing.minConfidence`, `providers.*.decisionsPath`, `models.classifier`, `tiers.classifier`, and any tier entry with `api: decisions` (that entry is dropped). An old `worktrees.branchPrefix` still names the branches while `branchPrefix` is unset.
+Each candidate:
 
-Provider setup: [Azure CLI and Foundry](providers.md#azure-cli-and-foundry-deployments) (`endpoint`, `audience: https://ai.azure.com`) and [Vercel CLI and AI Gateway](providers.md#vercel-cli-and-ai-gateway) (`vercel login`, `vercel link`, `vercel env pull`, `projectDir`).
+| Key | Type | Required | What it does |
+|---|---|---|---|
+| `provider` | `openai` \| `anthropic` \| `xai` \| `foundry` \| `vercel` \| `local` | yes | Who serves it. Account providers need a Pi login; the others need their `providers` block |
+| `model` | string | yes | The model id (for Foundry, the model name; `providers.foundry.deployments` maps it to a deployment) |
+| `label` | string | no | Display name in reports |
+| `api` | `openai-responses` \| `openai-completions` \| `azure-openai-responses` | no, Foundry only | The wire API for this deployment, overriding `providers.foundry.api`. When tiers disagree, the first wins with a warning |
+| `contextWindow` | int ≥ 4096 | no | The context window Pi is told (default 128000). Set it for local models to what the server runs, for example Ollama's `OLLAMA_CONTEXT_LENGTH` |
+
+### providers
+
+One block per provider, keyed `openai`, `anthropic`, `xai`, `foundry`, `vercel` or `local`.
+
+- **Account providers** (`openai`, `anthropic`, `xai`) need no block: they use Pi's login.
+- **`foundry`, `vercel` and `local`** are unavailable without their block.
+- **Layering.** Blocks are merged per provider, the project winning per key, except the user-only keys below. A project value for a user-only key is accepted only when you define no block for that provider and the value is the built-in default.
+
+Every provider:
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `type` | string | filled in for foundry (`azure-foundry`), vercel (`vercel-ai-gateway`), local (`openai-compatible`) | Informational |
+| `auth` | string | — | Must be `account-login` for openai, anthropic and xai, `azure-cli` for foundry, `vercel-cli` for vercel. Anything else rejects the file |
+| `model` | string | — | Used only by the deprecated `models:` map, below |
+| `piProvider` | string | — | Accepted and ignored |
+
+**openai, anthropic, xai**
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `apiKeyFallback` | bool | `false` | user only | Use an API key saved in Pi (`/login` with a key) when no account login is present. Billed per token, so add `billing: api-key` pricing rows; without one the cost is unknown |
+
+**foundry** (Azure AI Foundry; setup in [providers.md](providers.md#azure-cli-and-foundry-deployments))
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `endpoint` | https URL | — | user only | The resource endpoint, for example `https://<resource>.services.ai.azure.com` |
+| `endpointEnv` | env var name | — | user only (the sample's `AZURE_AI_ENDPOINT` is allowed when you define no block) | A variable holding the endpoint; wins over `endpoint`. Its value must be https |
+| `audience` | https URL | `https://ai.azure.com` | user only | The token audience `az account get-access-token` is asked for |
+| `api` | `openai-completions` \| `openai-responses` \| `azure-openai-responses` | `openai-completions` | merged | Default wire API for every deployment |
+| `deployments` | map: model → deployment name | — | merged per model | Calls a tier model under your Azure deployment's name. Routing, metrics and pricing keep the model name |
+| `routeStyle` | `v1` \| `deployments` | `v1`, or `deployments` when `apiVersion` is set | merged | `v1`: `<endpoint>/openai/v1/…`. `deployments`: the legacy per-deployment route |
+| `apiVersion` | string | — | merged | `api-version` for the legacy `deployments` route |
+| `resourceGroup` | Azure resource group | — | user only | Lets `/status foundry` list your deployments |
+
+**vercel** (Vercel AI Gateway; setup in [providers.md](providers.md#vercel-cli-and-ai-gateway))
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `projectDir` | path | — (the sample's `.` is allowed when you define no block) | user only | A directory you ran `vercel link` in; `vercel env pull` runs there |
+| `envFile` | relative file name | `.env.local` | user only | The file `vercel env pull` writes the token to, and Pi reads it from |
+| `baseUrl` | https URL | `https://ai-gateway.vercel.sh/v1` | user only | The gateway URL |
+
+**local** (an OpenAI-compatible server such as Ollama; setup in [providers.md](providers.md#local-inference))
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `baseUrl` | URL | — (required) | user only (a loopback URL is allowed when you define no block) | The server, for example `http://127.0.0.1:11434/v1`. `http` is allowed only for localhost |
+| `apiKeyEnv` | env var name | — | user only | A variable holding the server's key, if it needs one |
+
+### review
+
+The model pass of `/review`. Replaced as a whole by a project's `review`: keys it leaves out take the defaults.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `review.model` | bool | `true` | Run the advisory model pass |
+| `review.maxDiffChars` | int ≥ 1000 | `120000` | The diff size of one review call. A larger diff is split at file boundaries |
+| `review.maxChunks` | int ≥ 1 | `6` | At most this many calls; the parts beyond them are listed as not reviewed |
+| `review.timeoutMs` | ms ≥ 1000 | `300000` | Per call |
+
+### advisors
+
+| Key | Type | Default | Project | What it does |
+|---|---|---|---|---|
+| `advisors.tickets` | bool | `true` | off only | The per-ticket review in `/build`. `false` turns the review gate and its advisors off |
+| `advisors.plan` | bool | `true` | off only | `plan_consult`: advisors read the draft tickets once per plan version, and `plan_tickets` requires the planner's resolution |
+| `advisors.fromDifficulty` | `medium` \| `high` | `high` | can only raise to `high` | The lowest ticket difficulty that gets advisors. `high`: high tickets consult every advisor, others none. `medium`: medium tickets, and ad-hoc branches over `adHocMinLines`, also get one advisor from another vendor |
+| `advisors.adHocMinLines` | int ≥ 0 | `400` | higher wins | With `fromDifficulty: medium`, a branch with no plan gets an advisor in `/review` above this many changed lines |
+| `advisors.summarizeCut` | bool | `true` | off only | When a diff is clipped for an advisor, the batch tier writes a one-line summary of each cut file |
+| `advisors.maxPlanConsults` | int ≥ 1 | `2` | lower wins | Plan consults per draft version |
+| `advisors.maxDiffChars` | int ≥ 1000 | `40000` | lower wins | The diff sent to the reviewer and advisors; the rest is listed as cut |
+| `advisors.maxOutputTokens` | int ≥ 100 | `1500` | lower wins | The answer length an advisor is asked to stay within |
+| `advisors.timeoutMs` | ms ≥ 1000 | `180000` | lower wins | Per advisor or review call |
+
+Advisors never gate: only the review model's verdict counts. They obey `orgProviderAllowlist`, `proprietaryCode`, open circuits and the budget.
+
+### pricing
+
+Prices per million tokens, used for the ledger, budgets and ranking.
+
+- **Missing row:** a model with no row has an unknown cost, and ranks last as `price_unknown` in adaptive selection.
+- **Exception:** a `local` model with no row is a known $0.
+- **Layering:** rows from both files are combined, keyed by provider, model, date and billing. A project row cheaper than a user row for the same provider, model and billing is ignored with a warning.
+
+| Key | Type | Required | What it does |
+|---|---|---|---|
+| `provider` | string | yes | |
+| `model` | string | yes | For Foundry, a deployment name row wins over the model name row |
+| `effectiveFrom` | `YYYY-MM-DD` | yes | The row applies from this date; the latest one on or before a call's date is used |
+| `inputPerMillionUsd` | USD ≥ 0 | yes | |
+| `outputPerMillionUsd` | USD ≥ 0 | yes | |
+| `cacheReadPerMillionUsd` | USD ≥ 0 | no | Defaults to the input rate |
+| `cacheWritePerMillionUsd` | USD ≥ 0 | no | Defaults to the input rate |
+| `billing` | `api-key` | no | Prices the model while its provider runs on an API key (`apiKeyFallback`). Rows without it price the account (subscription) login, usually at $0 |
+
+Two rows with the same provider, model, date and billing in one file reject it.
+
+### quota
+
+Shadow prices that steer `adaptive` selection away from scarce subscription quota. Ranking only: they never reach the ledger or budgets. The project wins key by key. A bad `quota` section is dropped with a warning.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `quota.models` | list of `{ provider, model, perMillionTokensUsd }` | `[]` | A ranking-only price per million tokens for a subscription model; merged by provider and model |
+| `quota.providers.<provider>.dailyTokens` | int > 0 | — | A soft daily token cap |
+| `quota.providers.<provider>.weeklyTokens` | int > 0 | — | A soft weekly token cap |
+| `quota.overCapMultiplier` | number ≥ 1 | `4` | Multiplies a provider's shadow prices once it is at or over a cap. Nothing is blocked |
+
+### Deprecated and removed keys
+
+| Key | What happens |
+|---|---|
+| `models: { cheap \| standard \| premium: <provider> }` | Becomes a one-model tier from `providers.<provider>.model`, with a warning; use `tiers` |
+| `approvals.publish`, `approvals.securitySensitiveFix` | Ignored |
+| `commandAllowlist`, `worktrees.*`, `workers.concurrency`, `workers.deadlineMs`, `workers.isolatedWorktrees`, `workers.preserveUntilReviewed`, `autopilot`, `budgets.autopilotPrUsd`, `routing.sessionTier`, `routing.directTier`, `routing.minConfidence`, `providers.*.decisionsPath`, `models.classifier`, `tiers.classifier` | Ignored with a warning. An old `worktrees.branchPrefix` still names branches while `branchPrefix` is unset |
+| a tier entry with `api: decisions` | Dropped with a warning |
+
+### Environment variables
+
+pi-chef never reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `XAI_API_KEY`. It reads only:
+
+| Variable | Read when |
+|---|---|
+| the one named by `providers.foundry.endpointEnv` | Foundry is configured |
+| the one named by `providers.local.apiKeyEnv` | Pi calls the local server |
+| `VERCEL_OIDC_TOKEN` | Checking the Vercel token (Pi itself reads the token from `envFile`) |
+| `GIT_AUTHOR_*`, `GIT_COMMITTER_*` | Deciding whether git has an identity for `/build`'s commits |
 
 ## Tiers and who serves them
 
