@@ -134,7 +134,6 @@ budgets:
 approvals:
   plan: required
   merge: manual
-  securitySensitiveFix: required
 
 checks: []
 

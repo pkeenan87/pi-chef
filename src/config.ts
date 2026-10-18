@@ -170,7 +170,6 @@ export interface WorkflowConfig {
   approvals: {
     plan: "required";
     merge: "manual";
-    securitySensitiveFix: "required";
   };
   checks: CheckConfig[];
   /** Commands /review runs in the repo root before the checks (an install, for example). Same rules as checks. */
@@ -256,7 +255,7 @@ const DEFAULTS: WorkflowConfig = {
   },
   branchPrefix: "chef",
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
-  approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
+  approvals: { plan: "required", merge: "manual" },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
@@ -775,13 +774,8 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
-    approvals: {
-      ...DEFAULTS.approvals,
-      ...obj("approvals"),
-      plan: "required",
-      merge: "manual",
-      securitySensitiveFix: "required",
-    } as WorkflowConfig["approvals"],
+    // Fixed: plan approval stays required and merge manual. An old approvals.securitySensitiveFix is ignored.
+    approvals: { plan: "required", merge: "manual" },
     checks: Array.isArray(norm.checks)
       ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
       : DEFAULTS.checks,
@@ -1042,11 +1036,7 @@ export function layerConfigs(
   if ([user.approvals, project.approvals].some((item) => isRecord(item) && item.publish !== undefined)) {
     warnings.push("approvals.publish is no longer used; /review never pushes.");
   }
-  merged.approvals = {
-    plan: "required",
-    merge: "manual",
-    securitySensitiveFix: "required",
-  };
+  merged.approvals = { plan: "required", merge: "manual" };
 
   // worktrees.* and the worker pool settings are gone (/build runs tickets one at a time on one branch).
   // An old worktrees.branchPrefix still names the branches while branchPrefix is unset.

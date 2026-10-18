@@ -1,7 +1,7 @@
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { CheckEvidence, ReviewReport, ReviewStage } from "../domain.js";
 import { acceptedLines, rejectedLines, shortModel, unresolvedConcernLines } from "../review/review-resolution.js";
-import { cell, formatDuration, formatUsdShort } from "./format.js";
+import { cell, formatDuration, formatUsdShort, mdTable } from "./format.js";
 
 /** The text of a /review: the tables of the chat block and of the saved report, and the numbered items the findings dialog and "Fix all" use. */
 
@@ -143,11 +143,10 @@ export function reviewNotes(report: ReviewReport): string[] {
   return model.resolution ? rejectedLines(model) : model.resolutionError ? unresolvedConcernLines(model.advisors ?? []) : [];
 }
 
-const table = (head: string[], rows: string[][]) => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];
 
 /** The Findings table, shared by the chat block and the findings dialog so the numbers match. */
 export function findingsTable(report: ReviewReport): string[] {
-  const lines = table(
+  const lines = mdTable(
     ["#", "Severity", "Where", "Finding", "Raised by", "Decision"],
     reviewRows(report).map((row) => [row.n === undefined ? "–" : String(row.n), row.severity, cell(row.where, 80), cell(row.finding, FINDING_CELL), cell(row.raisedBy, 40), cell(row.verdict, 120)]),
   );
@@ -243,15 +242,15 @@ export function reviewMarkdown(report: ReviewReport, options: { setupConfigured:
     `## Review ${report.passed ? "passed" : "did not pass"}${report.elapsedMs !== undefined ? ` · ${formatDuration(report.elapsedMs)}` : ""}${total ? ` · ${total}` : ""}`,
     ...(report.passed ? [] : ["", report.summary]),
     "",
-    ...table(["Stage", "Result", "Time", "Cost"], stageRows),
+    ...mdTable(["Stage", "Result", "Time", "Cost"], stageRows),
     "",
     "### Checks",
-    ...(checkRows.length > 0 ? table(["Check", "Result", "Time"], checkRows) : ["None ran."]),
+    ...(checkRows.length > 0 ? mdTable(["Check", "Result", "Time"], checkRows) : ["None ran."]),
     ...failureTails(report.checks),
     "",
     "### Findings",
     ...(rows.length > 0 ? findingsTable(report) : ["None."]),
-    ...(options.tickets?.length ? ["", "### Tickets", ...table(["Ticket", "Difficulty", "Implementer", "Review", "Cost"], options.tickets.map((row) => [cell(row.id), row.difficulty, cell(row.implementer), cell(row.review), cell(row.cost)]))] : []),
+    ...(options.tickets?.length ? ["", "### Tickets", ...mdTable(["Ticket", "Difficulty", "Implementer", "Review", "Cost"], options.tickets.map((row) => [cell(row.id), row.difficulty, cell(row.implementer), cell(row.review), cell(row.cost)]))] : []),
     "",
     "### Next",
     `- ${next}`,

@@ -218,17 +218,3 @@ export class FileAuthProbe implements AuthProbe {
     return { provider, status: "unavailable", method: "local", detail: "Local reachability probe is not configured." };
   }
 }
-
-export function assertCallable(view: ProviderAuthView): void {
-  if (view.status === "ready") return;
-  if (view.status === "expired") {
-    throw new WorkflowError("AUTH_EXPIRED", view.detail);
-  }
-  if (view.method === "api-key") {
-    throw new WorkflowError("API_KEY_REJECTED", `API key credentials are rejected. ${view.detail}`);
-  }
-  if (view.status === "blocked") {
-    throw new WorkflowError("API_KEY_REJECTED", view.detail);
-  }
-  throw new WorkflowError("AUTH_MISSING", view.detail);
-}

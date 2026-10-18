@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { baselineFromRecords, budgetStatus, buildCostRecord, compareBaseline, summarize, toCsv } from "../src/cost/ledger.js";
+import { budgetStatus, buildCostRecord, summarize, toCsv } from "../src/cost/ledger.js";
 import { reviewDiff, type CheckRunner } from "../src/review/review.js";
 import { emptyUsage } from "../src/domain.js";
 
@@ -28,9 +28,6 @@ describe("cost and review", () => {
     expect(row[header.indexOf("actualUsd")]).toBe("");
     expect(row[header.indexOf("usageKnown")]).toBe("false");
     expect(budgetStatus(20, 20, 0.8)).toBe("hard");
-    expect(compareBaseline(baselineFromRecords([known], { source: "this-workflow", regressions: 0, interventions: 1 }), {
-      source: "cursor-auto", costPerMergedPrUsd: 1, timeToMergeReadyMs: 10, successRate: 1, retries: 0, regressions: 1, interventions: 2,
-    }).regressions).toBe(-1);
   });
 
   it("blocks a failing check and a secret in the diff without claiming a pass", async () => {

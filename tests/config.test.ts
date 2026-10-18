@@ -301,7 +301,7 @@ pricing:
     writeUser(`${base}approvals: { publish: auto }\n`);
     writeProject("routing: { maxEscalations: 1 }\n");
     const config = loadConfig(project);
-    expect(config.approvals).toEqual({ plan: "required", merge: "manual", securitySensitiveFix: "required" });
+    expect(config.approvals).toEqual({ plan: "required", merge: "manual" });
     expect(config.warnings).toContain("approvals.publish is no longer used; /review never pushes.");
     writeUser(`${base}approvals: { publish: nonsense }\n`);
     expect(loadConfig(project).warnings).toContain("approvals.publish is no longer used; /review never pushes.");
