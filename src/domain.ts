@@ -31,11 +31,17 @@ export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as c
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
 /**
+ * The local-mode tier (`/plan --local`): the one local model (Ollama) that builds every ticket. A ticket that still
+ * fails there stops; it never goes to a cloud model.
+ */
+export const LOCAL_TIERS = ["local"] as const;
+export type LocalTier = (typeof LOCAL_TIERS)[number];
+/**
  * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
  * diff clip cut). Not part of any ladder; a config without it runs them on `cheap`.
  */
 export const BATCH_TIERS = ["batch"] as const;
-export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...BATCH_TIERS] as const;
+export const TIERS = [...BASE_TIERS, ...TICKET_TIERS, ...LOCAL_TIERS, ...BATCH_TIERS] as const;
 export type Tier = (typeof TIERS)[number];
 
 export const DIFFICULTIES = ["low", "medium", "high"] as const;
@@ -76,6 +82,8 @@ export interface TierCandidate {
   label?: string;
   /** Foundry only: overrides `providers.foundry.api` for this deployment (for example Sol needs openai-responses for tools). */
   api?: ChatApi;
+  /** The context window Pi is told for this model (default 128000). Set it to what the server runs, for example Ollama's context length. */
+  contextWindow?: number;
 }
 
 /** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */
@@ -149,6 +157,8 @@ export interface Ticket {
 
 export interface PlanDocument {
   version: number;
+  /** Written for local mode: its tickets are built by the model in tiers.local. */
+  localMode?: boolean;
   createdAt: string;
   summary: string;
   risks: string[];
@@ -531,6 +541,8 @@ export interface TaskState {
   /** Set when the task was closed (a person, or a new /plan after it finished). Its files and branch are kept. */
   closedAt?: string;
   closedReason?: string;
+  /** Local mode, chosen at /plan: tickets are written for and built by the model in tiers.local only. */
+  localMode?: boolean;
   phase: Phase;
   planning?: PlanningProgress;
   /** A freshly drafted plan that has not been shown yet: the extension posts it and asks for the decision when the planning turn settles. */

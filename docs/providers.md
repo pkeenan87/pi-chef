@@ -163,6 +163,25 @@ providers:
 
 Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This process does not start that server. The deterministic tier uses it only while `<baseUrl>/models` answers.
 
+### Ollama for local mode
+
+[Local mode](../README.md#local-mode) runs every ticket on the one model in `tiers.local`, through `providers.local` above:
+
+```bash
+ollama pull qwen3.5:9b
+# Ollama's default context is far smaller than a coding session needs, and it truncates silently:
+OLLAMA_CONTEXT_LENGTH=65536 ollama serve
+```
+
+To use another model, name it with the tag `ollama list` shows, and keep `contextWindow` equal to the context Ollama runs it with:
+
+```yaml
+tiers:
+  local: [{ provider: local, model: "gemma3:27b", contextWindow: 65536 }]
+```
+
+The size in the tag (`9b`, `27b`) tells the planner how small to make the tickets; a tag with no size gets the strictest ones. Pick a model that calls tools well: the ticket session uses Pi's read, edit and bash tools. `/auth status` shows whether `<baseUrl>/models` answers, and `/status` shows the local model and its ticket limits. A local ticket can still call `web_search` (Anthropic) and `web_fetch`; its per-ticket review runs on the review tier (Opus).
+
 ## Web tools
 
 The extension registers two tools for the model to call.

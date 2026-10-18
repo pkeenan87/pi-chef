@@ -122,9 +122,9 @@ export function advisorReviewLines(review: PlanAdvisorReview | undefined): strin
 }
 
 /** Who builds a ticket and who advises on it, from the effective config: the first candidate of its difficulty tier. */
-export function ticketRouteView(config: WorkflowConfig, ticket: Ticket): { implementer: string; advisors: string } {
+export function ticketRouteView(config: WorkflowConfig, ticket: Ticket, local = false): { implementer: string; advisors: string } {
   const difficulty = ticketDifficulty(ticket);
-  const first = tierCandidates(config, DIFFICULTY_TIER[difficulty])[0];
+  const first = tierCandidates(config, local ? "local" : DIFFICULTY_TIER[difficulty])[0];
   const candidates = tierCandidates(config, "advisor").map((item) => ({ provider: item.provider, model: item.model }));
   const picked = advisorsFor({ difficulty, implementerProvider: first?.provider ?? "", implementerModel: first?.model, candidates, fromDifficulty: config.advisors.fromDifficulty });
   const advisors = picked.length === 0 ? "—" : picked.length === 1 ? `${picked[0]!.provider}/${picked[0]!.model}` : picked.length === 2 ? "both" : `all ${picked.length}`;
@@ -132,13 +132,13 @@ export function ticketRouteView(config: WorkflowConfig, ticket: Ticket): { imple
 }
 
 /** The "Tickets" summary table: number, title, difficulty, implementer, advisors, and what blocks it. */
-export function ticketsTableLines(tickets: Ticket[], config: WorkflowConfig): string[] {
+export function ticketsTableLines(tickets: Ticket[], config: WorkflowConfig, local = false): string[] {
   const cell = (text: string) => text.replace(/\|/g, "/").replace(/\s+/g, " ").trim();
   return [
     "| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |",
     "| --- | --- | --- | --- | --- | --- |",
     ...tickets.map((ticket) => {
-      const view = ticketRouteView(config, ticket);
+      const view = ticketRouteView(config, ticket, local);
       return `| ${cell(ticket.id)} | ${cell(ticket.title)} | ${ticketDifficulty(ticket)} | ${view.implementer} | ${view.advisors} | ${ticket.blockedBy.join(", ") || "none"} |`;
     }),
   ];
@@ -155,14 +155,14 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined, c
   const lines = [
     `# Plan v${plan.version}`,
     "",
-    `${tickets.length} tickets · estimated charge ${plan.estimatedUsd === null ? "unknown" : `$${plan.estimatedUsd}`} · security sensitive: ${plan.securitySensitive ? "yes" : "no"}`,
+    `${tickets.length} tickets · estimated charge ${plan.estimatedUsd === null ? "unknown" : `$${plan.estimatedUsd}`} · security sensitive: ${plan.securitySensitive ? "yes" : "no"}${plan.localMode ? " · local mode: built by the local model only" : ""}`,
     "",
   ];
   lines.push(...advisorReviewLines(plan.advisorReview));
   // The spec's own title is replaced by the plan title; its sections follow as they are.
   const body = (spec ?? "").replace(/^# Spec\s*\n/, "").trim();
   lines.push(body ? `## Summary\n\n${body}` : `## Summary\n\n${plan.summary}`, "", "## Tickets");
-  if (config) lines.push("", ...ticketsTableLines(tickets, config));
+  if (config) lines.push("", ...ticketsTableLines(tickets, config, plan.localMode === true));
   for (const ticket of tickets) {
     const meta = [`Blocked by: ${ticket.blockedBy.join(", ") || "none"}`, `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`];
     lines.push("", `### ${ticket.id} · ${ticketDifficulty(ticket)} · ${ticket.title}`, "", meta.join(" · "));

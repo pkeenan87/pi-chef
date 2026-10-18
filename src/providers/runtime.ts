@@ -109,7 +109,7 @@ interface RegisterApi {
   registerProvider(name: string, config: unknown): void;
 }
 
-function modelEntry(id: string, label: string | undefined, api?: string) {
+function modelEntry(id: string, label: string | undefined, api?: string, contextWindow = 128_000) {
   return {
     ...(api ? { api } : {}),
     id,
@@ -118,7 +118,7 @@ function modelEntry(id: string, label: string | undefined, api?: string) {
     reasoning: false,
     // Prices are tracked in the ledger's pricing rows, not in Pi's catalog.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
+    contextWindow,
     maxTokens: 8_192,
   };
 }
@@ -204,7 +204,7 @@ export function registerChatProviders(
       baseUrl: local.baseUrl,
       api: "openai-completions",
       apiKey: local.apiKeyEnv ? `$${local.apiKeyEnv}` : "local",
-      models: localModels.map((item) => modelEntry(item.model, item.label)),
+      models: localModels.map((item) => modelEntry(item.model, item.label, undefined, item.contextWindow)),
     });
   }
   return registered;

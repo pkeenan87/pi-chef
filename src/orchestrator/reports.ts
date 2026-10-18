@@ -1,7 +1,7 @@
-import { modelLabel, tierCandidates } from "../config.js";
+import { localProfile, modelLabel, tierCandidates } from "../config.js";
 import { selectCandidate } from "../router/select.js";
 import { foundrySection } from "./status-foundry.js";
-import { PROVIDERS, TIER_KEYS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type RoutingDecision, type TaskState } from "../domain.js";
+import { LOCAL_TIERS, PROVIDERS, TIER_KEYS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type RoutingDecision, type TaskState } from "../domain.js";
 import type { ProviderAuthView } from "../providers/auth.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
@@ -108,7 +108,8 @@ export async function routingCheckRows(ctx: WorkflowContext): Promise<RoutingRow
   const check = candidateCheck(ctx);
   const table = ctx.store.readMetrics();
   const rows: RoutingRow[] = [];
-  for (const tier of TIER_KEYS) {
+  // The local-mode tiers are listed only when a local server is configured; otherwise they are noise.
+  for (const tier of TIER_KEYS.filter((key) => ctx.config.providers.local || !(LOCAL_TIERS as readonly string[]).includes(key))) {
     const selection = selectCandidate({ tier, taskType: "general", config: ctx.config, table, availability: seen, candidateCheck: check, strictAvailability: true, rng: () => 0.5, at: ctx.now() });
     const label = (item: { provider: string; model: string }) => modelLabel(ctx.config, item.provider, item.model);
     const usable = selection.considered.filter((item) => !item.excludedReason);
@@ -176,6 +177,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
   ].join(" · ");
   const pairs: [string, string][] = [
     ["Task", state ? `${displayName(state)} (${state.taskId})` : "none"],
+    ...(state?.localMode ? [["Mode", ((profile) => `local: every ticket runs on ${profile.model} (tickets sized for a ${profile.label}: ${profile.difficulties.join("/")}, at most ${profile.maxFiles} files, ${profile.targetTokens} tokens); review stays on ${ctx.config.routing.reviewTier}`)(localProfile(ctx.config))] as [string, string]] : []),
     ["Plan", plan],
     ["Branch", state?.build ? `${state.build.branch} (base ${state.build.base})${ahead !== undefined ? ` · ${ahead} commit${ahead === 1 ? "" : "s"} ahead` : ""}` : "not started"],
     ["Review", reviewSummary(state?.review, git)],

@@ -171,7 +171,10 @@ describe("local reachability and provider registration", () => {
     expect(registered.vercel!.apiKey).toContain("/proj/.env.local");
     // decisions models (jev) are not chat models and are not registered
     expect(registered.vercel!.models.map((m) => m.id)).toEqual(["xai/grok-4"]);
-    expect(registered.local!.models.map((m) => m.id)).toEqual(["qwen2.5-coder:7b"]);
+    // The deterministic tier's model, then the built-in local-mode model (tiers.local).
+    expect(registered.local!.models.map((m) => m.id)).toEqual(["qwen2.5-coder:7b", "qwen3.5:9b"]);
+    // The local-mode model carries the context window Ollama runs it with; others keep the 128k default.
+    expect(registered.local!.models.map((m) => (m as unknown as { contextWindow: number }).contextWindow)).toEqual([128_000, 65_536]);
   });
 });
 

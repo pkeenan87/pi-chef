@@ -188,6 +188,22 @@ A check that cannot run (no such command, a denied command, or a failing `setup`
 
 **Resume.** Run `/build` again at any time. Done tickets are skipped. A `failed` ticket with changes in the tree has its checks re-run first: if you fixed it by hand in the chat and they pass, the same per-ticket review runs on the change (with no implementer, so no model is credited or struck), and it is committed without a model turn only if that review passes. A hand fix the review fails stays `failed`, and the next model attempt, one tier up, gets the findings. A ticket you aborted (an `in-progress` ticket) resumes on the tier it was on: it never escalates or restarts at its difficulty tier, and `routing.maxEscalations` and the review's two rounds are counted per tier, so aborting and resuming cannot buy more of either. A ticket whose review failed is not committed this way: it goes one tier up. A ticket stopped because a check could not run or setup failed stays on its tier once you fix the plan. Otherwise it goes to a model again, one tier up, until `routing.maxEscalations` is used up or it has failed on premium. A hard budget starts no new ticket and says so.
 
+### Local mode
+
+`/plan --local <request>` plans as usual on your session model (Opus), but writes every ticket for the one local model in `tiers.local` (Ollama), and `/build` runs them all on it and nothing else. A ticket that still fails there stops with `MAX_ESCALATIONS` for you to fix; it never goes to a cloud model. If Ollama is down the build stops with `NO_CANDIDATE` and says so. Set `localMode.default: true` to make every plan local; `--cloud` overrides it for one plan.
+
+There is no size switch: the size is read from the model's tag (`qwen3.5:9b` is 9B, `gemma3:27b` is 27B), and the planner is told it. A model under 14B, or one whose tag gives no size, gets the strictest tickets. `plan_tickets` enforces them and sends back any ticket that does not fit:
+
+| | Under 14B (or unknown) | 14B and up |
+|---|---|---|
+| difficulty | `low` only | `low` or `medium` |
+| files per ticket (all listed) | at most 2 | at most 3 |
+| context target (system prompt and tools included) | half the model's `contextWindow` | half the model's `contextWindow` |
+
+Every local ticket also needs `implementation` as numbered steps, each naming the file and the exact function, type or test with signatures and the existing lines it attaches to, and at least one check (a targeted test command) when the config has none. The planner is told that small models follow instructions literally, have small context windows, and are not sent the spec.
+
+Each local ticket's prompt has short literal rules and no spec, and its blocker summaries, repo rules and previous failure are clipped to fit. The per-ticket review stays on `routing.reviewTier` (Opus), which reads the ticket's diff in the cloud; compaction of a local ticket's session is left to Pi on the local model, so the transcript stays local. Local models cost $0 (an unpriced `local` model is a known $0, never unknown). The status line shows `local` after the task name, and `/status` adds a Mode row with the model and its ticket limits. Setup is in [docs/providers.md](docs/providers.md#local-inference).
+
 ### /review
 
 `/review` reviews what differs from the base branch, lists the findings, and offers to fix them in the current session. It never commits, pushes, switches branches, or opens a pull request: you do that with git and the `origin` CLI (or `gh`). It works after `/build`, after ad-hoc fixes made in the chat, with uncommitted edits, and with no task at all (the report goes under `.pi-workflows/reports/` and spend under task `session`).
@@ -277,7 +293,7 @@ Task state is `state.json` plus an append-only `events.jsonl`. On startup the st
 
 | Command | Effect |
 |---|---|
-| `/plan [--no-questions] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits |
+| `/plan [--no-questions] [--local \| --cloud] <request>` | Interview (3-7 decisions with recommendations), spec, tickets, then a review screen to approve, change, edit, or save as a draft. No edits. `--local` writes the tickets for the local model in `tiers.local`, sized from its tag, and `/build` runs them there only ([Local mode](#local-mode)) |
 | `/show-plan` | Show the active task's full plan under its name and state. A draft opens the review so you can approve it |
 | `/plans [--all]`, `/plans <name>`, `/plans close <name>` | List tasks (the active one marked), switch to one (checks out its branch when clean, shows its plan), or close one (files and branches kept). `/plan` always starts a new task and parks an unfinished one |
 | `/build` | Approved plan only. Each ticket in a fresh session on a routed model, then checks, then an Opus review (with advisors for medium and high tickets), then a commit, on one branch. Run again to resume |
