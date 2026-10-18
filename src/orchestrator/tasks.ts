@@ -83,10 +83,11 @@ export function allTicketsDone(task: TaskState): boolean {
   return tickets.length > 0 && tickets.every((ticket) => task.ticketRuns?.[ticket.id]?.status === "done");
 }
 
-/** Closed, published by an older version, or built to the last ticket: a new /plan closes it rather than parking it. */
+/** Closed, published by an older version, or built to the last ticket with a passed review: a new /plan closes it rather than parking it. */
 export function isFinished(task: TaskState): boolean {
   if (isClosed(task) || PUBLISHED_PHASES.includes(task.phase)) return true;
-  return ["IMPLEMENTING", "REVIEWING", "AWAITING_PUBLISH_APPROVAL"].includes(task.phase) && allTicketsDone(task);
+  // Built is not finished: the work counts as done once its review passed, so a new /plan parks an unreviewed task.
+  return ["IMPLEMENTING", "REVIEWING", "AWAITING_PUBLISH_APPROVAL"].includes(task.phase) && allTicketsDone(task) && task.review?.passed === true;
 }
 
 /** Tasks still being worked on: not closed and not finished. */

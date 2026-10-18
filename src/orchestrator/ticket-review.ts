@@ -31,16 +31,8 @@ const SEVERITIES = new Set(["high", "medium", "low"]);
 
 /** The ticket's own change: the working tree against HEAD with untracked files, minus `.pi-workflows/`, lockfiles omitted, redacted. */
 export async function ticketDiff(ctx: WorkflowContext): Promise<string> {
-  const workspace = workspaceName(ctx);
-  const raw = await ctx.git.workingDiff("HEAD");
-  const kept = raw
-    .split(/(?=^diff --git )/m)
-    .filter((section) => {
-      const file = /^diff --git a\/.+? b\/(.+)$/m.exec(section.split("\n", 1)[0] ?? "")?.[1];
-      return !file || (file !== workspace && !file.startsWith(`${workspace}/`));
-    })
-    .join("");
-  return redact(omitLockfiles(kept));
+  const raw = await ctx.git.workingDiff("HEAD", [workspaceName(ctx)]);
+  return redact(omitLockfiles(raw));
 }
 
 function ticketText(ticket: Ticket): string {

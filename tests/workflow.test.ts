@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ReviewReport } from "../src/domain.js";
 import { Workflow } from "../src/orchestrator/service.js";
 import { runBuild } from "../src/orchestrator/build.js";
 import { builtWorkflow, checkRunner, readyAuth, sampleSpec, sampleTicket, singleTaskRequest, tasksRequest, tempRepo, testConfig, tieredConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
@@ -98,10 +99,20 @@ describe("workflow", () => {
 describe("a new /plan closes a finished task", () => {
   const request = "Add a retry counter to the ingest parser";
 
-  it("closes a task whose tickets are all built, and goes on to plan", async () => {
+  it("parks a task that is built but not reviewed", async () => {
     const lines: string[] = [];
     const { app } = await builtWorkflow({ progress: (line) => void lines.push(line), startTurn: () => undefined });
     const firstId = app.activeTaskId()!;
+    expect((await app.startPlan(request)).ok).toBe(true);
+    expect(app.store.load(firstId)!.phase).toBe("IMPLEMENTING");
+    expect(lines.some((line) => line.startsWith(`Parked ${app.store.load(firstId)!.name} (Built · `))).toBe(true);
+  });
+
+  it("closes a task whose tickets are all built and whose review passed, and goes on to plan", async () => {
+    const lines: string[] = [];
+    const { app } = await builtWorkflow({ progress: (line) => void lines.push(line), startTurn: () => undefined });
+    const firstId = app.activeTaskId()!;
+    await app.store.update(firstId, "reviewed", (task) => ({ ...task, review: { passed: true } as ReviewReport }));
     expect(app.store.load(firstId)!.phase).toBe("IMPLEMENTING");
     const result = await app.startPlan(request);
     expect(result.ok, result.text).toBe(true);

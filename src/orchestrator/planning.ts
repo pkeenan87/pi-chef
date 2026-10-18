@@ -37,8 +37,8 @@ export function backToApproval(task: TaskState, at: string, note?: string): Task
 }
 
 /**
- * What the active task becomes when a new /plan starts. A finished task (all tickets built, or an older published one)
- * is closed. Any other unfinished task is left exactly as it is and is returned: it is parked, and the caller says so
+ * What the active task becomes when a new /plan starts. A finished task (all tickets built and the review passed,
+ * or an older published one) is closed. Any other unfinished task is left exactly as it is and is returned: it is parked, and the caller says so
  * once the new task exists. /plan never revises another task's plan.
  */
 export async function retireCurrent(ctx: WorkflowContext, task: TaskState | undefined): Promise<TaskState | undefined> {

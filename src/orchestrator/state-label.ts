@@ -84,8 +84,33 @@ export function taskState(state: TaskState | undefined, review: ReviewReport | u
   if (stopped) {
     const [id, run] = stopped;
     const why = flat(run.error || (run.failedBy ? `${run.failedBy} failed` : "stopped"), 60);
-    return label(`Stopped · ticket ${id}: ${why}`, "/build resumes");
+    return label(`Stopped · ticket ${id}: ${why}`, `/build resumes (/status ${id} shows its attempts)`);
   }
   if (finished >= total && total > 0) return label(`Built · ${finished} of ${total} tickets done`, "run /review");
   return label(`Building · ${finished} of ${total} tickets done`, "/build resumes");
+}
+
+export interface StatusFacts {
+  /** The task's display name. */
+  name: string;
+  /** The interview or ticket stage while /plan runs (planningStatusText). */
+  planning?: string;
+  /** provider/model of the ticket running now. */
+  model?: string;
+  /** Known spend on the task. */
+  spentUsd: number;
+  /** True when some of the task's spend is unknown: shown as "+?", never as zero. */
+  unknownSpend: boolean;
+  budgetUsd: number;
+}
+
+/**
+ * The one persistent status line: task, where it stands and the next step, the model of a running ticket, and spend
+ * against the task budget. Undefined (the line is cleared) with no open task. Pure; no git.
+ */
+export function statusLine(state: TaskState | undefined, facts: StatusFacts): string | undefined {
+  if (!state || state.phase === "IDLE" || state.phase === "COMPLETE") return undefined;
+  const where = facts.planning ?? taskState(state, state.review).line;
+  const spend = `$${facts.spentUsd.toFixed(2)}${facts.unknownSpend ? "+?" : ""} of $${facts.budgetUsd}`;
+  return ["chef", facts.name, where, facts.model, spend].filter(Boolean).join(" · ");
 }
