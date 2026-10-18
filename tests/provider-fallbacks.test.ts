@@ -32,6 +32,16 @@ describe("Anthropic API-key fallback", () => {
     expect(probe.billing("openai")).toBe("subscription");
   });
 
+  it("bills OpenAI from the credential inspect picks, also with a legacy openai-codex login", async () => {
+    const both = authFile({ openai: { type: "api_key" }, "openai-codex": { type: "oauth" } });
+    const allowed = new FileAuthProbe({ authFile: both, apiKeyFallback: (provider) => provider === "openai" });
+    expect(await allowed.inspect("openai")).toMatchObject({ status: "ready", method: "api-key" });
+    expect(allowed.billing("openai")).toBe("api-key");
+    const refused = new FileAuthProbe({ authFile: both });
+    expect((await refused.inspect("openai")).status).toBe("ready");
+    expect(refused.billing("openai")).toBe("subscription");
+  });
+
   it("reads the xAI subscription login", async () => {
     expect(await new FileAuthProbe({ authFile: file }).inspect("xai")).toMatchObject({ status: "ready", method: "oauth" });
   });

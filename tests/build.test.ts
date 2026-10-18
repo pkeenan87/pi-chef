@@ -346,6 +346,18 @@ describe("/build failures", () => {
     expect((await t.app.status("")).text).toContain("/status 01 shows its attempts");
   });
 
+  it("counts a web_search made during a ticket toward that ticket's cost", async () => {
+    const t = await buildTask({ tickets: [ticket("01")] });
+    const d = fakeDriver(t.cwd, () => {
+      d.write("f.txt");
+      // An unpriced model: once it counts toward the ticket, the ticket's cost is unknown, not the session's known $0.
+      t.app.recordWebSearch({ provider: "anthropic", model: "unpriced-search", inputTokens: 1, outputTokens: 0, webSearchRequests: 1 });
+    });
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(t.app.store.readLedger().find((item) => item.reason.startsWith("web_search"))!.reason).toMatch(/ · ticket 01$/);
+    expect(t.load().ticketRuns!["01"]!.costSplit!.implementer).toBeNull();
+  });
+
   it("passes with a warning when no checks exist at all", async () => {
     const t = await buildTask({
       tickets: [ticket("01")],

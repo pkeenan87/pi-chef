@@ -264,7 +264,8 @@ function ticketSpend(ctx: WorkflowContext, taskId: string, ticketId: string, sin
   const micro: Record<keyof CostSplit, number | null> = { implementer: 0, review: 0, advisors: 0 };
   for (const record of ctx.store.readLedger()) {
     if (record.taskId !== taskId || !record.reason.endsWith(` ticket ${ticketId}`) || (since !== undefined && record.at < since)) continue;
-    const part: keyof CostSplit = record.reason.startsWith("advisor ") ? "advisors" : record.reason.startsWith("ticket review") ? "review" : "implementer";
+    // Cut-file summaries feed the advisors; compaction and web_search are the implementer's session.
+    const part: keyof CostSplit = record.reason.startsWith("advisor ") || record.reason.startsWith("batch summary") ? "advisors" : record.reason.startsWith("ticket review") ? "review" : "implementer";
     micro[part] = micro[part] === null || record.actualUsd === null ? null : micro[part]! + toMicroUsd(record.actualUsd);
   }
   const split = { implementer: micro.implementer === null ? null : fromMicroUsd(micro.implementer), review: micro.review === null ? null : fromMicroUsd(micro.review), advisors: micro.advisors === null ? null : fromMicroUsd(micro.advisors) };

@@ -154,6 +154,23 @@ describe("Vercel CLI token", () => {
     const missingNoDir = new FileAuthProbe({ vercel: () => createVercelTokenSource({ root: "/p", env: {}, now: () => NOW }).status() });
     expect((await missingNoDir.inspect("vercel")).status).toBe("missing");
   });
+
+  it("refreshes a missing token with vercel env pull before calling it ready, and reports a failed pull", async () => {
+    const token = unsignedJwt(exp(3_600_000));
+    let file: string | undefined;
+    const runs: string[][] = [];
+    const source = createVercelTokenSource({
+      root: "/p", projectDir: ".", env: {}, now: () => NOW, readFile: () => file,
+      run: async (args) => void (runs.push(args), (file = `VERCEL_OIDC_TOKEN="${token}"\n`)),
+    });
+    const probe = new FileAuthProbe({ vercel: () => source.status(), vercelRefresh: () => source.getToken() });
+    expect(await probe.inspect("vercel")).toMatchObject({ status: "ready" });
+    expect(runs).toEqual([["env", "pull", ".env.local", "--yes"]]);
+    const broken = createVercelTokenSource({ root: "/p", projectDir: ".", env: {}, now: () => NOW, readFile: () => undefined, run: async () => { throw new Error("not linked"); } });
+    const view = await new FileAuthProbe({ vercel: () => broken.status(), vercelRefresh: () => broken.getToken() }).inspect("vercel");
+    expect(view.status).toBe("missing");
+    expect(view.detail).toContain("vercel env pull");
+  });
 });
 
 describe("local reachability and provider registration", () => {
