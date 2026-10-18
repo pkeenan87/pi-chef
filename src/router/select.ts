@@ -164,11 +164,12 @@ export function selectCandidate(options: SelectOptions): Selection {
     pool = eligible;
     fellBack = true;
   }
+  const ordered = config.routing.selection !== "adaptive";
   const ranked = new Map<TierCandidate, { score: number | undefined; priced: boolean; quotaUsd?: number; overheadUsd?: number }>();
   const rows = pool.map((candidate, order) => {
     const cell = table[taskType]?.[modelMetricKey(tier, candidate.provider, candidate.model)];
-    // A lone candidate needs no exploration draw.
-    const p = pool.length === 1 ? (cell && cell.success + cell.failure > 0 ? cell.success / (cell.success + cell.failure) : 0.5) : sampleBeta(cell?.success ?? 0, cell?.failure ?? 0, rng);
+    // A lone candidate needs no exploration draw, and ordered selection never samples: its scores are only shown.
+    const p = pool.length === 1 || ordered ? (cell && cell.success + cell.failure > 0 ? cell.success / (cell.success + cell.failure) : 0.5) : sampleBeta(cell?.success ?? 0, cell?.failure ?? 0, rng);
     const price = cost.get(candidate) ?? null;
     // The quota shadow price ranks scarce subscription models; the budget filter above used the real price only.
     const quotaUsd = price === null ? 0 : shadowCost(config, candidate.provider, candidate.model, options.quota);
@@ -179,16 +180,21 @@ export function selectCandidate(options: SelectOptions): Selection {
     return { candidate, order, p, price, quotaUsd, overheadUsd, score };
   });
   rows.sort((a, b) => {
+    if (ordered) return a.order - b.order;
     if ((a.score === undefined) !== (b.score === undefined)) return a.score === undefined ? 1 : -1;
     if (a.score !== undefined && b.score !== undefined && a.score !== b.score) return a.score - b.score;
     if (a.p !== b.p) return b.p - a.p;
     return a.order - b.order;
   });
   const best = rows[0]!;
+  // Ordered: say which earlier entries were passed over and why, so a fallback is visible.
+  const skipped = candidates.slice(0, candidates.indexOf(best.candidate)).map((candidate) => `${label(candidate)} ${hard.get(candidate) ?? soft.get(candidate) ?? "skipped"}`);
   const why =
-    pool.length === 1
+    pool.length === 1 && !ordered
       ? "only eligible candidate"
-      : best.score === undefined
+      : ordered
+        ? `${skipped.length === 0 ? "first in the tier's order" : `fallback ${skipped.length} in the tier's order (${skipped.join("; ")})`}`
+        : best.score === undefined
         ? "no candidate has a price; first by config order"
         : `lowest expected cost per success ($${best.score.toFixed(4)}${best.quotaUsd > 0 || best.overheadUsd > 0 ? ` incl. ${[best.quotaUsd > 0 ? `$${best.quotaUsd.toFixed(4)} quota` : "", best.overheadUsd > 0 ? `$${best.overheadUsd.toFixed(4)} overhead` : ""].filter(Boolean).join(", ")}` : ""}, sampled p=${best.p.toFixed(2)})`;
   return {

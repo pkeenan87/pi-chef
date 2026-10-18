@@ -243,6 +243,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
         reviewerProvider: decision.provider,
         reviewerModel: decision.model,
         candidates: foundAdvisors.candidates,
+        fromDifficulty: ctx.config.advisors.fromDifficulty,
       })
     : undefined;
   let advisorsMs: number | undefined;

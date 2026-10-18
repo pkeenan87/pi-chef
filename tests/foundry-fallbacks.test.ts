@@ -71,11 +71,11 @@ describe("vendorOf and the cross-vendor advisor rule", () => {
   const foundryAstra = { provider: "foundry" as const, model: "gpt-6-astra" };
 
   it("gives a medium Sonnet ticket Foundry Astra when OpenAI is unavailable", () => {
-    expect(advisorsFor({ difficulty: "medium", implementerProvider: "anthropic", implementerModel: "claude-sonnet-5-5", candidates: [fable, foundryAstra] })).toEqual([foundryAstra]);
+    expect(advisorsFor({ difficulty: "medium", implementerProvider: "anthropic", implementerModel: "claude-sonnet-5-5", candidates: [fable, foundryAstra], fromDifficulty: "medium" })).toEqual([foundryAstra]);
   });
 
   it("does not pick Foundry Astra for an implementer that is OpenAI's model on Foundry", () => {
-    expect(advisorsFor({ difficulty: "medium", implementerProvider: "foundry", implementerModel: "gpt-6.1-sol", candidates: [foundryAstra, fable] })).toEqual([fable]);
-    expect(advisorsFor({ difficulty: "medium", implementerProvider: "foundry", implementerModel: "gpt-6.1-sol", candidates: [foundryAstra] })).toEqual([]);
+    expect(advisorsFor({ difficulty: "medium", implementerProvider: "foundry", implementerModel: "gpt-6.1-sol", candidates: [foundryAstra, fable], fromDifficulty: "medium" })).toEqual([fable]);
+    expect(advisorsFor({ difficulty: "medium", implementerProvider: "foundry", implementerModel: "gpt-6.1-sol", candidates: [foundryAstra], fromDifficulty: "medium" })).toEqual([]);
   });
 });

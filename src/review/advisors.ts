@@ -58,8 +58,9 @@ export function vendorOf(candidate: { provider: string; model?: string }): strin
  *  - medium: exactly one, from a vendor other than the implementer's (the first such in order; see `vendorOf`).
  *  - high: all of them.
  */
-export function advisorsFor(input: { difficulty: Difficulty; implementerProvider: string; implementerModel?: string; candidates: AdvisorCandidate[] }): AdvisorCandidate[] {
-  if (input.difficulty === "low") return [];
+export function advisorsFor(input: { difficulty: Difficulty; implementerProvider: string; implementerModel?: string; candidates: AdvisorCandidate[]; fromDifficulty?: "medium" | "high" }): AdvisorCandidate[] {
+  // advisors.fromDifficulty: below it, no advisor (high by default, so only high tickets get second opinions).
+  if (input.difficulty === "low" || (input.difficulty === "medium" && (input.fromDifficulty ?? "high") === "high")) return [];
   const providers = new Set<string>();
   const models = new Set<string>();
   const unique: AdvisorCandidate[] = [];
@@ -85,14 +86,16 @@ export interface ReviewAdvisorPick {
  * Which advisors the branch-level /review consults (pure). `maxDifficulty` is the highest difficulty among the
  * branch's plan tickets, or undefined when there is no plan with tickets (an ad-hoc branch).
  *  - a high ticket: all of them (one per provider);
- *  - highest is medium: one from a different vendor than the reviewer;
+ *  - highest is medium: none by default; one from a different vendor than the reviewer with `fromDifficulty: medium`;
  *  - only low tickets: none;
- *  - ad hoc: one from a different vendor when more than `adHocMinLines` lines changed, else none.
+ *  - ad hoc: like medium when more than `adHocMinLines` lines changed, else none.
  */
-export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLines: number; adHocMinLines: number; reviewerProvider: string; reviewerModel?: string; candidates: AdvisorCandidate[] }): ReviewAdvisorPick {
+export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLines: number; adHocMinLines: number; reviewerProvider: string; reviewerModel?: string; candidates: AdvisorCandidate[]; fromDifficulty?: "medium" | "high" }): ReviewAdvisorPick {
   const { maxDifficulty } = input;
+  const from = input.fromDifficulty ?? "high";
   const pick = (difficulty: Difficulty, reason: string): ReviewAdvisorPick => {
-    const advisors = advisorsFor({ difficulty, implementerProvider: input.reviewerProvider, implementerModel: input.reviewerModel, candidates: input.candidates });
+    if (difficulty === "medium" && from === "high") return { advisors: [], reason: `${reason}; advisors start at high (advisors.fromDifficulty)` };
+    const advisors = advisorsFor({ difficulty, implementerProvider: input.reviewerProvider, implementerModel: input.reviewerModel, candidates: input.candidates, fromDifficulty: from });
     return { advisors, reason: advisors.length === 0 ? `${reason}, but no advisor is available` : reason };
   };
   if (maxDifficulty === undefined) {

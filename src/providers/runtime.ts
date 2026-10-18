@@ -94,6 +94,7 @@ export function createRuntime(config: WorkflowConfig, root: string, overrides: R
     azure,
     localReachable,
     vercel: vercel ? () => vercel.status() : undefined,
+    vercelRefresh: vercel ? () => vercel.getToken() : undefined,
     apiKeyFallback: (provider) => config.providers[provider]?.apiKeyFallback === true,
     now: overrides.now,
   });
@@ -190,7 +191,7 @@ export function registerChatProviders(
       name: "Vercel AI Gateway (CLI auth)",
       baseUrl: vercel.baseUrl ?? VERCEL_GATEWAY_URL,
       api: "openai-completions",
-      // Reads the token that `vercel env pull` wrote; the router refreshes that file before it selects a Vercel model.
+      // Reads the token that `vercel env pull` wrote; the auth probe refreshes that file when routing checks Vercel.
       apiKey: `!sed -n 's/^VERCEL_OIDC_TOKEN="\\{0,1\\}\\([^"]*\\)"\\{0,1\\}$/\\1/p' ${shellQuote(envFile)}`,
       models: vercelModels.map((item) => modelEntry(item.model, item.label)),
     });

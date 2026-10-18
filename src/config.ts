@@ -141,6 +141,11 @@ export interface WorkflowConfig {
      * shadow price it never reaches the ledger, budgets, the over-budget filter, or expectedUsd.
      */
     attemptOverheadUsd: number;
+    /**
+     * How a tier picks its model. `ordered` (default): the first usable candidate in the tier's listed order, so the
+     * choice is predictable and the list is a fallback chain. `adaptive`: cost per success with Thompson sampling.
+     */
+    selection: "ordered" | "adaptive";
   };
   /** The main chat session: a normal Pi model, pinned at session start, with compaction on a cheap tier. */
   session: SessionConfig;
@@ -165,7 +170,6 @@ export interface WorkflowConfig {
   approvals: {
     plan: "required";
     merge: "manual";
-    securitySensitiveFix: "required";
   };
   checks: CheckConfig[];
   /** Commands /review runs in the repo root before the checks (an install, for example). Same rules as checks. */
@@ -177,9 +181,11 @@ export interface WorkflowConfig {
    * the advisor tier is consulted in parallel. `tickets: false` turns the per-ticket review off; `plan: false` skips the
    * advisor consult on every plan (plan_consult). `adHocMinLines`: an ad-hoc branch (no plan) with more changed lines
    * than this gets one advisor in /review. `summarizeCut`: when a diff is clipped for an
-   * advisor packet or a review part, the batch tier writes a one-line summary of each cut file.
+   * advisor packet or a review part, the batch tier writes a one-line summary of each cut file. `fromDifficulty`: the
+   * lowest ticket difficulty that gets advisors in the per-ticket review and /review (`high` by default; `medium`
+   * also gives medium tickets and large ad-hoc branches one advisor from another vendor).
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number; fromDifficulty: "medium" | "high" };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -240,6 +246,7 @@ const DEFAULTS: WorkflowConfig = {
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
     attemptOverheadUsd: 0.02,
+    selection: "ordered",
   },
   session: DEFAULT_SESSION,
   workers: {
@@ -248,11 +255,11 @@ const DEFAULTS: WorkflowConfig = {
   },
   branchPrefix: "chef",
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
-  approvals: { plan: "required", merge: "manual", securitySensitiveFix: "required" },
+  approvals: { plan: "required", merge: "manual" },
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2 },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2, fromDifficulty: "high" },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -618,6 +625,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
       invalid(where, "routing.reviewTier", `must be one of ${CHAT_TIER_NAMES.join(", ")}`);
     }
     if (routing.requirePremiumReviewFor !== undefined) stringArray(routing.requirePremiumReviewFor, "routing.requirePremiumReviewFor", where);
+    if (routing.selection !== undefined && routing.selection !== "ordered" && routing.selection !== "adaptive") invalid(where, "routing.selection", "must be ordered or adaptive");
   }
   const session = section(raw, "session", where);
   if (session) {
@@ -683,6 +691,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
     checkNumber(raw.advisors, "maxOutputTokens", where, { min: 100, integer: true }, "advisors");
     checkNumber(raw.advisors, "adHocMinLines", where, { min: 0, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxPlanConsults", where, { min: 1, integer: true }, "advisors");
+    if (raw.advisors.fromDifficulty !== undefined && raw.advisors.fromDifficulty !== "medium" && raw.advisors.fromDifficulty !== "high") invalid(where, "advisors.fromDifficulty", "must be medium or high");
   }
   if (raw.orgProviderAllowlist !== undefined) {
     const list = stringArray(raw.orgProviderAllowlist, "orgProviderAllowlist", where);
@@ -765,13 +774,8 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
-    approvals: {
-      ...DEFAULTS.approvals,
-      ...obj("approvals"),
-      plan: "required",
-      merge: "manual",
-      securitySensitiveFix: "required",
-    } as WorkflowConfig["approvals"],
+    // Fixed: plan approval stays required and merge manual. An old approvals.securitySensitiveFix is ignored.
+    approvals: { plan: "required", merge: "manual" },
     checks: Array.isArray(norm.checks)
       ? (norm.checks as CheckConfig[]).map((check) => ({ ...check, args: check.args ?? [] }))
       : DEFAULTS.checks,
@@ -905,6 +909,8 @@ function restrictAdvisors(user: unknown, project: unknown, warnings: string[]): 
     const limit = typeof u.adHocMinLines === "number" ? u.adHocMinLines : DEFAULTS.advisors.adHocMinLines;
     if (out.adHocMinLines < limit) drop("adHocMinLines", `a project can only raise it (limit ${limit})`);
   }
+  // medium means more advisor calls, so a project can only move it up to high.
+  if (out.fromDifficulty === "medium" && (u.fromDifficulty ?? DEFAULTS.advisors.fromDifficulty) === "high") drop("fromDifficulty", "a project can only raise it to high");
   return out;
 }
 
@@ -1030,11 +1036,7 @@ export function layerConfigs(
   if ([user.approvals, project.approvals].some((item) => isRecord(item) && item.publish !== undefined)) {
     warnings.push("approvals.publish is no longer used; /review never pushes.");
   }
-  merged.approvals = {
-    plan: "required",
-    merge: "manual",
-    securitySensitiveFix: "required",
-  };
+  merged.approvals = { plan: "required", merge: "manual" };
 
   // worktrees.* and the worker pool settings are gone (/build runs tickets one at a time on one branch).
   // An old worktrees.branchPrefix still names the branches while branchPrefix is unset.

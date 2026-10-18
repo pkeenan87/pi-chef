@@ -38,4 +38,13 @@ describe("model review diff", () => {
     expect(all).toContain("[REDACTED]");
     expect(MODEL_REVIEW_SYSTEM).toContain("`[REDACTED]` marks text removed before review: it is not in the code and must never be reported as a defect.");
   });
+
+  it("is not marked truncated just because the diff mentions the cut note", async () => {
+    const chat: ChatFn = async (candidate) => ({ text: "[]", usage, provider: candidate.provider, model: candidate.model });
+    const text = "diff --git a/a.md b/a.md\n+++ b/a.md\n+a file's diff was cut at 9 characters\n";
+    const review = await runModelReview(chat, [{ provider: "xai", model: "grok-4.7" }], { plan, diff: text, maxDiffChars: 100_000 });
+    expect(review.truncated).toBe(false);
+    const cut = await runModelReview(chat, [{ provider: "xai", model: "grok-4.7" }], { plan, diff: `diff --git a/b.ts b/b.ts\n${"+x\n".repeat(400)}`, maxDiffChars: 300 });
+    expect(cut.truncated).toBe(true);
+  });
 });

@@ -122,6 +122,8 @@ export class FileAuthProbe implements AuthProbe {
       apiKeyFallback?: (provider: AccountProvider) => boolean;
       /** Passive Vercel token check (see createVercelTokenSource().status). */
       vercel?: () => { status: "ready" | "expired" | "missing"; detail: string; expiresAt?: string; refreshable?: boolean };
+      /** Refreshes the Vercel token file (`vercel env pull`); called when the token is missing or expiring and a project is linked. */
+      vercelRefresh?: () => Promise<unknown>;
     } = {},
   ) {}
 
@@ -134,7 +136,11 @@ export class FileAuthProbe implements AuthProbe {
     if (!isAccountProvider(provider)) return "subscription";
     try {
       const stored = this.readStored(this.authFile());
-      const credential = provider === "openai" && stored.openai?.type !== "oauth" && stored["openai-codex"]?.type === "oauth" ? stored["openai-codex"] : stored[provider];
+      // The same credential `inspect` picks: openai first when it is usable, else the legacy openai-codex login.
+      const now = this.options.now?.() ?? Date.now();
+      const allow = this.options.apiKeyFallback?.(provider) ?? false;
+      const useCodex = provider === "openai" && viewFromCredential("openai", stored.openai, now, allow).status !== "ready" && viewFromCredential("openai", stored["openai-codex"], now, allow).status === "ready";
+      const credential = useCodex ? stored["openai-codex"] : stored[provider];
       return credential?.type === "api_key" ? "api-key" : "subscription";
     } catch {
       return "subscription";
@@ -184,14 +190,22 @@ export class FileAuthProbe implements AuthProbe {
       if (!this.options.vercel) {
         return { provider, status: "unavailable", method: "vercel-cli", detail: "Vercel is not configured. Add providers.vercel and run `vercel login && vercel link`." };
       }
-      const view = this.options.vercel();
-      // An expired or missing token is refreshed by `vercel env pull` on the next call when a project is linked.
-      const refreshable = view.status !== "ready" && view.refreshable === true;
+      let view = this.options.vercel();
+      // A missing or expiring token is refreshed now (`vercel env pull`) when a project is linked: Pi reads the file it writes.
+      let refreshError: string | undefined;
+      if (view.status !== "ready" && view.refreshable === true && this.options.vercelRefresh) {
+        try {
+          await this.options.vercelRefresh();
+        } catch (error) {
+          refreshError = redact((error as Error).message);
+        }
+        view = this.options.vercel();
+      }
       return {
         provider,
-        status: view.status === "ready" || refreshable ? "ready" : view.status === "expired" ? "expired" : "missing",
+        status: view.status === "ready" ? "ready" : view.status === "expired" ? "expired" : "missing",
         method: "vercel-cli",
-        detail: view.detail,
+        detail: refreshError ?? view.detail,
         expiresAt: view.expiresAt,
       };
     }
@@ -203,18 +217,4 @@ export class FileAuthProbe implements AuthProbe {
     }
     return { provider, status: "unavailable", method: "local", detail: "Local reachability probe is not configured." };
   }
-}
-
-export function assertCallable(view: ProviderAuthView): void {
-  if (view.status === "ready") return;
-  if (view.status === "expired") {
-    throw new WorkflowError("AUTH_EXPIRED", view.detail);
-  }
-  if (view.method === "api-key") {
-    throw new WorkflowError("API_KEY_REJECTED", `API key credentials are rejected. ${view.detail}`);
-  }
-  if (view.status === "blocked") {
-    throw new WorkflowError("API_KEY_REJECTED", view.detail);
-  }
-  throw new WorkflowError("AUTH_MISSING", view.detail);
 }

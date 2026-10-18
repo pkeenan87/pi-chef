@@ -53,6 +53,8 @@ export function omitLockfiles(diff: string): string {
  * Splits a unified diff into parts of at most `maxChars`, at file boundaries where possible, so a large change is
  * reviewed in several calls instead of cut. A single file larger than the limit is cut.
  */
+const CUT_NOTE = /\n\[\.\.\. this file's diff was cut at \d+ characters \.\.\.\]$/;
+
 export function splitDiff(diff: string, maxChars: number): string[] {
   if (diff.length <= maxChars) return [diff];
   const files = diff.split(/(?=^diff --git )/m);
@@ -335,7 +337,8 @@ export async function runModelReview(
     provider: candidates[0]!.provider,
     model: candidates[0]!.model,
     findings: findings.slice(0, MAX_FINDINGS * reviewed.length),
-    truncated: parts.length > reviewed.length || parts.some((part) => part.includes("was cut at")),
+    // Only the note splitDiff appends at the end of a part: a diff that merely contains the words is not cut.
+    truncated: parts.length > reviewed.length || parts.some((part) => CUT_NOTE.test(part)),
     chunks: reviewed.length,
     parts: results,
     ...(input.askQuestions ? { questions: mergeQuestions(questions) } : {}),

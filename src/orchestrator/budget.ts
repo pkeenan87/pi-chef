@@ -73,6 +73,9 @@ export function record(
   reason: string,
   estimatedUsd: number | null = null,
 ): CostRecord {
+  // Any call while a /build ticket runs (compaction, web_search, a batch summary) counts toward that ticket's cost.
+  const running = ctx.store.load(taskId)?.build?.currentTicket;
+  if (running && !/ ticket \S+$/.test(reason)) reason = `${reason} · ticket ${running}`;
   const entry = buildCostRecord({ provider, model, phase, taskId, tier, usage, outcome, retries, reason, estimatedUsd }, ctx.config.pricing, ctx.now(), ctx.id());
   // Literal edits and other model-free work report zero tokens: that is a known zero charge, not an unknown one.
   if (usage.input === 0 && usage.output === 0 && entry.actualUsd === null) {

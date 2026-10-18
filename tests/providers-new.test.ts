@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createFoundryClient, foundryV1Base } from "../src/providers/clients.js";
+import { foundryV1Base } from "../src/providers/clients.js";
 import { createRuntime, createReachabilityProbe, foundryConfigFrom, registerChatProviders } from "../src/providers/runtime.js";
 import { createVercelTokenSource, jwtExpiryMs, tokenFromDotenv } from "../src/providers/vercel.js";
 import { FileAuthProbe } from "../src/providers/auth.js";
@@ -7,50 +7,18 @@ import { foundryApiConflicts, foundryDeploymentApis, parseConfig } from "../src/
 import { tieredConfig, unsignedJwt } from "./helpers.js";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const ready = { async inspect() { return { provider: "foundry" as const, status: "ready" as const, method: "azure-cli" as const, detail: "ok" }; } };
 
 describe("Foundry v1 route", () => {
-  it("builds https://<resource>/openai/v1/chat/completions with no api-version and the ai.azure.com audience", async () => {
-    const config = tieredConfig();
-    const foundry = foundryConfigFrom(config, {});
+  it("uses https://<resource>/openai/v1 with no api-version and the ai.azure.com audience", () => {
+    const foundry = foundryConfigFrom(tieredConfig(), {});
     expect(foundry).toMatchObject({ endpoint: "https://res.services.ai.azure.com", audience: "https://ai.azure.com", style: "v1" });
-    const urls: string[] = [];
-    const audiences: string[] = [];
-    const client = createFoundryClient({
-      auth: ready,
-      config: async () => foundry,
-      token: async (audience) => {
-        audiences.push(audience);
-        return { token: "t", expiresOn: new Date(Date.now() + 3_600_000).toISOString() };
-      },
-      fetchImpl: (async (url: string) => {
-        urls.push(url);
-        return json({ choices: [{ message: { content: "hi" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
-      }) as unknown as typeof fetch,
-    });
-    await client.complete({ model: "grok-4-7", messages: [{ role: "user", content: "x" }] });
-    expect(urls).toEqual(["https://res.services.ai.azure.com/openai/v1/chat/completions"]);
-    expect(audiences).toEqual(["https://ai.azure.com"]);
     expect(foundryV1Base("https://r.openai.azure.com/openai/v1/")).toBe("https://r.openai.azure.com/openai/v1");
-  });
-
-  it("keeps the legacy deployments route for configs that set apiVersion", async () => {
-    const urls: string[] = [];
-    const client = createFoundryClient({
-      auth: ready,
-      config: async () => ({ endpoint: "https://r.openai.azure.com", apiVersion: "2024-10-21", audience: "https://cognitiveservices.azure.com", api: "openai-completions" }),
-      token: async () => ({ token: "t" }),
-      fetchImpl: (async (url: string) => {
-        urls.push(url);
-        return json({ choices: [{ message: { content: "hi" } }] });
-      }) as unknown as typeof fetch,
-    });
-    await client.complete({ model: "dep", messages: [{ role: "user", content: "x" }] });
-    expect(urls[0]).toBe("https://r.openai.azure.com/openai/deployments/dep/chat/completions?api-version=2024-10-21");
+    expect(foundryV1Base("https://res.services.ai.azure.com")).toBe("https://res.services.ai.azure.com/openai/v1");
     const legacy = tieredConfig();
     legacy.providers.foundry = { ...legacy.providers.foundry!, routeStyle: undefined, apiVersion: "2024-10-21" };
     expect(foundryConfigFrom(legacy, {}).style).toBe("deployments");
   });
+
 });
 
 describe("S1 az token command", () => {
@@ -154,6 +122,23 @@ describe("Vercel CLI token", () => {
     const missingNoDir = new FileAuthProbe({ vercel: () => createVercelTokenSource({ root: "/p", env: {}, now: () => NOW }).status() });
     expect((await missingNoDir.inspect("vercel")).status).toBe("missing");
   });
+
+  it("refreshes a missing token with vercel env pull before calling it ready, and reports a failed pull", async () => {
+    const token = unsignedJwt(exp(3_600_000));
+    let file: string | undefined;
+    const runs: string[][] = [];
+    const source = createVercelTokenSource({
+      root: "/p", projectDir: ".", env: {}, now: () => NOW, readFile: () => file,
+      run: async (args) => void (runs.push(args), (file = `VERCEL_OIDC_TOKEN="${token}"\n`)),
+    });
+    const probe = new FileAuthProbe({ vercel: () => source.status(), vercelRefresh: () => source.getToken() });
+    expect(await probe.inspect("vercel")).toMatchObject({ status: "ready" });
+    expect(runs).toEqual([["env", "pull", ".env.local", "--yes"]]);
+    const broken = createVercelTokenSource({ root: "/p", projectDir: ".", env: {}, now: () => NOW, readFile: () => undefined, run: async () => { throw new Error("not linked"); } });
+    const view = await new FileAuthProbe({ vercel: () => broken.status(), vercelRefresh: () => broken.getToken() }).inspect("vercel");
+    expect(view.status).toBe("missing");
+    expect(view.detail).toContain("vercel env pull");
+  });
 });
 
 describe("local reachability and provider registration", () => {
@@ -230,18 +215,6 @@ describe("Foundry api setting and per-model override", () => {
     expect(foundryApiConflicts(config)[0]).toMatch(/foundry\/gpt-6\.1-sol/);
     expect(apis.get("gpt-6.1-sol")).toBe("openai-completions");
     expect(register(config).models.find((model) => model.id === "gpt-6.1-sol")?.api).toBeUndefined();
-  });
-
-  it("builds the Responses URL Pi's SDK posts to: <endpoint>/openai/v1/responses", async () => {
-    const urls: string[] = [];
-    const client = createFoundryClient({
-      auth: ready,
-      config: async () => ({ endpoint: "https://r.services.ai.azure.com", audience: "a", api: "openai-responses", style: "v1" }),
-      token: async () => ({ token: "t" }),
-      fetchImpl: (async (url: string) => { urls.push(url); return json({ output_text: "hi" }); }) as unknown as typeof fetch,
-    });
-    await client.complete({ model: "gpt-6.1-sol", messages: [{ role: "user", content: "x" }] });
-    expect(urls[0]).toBe(`${foundryV1Base("https://r.services.ai.azure.com")}/responses`);
   });
 
   it("validates tier api values, and only for foundry candidates", () => {

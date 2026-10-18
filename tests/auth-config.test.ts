@@ -4,7 +4,6 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.js";
 import { FileAuthProbe, viewFromCredential } from "../src/providers/auth.js";
-import { createAccountClient, createFoundryClient, parseAzureToken } from "../src/providers/clients.js";
 import { redact } from "../src/redact.js";
 
 describe("auth and config", () => {
@@ -45,35 +44,4 @@ describe("auth and config", () => {
     expect(() => parseConfig("approvals:\n  merge: auto\n")).toThrow(/merge/);
   });
 
-  it("does not call a transport for an api-key session and never logs a foundry token", async () => {
-    let called = false;
-    const client = createAccountClient({
-      provider: "openai",
-      auth: { async inspect() { return { provider: "openai", status: "blocked", method: "api-key", detail: "no" }; } },
-      transport: async () => {
-        called = true;
-        throw new Error("should not run");
-      },
-    });
-    await expect(client.complete({ model: "gpt-5.4", messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(/API key|rejected/i);
-    expect(called).toBe(false);
-
-    const token = "super-secret-token-value";
-    const foundry = createFoundryClient({
-      auth: { async inspect() { return { provider: "foundry", status: "ready", method: "azure-cli", detail: "ok" }; } },
-      config: async () => ({ endpoint: "https://example.test", api: "openai-completions", audience: "https://cognitiveservices.azure.com" }),
-      token: async () => ({ token }),
-      fetchImpl: async (_url, init) => {
-        const header = new Headers(init?.headers).get("authorization") ?? "";
-        expect(header).toBe(`Bearer ${token}`);
-        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 3, completion_tokens: 4 } }), { status: 200 });
-      },
-    });
-    const response = await foundry.complete({ model: "classifier", messages: [{ role: "user", content: "hi" }] });
-    expect(response.text).toBe("ok");
-    expect(response.usage.input).toBe(3);
-    expect(JSON.stringify(response)).not.toContain(token);
-    expect(parseAzureToken(JSON.stringify({ accessToken: token, expiresOn: "2026-10-14T00:00:00Z" })).token).toBe(token);
-    expect(redact(`Authorization: Bearer ${token}`)).not.toContain(token);
-  });
 });

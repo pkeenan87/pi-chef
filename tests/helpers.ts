@@ -237,6 +237,8 @@ export function withAdvisors(config: WorkflowConfig): WorkflowConfig {
     { provider: "foundry", model: "gpt-6-astra" },
   ];
   config.pricing.push({ provider: "openai", model: "gpt-6-astra", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 });
+  // The advisor tests cover medium tickets too; the default (high only) has its own tests.
+  config.advisors.fromDifficulty = "medium";
   return config;
 }
 

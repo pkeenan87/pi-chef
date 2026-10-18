@@ -11,16 +11,18 @@ const all = [astra, fable, foundryAstra];
 describe("advisorsFor", () => {
   it("consults nobody for a low ticket", () => {
     expect(advisorsFor({ difficulty: "low", implementerProvider: "xai", candidates: all })).toEqual([]);
+    // By default (advisors.fromDifficulty: high) a medium ticket gets none either.
+    expect(advisorsFor({ difficulty: "medium", implementerProvider: "xai", candidates: all })).toEqual([]);
   });
 
   it("picks exactly one advisor from another provider for a medium ticket", () => {
-    const pick = (implementerProvider: string) => advisorsFor({ difficulty: "medium", implementerProvider, candidates: all });
+    const pick = (implementerProvider: string) => advisorsFor({ difficulty: "medium", implementerProvider, candidates: all, fromDifficulty: "medium" });
     expect(pick("anthropic")).toEqual([astra]);
     expect(pick("openai")).toEqual([fable]);
     expect(pick("xai")).toEqual([astra]);
     expect(pick("local")).toEqual([astra]);
     // No advisor from another provider: none, never the implementer's own provider.
-    expect(advisorsFor({ difficulty: "medium", implementerProvider: "anthropic", candidates: [fable] })).toEqual([]);
+    expect(advisorsFor({ difficulty: "medium", implementerProvider: "anthropic", candidates: [fable], fromDifficulty: "medium" })).toEqual([]);
   });
 
   it("takes every advisor, one per provider, for a high ticket", () => {
