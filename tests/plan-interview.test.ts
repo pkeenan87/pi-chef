@@ -620,4 +620,64 @@ describe("read-only bash allowlist", () => {
   it("blocks writes, redirects, chaining, substitution, and mutating git or find", () => {
     for (const command of ["rm -rf x", "echo hi > file", "ls; rm x", "ls && rm x", "cat $(whoami)", "git commit -m x", "find . -delete", "npm install", "sed -i s/a/b/ f", "ls | xargs rm"]) expect(isReadOnlyCommand(command), command).toBe(false);
   });
+
+  it("allows the exact az reads of deployed resources, and nothing that prints a secret or token", () => {
+    const allowed = [
+      "az account show",
+      "az account list --all -o table",
+      "az group list --output json",
+      "az resource list -g rg-app --resource-type Microsoft.Web/sites --query \"[].{name:name,type:type}\" -o table",
+      "az resource show --ids /subscriptions/1/resourceGroups/rg/providers/Microsoft.Web/sites/a /subscriptions/1/resourceGroups/rg/providers/Microsoft.Web/sites/b",
+      "az resource list --subscription prod | head -50",
+    ];
+    for (const command of allowed) expect(isReadOnlyCommand(command), command).toBe(true);
+    const blocked = [
+      "az account get-access-token",
+      "az keyvault secret show --vault-name v --name s",
+      "az storage account keys list -n s",
+      "az webapp config appsettings list -g rg -n app",
+      "az ad sp credential list --id x",
+      "az resource list --debug",
+      "az resource show --name @secrets.txt",
+      "az resource show --name=@secrets.txt",
+      "az resource delete --ids x",
+      "az rest --url https://management.azure.com/",
+      "az login",
+      "az group list extra",
+    ];
+    for (const command of blocked) expect(isReadOnlyCommand(command), command).toBe(false);
+  });
+
+  it("allows gh searches and reads of other repositories' files, and nothing that writes or prints the token", () => {
+    const allowed = [
+      "gh search code azurerm_container_app --owner contoso --language hcl --limit 20",
+      "gh search repos terraform azure --owner contoso",
+      "gh repo view contoso/infra",
+      "gh repo list contoso --topic terraform --json name,description",
+      "gh api repos/contoso/infra/contents/modules/app",
+      "gh api -H \"Accept: application/vnd.github.raw+json\" repos/contoso/infra/contents/main.tf?ref=main",
+      "gh api repos/contoso/infra/git/trees/main?recursive=1 --paginate",
+    ];
+    for (const command of allowed) expect(isReadOnlyCommand(command), command).toBe(true);
+    const blocked = [
+      "gh auth status --show-token",
+      "gh auth token",
+      "gh repo view contoso/infra --web",
+      "gh repo view contoso/infra --json name --jq env",
+      "gh repo clone contoso/infra",
+      "gh repo view a/b c/d",
+      "gh api user",
+      "gh api graphql -f query=x",
+      "gh api -X POST repos/contoso/infra/contents/x",
+      "gh api repos/contoso/infra/contents/x -f message=x",
+      "gh api --input body.json repos/contoso/infra/contents/x",
+      "gh api -H \"X-Other: 1\" repos/contoso/infra/contents/x",
+      "gh api --header=X-Other:1 repos/contoso/infra/contents/x",
+      "gh api repos/contoso/infra/contents/x repos/contoso/infra/contents/y",
+      "gh api repos/contoso/infra/issues",
+      "gh pr create --fill",
+      "gh secret list",
+    ];
+    for (const command of blocked) expect(isReadOnlyCommand(command), command).toBe(false);
+  });
 });
