@@ -34,7 +34,7 @@ Also: [the status line](#the-status-line), [the init command](#the-init-command-
 /plan                      # resume the plan that is running
 ```
 
-Plans one request as a new task, on your session model (`session.model`, Opus by default). It never edits the repo: while it runs, the edit and write tools are off and bash is limited to a read-only allowlist.
+Plans one request as a new task, on your session model (`session.model`, Opus by default). It never edits the repo: while it runs, the edit and write tools are off and bash is limited to a read-only allowlist, plus exact `az` reads of deployed resources and `gh` reads of other repositories' code ([details](../README.md#limitations)).
 
 | Argument | Meaning |
 |---|---|

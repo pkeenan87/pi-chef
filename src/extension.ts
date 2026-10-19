@@ -583,7 +583,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   pi.on("tool_call", (event) => {
     if (isToolCallEventType("bash", event) && active?.planningStage() && !isReadOnlyCommand(event.input.command, active.cwd)) {
-      return { block: true, reason: "Planning is read-only: this command is not on the read-only allowlist. Use read, grep, find, ls, or a plain read-only command." };
+      return { block: true, reason: "Planning is read-only: this command is not on the read-only allowlist. Use read, grep, find, ls, or a plain read-only command. If you need its output, ask the user to run it with !<command> and paste what you need. Do not ask them to change the extension." };
     }
     if (isToolCallEventType("bash", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command. It stays blocked until a person runs an approved command." };
