@@ -152,9 +152,10 @@ export interface WorkflowConfig {
   /**
    * Local mode (`/plan --local`, or every plan with `default: true`): every ticket is written for and built by the
    * one model in tiers.local; a ticket it cannot pass in three review rounds is finished by premium (Opus). How small the tickets must be comes from that model
-   * (`localProfile`). Planning and the per-ticket review stay on the session and review models.
+   * (`localProfile`). Planning and the per-ticket review stay on the session and review models. `difficulties` (unset by
+   * default: every ticket) limits the local model to tickets of those difficulties; the rest use the cloud ticket tiers.
    */
-  localMode: { default: boolean };
+  localMode: { default: boolean; difficulties?: ("low" | "medium")[] };
   workers: {
     /** Tokens the router prices one call at (the cost model). */
     tokenBudget: number;
@@ -666,6 +667,10 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   const localMode = section(raw, "localMode", where);
   if (localMode) {
     if (localMode.default !== undefined && typeof localMode.default !== "boolean") invalid(where, "localMode.default", "must be a boolean");
+    const levels = localMode.difficulties;
+    if (levels !== undefined && (!Array.isArray(levels) || levels.length === 0 || levels.some((level) => level !== "low" && level !== "medium"))) {
+      invalid(where, "localMode.difficulties", "must be a list of low and/or medium (high tickets always use the cloud tiers)");
+    }
   }
   if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
     invalid(where, "branchPrefix", "must be a plain branch-name prefix such as chef");
@@ -1348,6 +1353,17 @@ export function localProfile(config: WorkflowConfig): LocalProfile {
     maxFiles: small ? 2 : 3,
     targetTokens: Math.max(8_000, Math.floor((candidate?.contextWindow ?? 32_768) / 2)),
   };
+}
+
+/**
+ * The difficulties a hybrid local-mode plan sends to the local model: localMode.difficulties that the model's size
+ * allows (a 9B model takes low only). Undefined when the setting is unset: every ticket is local.
+ */
+export function localDifficultiesFor(config: WorkflowConfig): ("low" | "medium")[] | undefined {
+  const wanted = config.localMode.difficulties;
+  if (!wanted) return undefined;
+  const allowed = localProfile(config).difficulties;
+  return allowed.filter((level) => wanted.includes(level));
 }
 
 /**

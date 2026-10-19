@@ -49,21 +49,31 @@ export interface LocalPlanTarget {
   difficulties: string[];
   maxFiles: number;
   targetTokens: number;
+  /** A hybrid plan (localMode.difficulties): only tickets of these difficulties go to the local model. */
+  only?: string[];
 }
+
+/** Docs-only tickets go to the local model too: rated the lowest difficulty it takes. */
+const DOCS_RULE = (level: string) => `- A ticket that only changes documentation (README, docs/, changelog) is ${level}. It is not sent the spec or the other tickets' code, so its steps list exactly what to write: each heading to add or change, and every name, flag, default and behavior to describe, copied from the spec. It needs no check.`;
 
 /** Added to every planning prompt of a local-mode task, so the spec is shaped for the local model from the start. */
 export const LOCAL_PLAN_NOTE = (target: LocalPlanTarget) => `[LOCAL MODE]
-This plan will be built by a ${target.label} running locally, not by you. It follows instructions literally, has a small context window, explores little, and is not sent the spec. Make the approach concrete enough to hand over as small, exact steps: decide every name, type, signature, error message and edge case in the spec.`;
+${target.only ? `The ${target.only.join(" and ")} tickets of this plan will be built by a ${target.label} running locally; the rest by cloud models.` : `This plan will be built by a ${target.label} running locally, not by you.`} It follows instructions literally, has a small context window, explores little, and is not sent the spec. Make the approach concrete enough to hand over as small, exact steps: decide every name, type, signature, error message and edge case in the spec.`;
 
 /** The ticket rules for a local-mode plan, sized to the local model: replaces the cloud difficulty rule. */
 export const LOCAL_TICKET_RULES = (target: LocalPlanTarget) => `[LOCAL MODE TICKETS]
-Every ticket is built by the same ${target.label}. Write each one so it can finish it alone in one try:
-- difficulty: ${target.difficulties.join(" or ")} only; plan_tickets rejects anything else. ${target.small ? "low = one mechanical change in one or two files. Split anything bigger until every piece is that small." : "low = one mechanical change; medium = one contained behavior. Split anything harder until every piece is low or medium."}
+${
+  target.only
+    ? `Tickets rated ${target.only.join(" or ")} are built by a ${target.label}; the others by the cloud models, under the rules above. Rate a ticket ${target.only.join(" or ")} only when the local model can finish it alone in one try, and write those tickets as follows (the rest as usual):`
+    : `Every ticket is built by the same ${target.label}. Write each one so it can finish it alone in one try:
+- difficulty: ${target.difficulties.join(" or ")} only; plan_tickets rejects anything else. ${target.small ? "low = one mechanical change in one or two files. Split anything bigger until every piece is that small." : "low = one mechanical change; medium = one contained behavior. Split anything harder until every piece is low or medium."}`
+}
 - files lists every file the ticket touches, at most ${target.maxFiles}. The context target is ${target.targetTokens} tokens, system prompt and tools included, so keep tickets small${target.small ? " and prefer more, smaller tickets" : ""}.
 - implementation is a numbered list ("1. ", "2. ", at least two steps), one change per step, in order. Each step names the file and the exact function, type, export or test to add or edit, with its full signature, and says where it goes (after which function, inside which describe block). Quote the existing lines the change attaches to (an import, a signature), so the model does not have to search.
 - Leave no decision to the implementer: names, types, return values, error messages and edge cases are written in the ticket. Repeat any spec detail the ticket needs; the spec is not sent.
 - whatToBuild is 2-4 sentences. acceptanceCriteria are observable and covered by the checks.
-- checks: at least one targeted test command for the ticket (for example \`npx vitest run tests/parser.test.ts\`) unless the config sets checks.`;
+- checks: at least one targeted test command for the ticket (for example \`npx vitest run tests/parser.test.ts\`) unless the config sets checks.
+${DOCS_RULE(target.only?.[0] ?? "low")}`;
 
 export interface TicketPromptInput {
   ticket: { id: string; title: string; whatToBuild: string; implementation?: string; acceptanceCriteria: string[]; files?: string[]; checks?: string[] };

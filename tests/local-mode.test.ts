@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { COMMANDS } from "../src/commands.js";
-import { localProfile, modelSizeB, parseConfig, priceFor } from "../src/config.js";
+import { localDifficultiesFor, localProfile, modelSizeB, parseConfig, priceFor } from "../src/config.js";
 import type { Ticket } from "../src/domain.js";
+import { ticketsTableLines } from "../src/orchestrator/plan.js";
 import { statusLine } from "../src/orchestrator/state-label.js";
 import { validateTickets } from "../src/orchestrator/tickets.js";
 import { sampleSpec, sampleTicket, tempRepo, tieredConfig, workflow } from "./helpers.js";
@@ -25,6 +26,11 @@ describe("local-mode ticket rules", () => {
     expect(check(good({ implementation: "Add a retry helper and test it." })).join("\n")).toContain("numbered steps");
     expect(check(good({ checks: undefined })).join("\n")).toContain("at least one check");
     expect(validateTickets([good({ checks: undefined })], { target: 32_000, fileSize: () => 0, local: { ...local, needChecks: false } }).errors).toEqual([]);
+  });
+
+  it("lets a docs-only ticket go without a check: the review is its gate", () => {
+    expect(check(good({ files: ["README.md", "docs/commands.md"], checks: undefined }))).toEqual([]);
+    expect(check(good({ files: ["README.md", "src/a.ts"], checks: undefined })).join("\n")).toContain("at least one check");
   });
 
   it("holds local tickets to the local context target", () => {
@@ -82,6 +88,61 @@ describe("/plan --local", () => {
     expect(cloud.request).toBe("Add a second thing");
     expect((await plan.run(app, "--local --cloud x", async () => true)).code).toBe("USAGE");
     expect(() => parseConfig("localMode: { default: maybe }")).toThrow(/localMode.default/);
+  });
+});
+
+describe("hybrid local mode (localMode.difficulties)", () => {
+  const hybrid = (model?: string, levels = "[low]") => {
+    const config = tieredConfig(`localMode: { difficulties: ${levels} }\n`);
+    if (model) config.tiers.local = [{ provider: "local", model, contextWindow: 65_536 }];
+    return config;
+  };
+
+  it("validates the setting and caps it by the model's size", () => {
+    expect(() => parseConfig("localMode: { difficulties: [high] }")).toThrow(/localMode.difficulties/);
+    expect(() => parseConfig("localMode: { difficulties: [] }")).toThrow(/localMode.difficulties/);
+    expect(localDifficultiesFor(tieredConfig())).toBeUndefined();
+    expect(localDifficultiesFor(hybrid(undefined, "[low, medium]"))).toEqual(["low"]);
+    expect(localDifficultiesFor(hybrid("gemma3:27b", "[low, medium]"))).toEqual(["low", "medium"]);
+    expect(localDifficultiesFor(hybrid(undefined, "[medium]"))).toEqual([]);
+  });
+
+  it("shows each ticket's implementer in the plan table: local for low, the cloud tier for the rest", () => {
+    const [, , low, medium] = ticketsTableLines([good({ id: "01" }), good({ id: "02", difficulty: "medium" })], hybrid(), { localMode: true, localDifficulties: ["low"] });
+    expect(low).toContain("local/qwen3.5:9b");
+    expect(medium).not.toContain("local/");
+  });
+
+  it("holds only the local tickets to the local rules; the others are cloud tickets", () => {
+    const rules = { ...local, label: "9B model", difficulties: ["low"], maxFiles: 2, only: ["low"], targetTokens: 32_000 };
+    const run = (ticket: Ticket) => validateTickets([ticket], { target: 150_000, fileSize: () => 0, commandExists: () => true, local: rules }).errors;
+    const cloud = good({ difficulty: "high", files: ["a.ts", "b.ts", "c.ts", "d.ts"], implementation: "Rework the parser.", checks: undefined, estimatedContextTokens: 60_000 });
+    expect(run(cloud)).toEqual([]);
+    expect(run(good({ implementation: "Add a retry helper." })).join("\n")).toContain("numbered steps");
+    expect(run(good({ estimatedContextTokens: 40_000 })).join("\n")).toContain("above the 32000 target");
+  });
+
+  it("plans low tickets for the local model and keeps the cloud difficulty rule for the rest", async () => {
+    const app = workflow(await tempRepo(), { config: hybrid(), startTurn: () => undefined });
+    const started = await app.startPlan("Add retry to the ingest parser", { local: true });
+    expect(started.text).toContain("Local mode: low tickets will be written for a 9B model (local/qwen3.5:9b) and built there; the rest go to the cloud ticket tiers.");
+    expect(app.store.load(app.activeTaskId()!)).toMatchObject({ localMode: true, localDifficulties: ["low"] });
+    expect(app.planningPrompt()).toContain("The low tickets of this plan will be built by a 9B model running locally; the rest by cloud models.");
+    await app.savePlanSpec(sampleSpec);
+    const prompt = app.planningPrompt()!;
+    expect(prompt).toContain("Rate a ticket high when it touches auth");
+    expect(prompt).toContain("Tickets rated low are built by a 9B model; the others by the cloud models");
+    expect(prompt).toContain("Soft target: 150000 tokens");
+    expect(prompt).toContain("A ticket that only changes documentation (README, docs/, changelog) is low.");
+    expect(app.checkTickets([good({ difficulty: "medium", implementation: "Rework it.", estimatedContextTokens: 60_000 })]).errors).toEqual([]);
+    expect(app.checkTickets([good({ implementation: "Rework it." })]).errors.join("\n")).toContain("numbered steps");
+  });
+
+  it("plans in the cloud, and says so, when the model's size rules out every listed difficulty", async () => {
+    const app = workflow(await tempRepo(), { config: hybrid(undefined, "[medium]"), startTurn: () => undefined });
+    const started = await app.startPlan("Add retry", { local: true });
+    expect(started.text).toContain("Local mode is off for this plan: the 9B model in tiers.local takes no medium tickets.");
+    expect(app.store.load(app.activeTaskId()!)!.localMode).toBeUndefined();
   });
 });
 

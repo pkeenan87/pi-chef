@@ -177,7 +177,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
   ].join(" · ");
   const pairs: [string, string][] = [
     ["Task", state ? `${displayName(state)} (${state.taskId})` : "none"],
-    ...(state?.localMode ? [["Mode", ((profile) => `local: every ticket runs on ${profile.model} (tickets sized for a ${profile.label}: ${profile.difficulties.join("/")}, at most ${profile.maxFiles} files, ${profile.targetTokens} tokens); review stays on ${ctx.config.routing.reviewTier}`)(localProfile(ctx.config))] as [string, string]] : []),
+    ...(state?.localMode ? [["Mode", ((profile) => `local: ${state.localDifficulties ? `${state.localDifficulties.join("/")} tickets run on ${profile.model}, the rest on the cloud ticket tiers` : `every ticket runs on ${profile.model}`} (tickets sized for a ${profile.label}: ${(state.localDifficulties ?? profile.difficulties).join("/")}, at most ${profile.maxFiles} files, ${profile.targetTokens} tokens); review stays on ${ctx.config.routing.reviewTier}`)(localProfile(ctx.config))] as [string, string]] : []),
     ["Plan", plan],
     ["Branch", state?.build ? `${state.build.branch} (base ${state.build.base})${ahead !== undefined ? ` · ${ahead} commit${ahead === 1 ? "" : "s"} ahead` : ""}` : "not started"],
     ["Review", reviewSummary(state?.review, git)],

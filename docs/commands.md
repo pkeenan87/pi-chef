@@ -40,7 +40,7 @@ Plans one request as a new task, on your session model (`session.model`, Opus by
 |---|---|
 | `<request>` | What to build, in your words. Acceptance criteria may follow (`AC: empty input throws`) |
 | `--no-questions` | Skip the interview. The planner records the choices it would have recommended as assumptions in the spec |
-| `--local` | Local mode: every ticket is written for, and built only by, the model in `tiers.local`, sized from its tag (`9b`, `27b`). See [Local mode](../README.md#local-mode) |
+| `--local` | Local mode: every ticket is written for, and built by, the model in `tiers.local`, sized from its tag (`9b`, `27b`). With `localMode.difficulties` set, only those tickets go local and the rest to the cloud tiers. See [Local mode](../README.md#local-mode) |
 | `--cloud` | Plan for the cloud tiers even when `localMode.default` is true |
 
 Steps:
@@ -117,7 +117,7 @@ For a security-sensitive plan it asks you to confirm first.
 
 **Per ticket:**
 
-1. **Route.** The ticket goes to the tier of its difficulty: `ticketLow`, `ticketMedium` or `ticketHigh`, or `tiers.local` in local mode. Within the tier the model is picked by `routing.selection`.
+1. **Route.** The ticket goes to the tier of its difficulty: `ticketLow`, `ticketMedium` or `ticketHigh`, or `tiers.local` for a local ticket (every ticket in local mode, or those of `localMode.difficulties`). Within the tier the model is picked by `routing.selection`.
 2. **Session.** It opens a fresh Pi session on that model and sends the ticket. While the ticket runs, `git push` and branch switches are blocked.
 3. **Checks.** It runs `setup` (once per build), then the ticket's `checks`, else the config's `checks`. A failure gets one retry turn in the same session.
 4. **Review.** The review tier (`routing.reviewTier`) reviews the ticket's diff; high tickets also get advisors. A first fail sends the findings back for a fix; a second fail fails the ticket at that tier.

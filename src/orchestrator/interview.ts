@@ -1,4 +1,4 @@
-import { localProfile } from "../config.js";
+import { localDifficultiesFor, localProfile } from "../config.js";
 import { isDifficulty, WorkflowError, type AcceptedClassification, type CommandResult, type Complexity, type TaskState } from "../domain.js";
 import { redact, redactUnknown } from "../redact.js";
 import { classifyKeywords, isSecuritySensitive, plannerClassification, type PlannerRating } from "../router/classify.js";
@@ -6,7 +6,7 @@ import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { announceParked, newTask, plan, retireCurrent } from "./planning.js";
-import { INTERVIEW_RULES, LOCAL_PLAN_NOTE, LOCAL_TICKET_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
+import { INTERVIEW_RULES, LOCAL_PLAN_NOTE, type LocalPlanTarget, LOCAL_TICKET_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { announce, decide } from "./routing.js";
 import { activeTask, displayName } from "./tasks.js";
@@ -161,17 +161,29 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     // Until plan_spec saves the planner's rating, the task has the keyword classification.
     const classification: AcceptedClassification = classifyKeywords(safe);
     const routing = await decide(ctx, classification, "plan", {});
-    // Local mode: --local or --cloud, else localMode.default. Fixed for the task once planning starts.
-    const localMode = options.local ?? ctx.config.localMode.default;
-    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, routing, planning: { stage: "interview", noQuestions }, ...(localMode ? { localMode: true } : {}) });
+    // Local mode: --local or --cloud, else localMode.default. Fixed for the task once planning starts, with the
+    // difficulties the local model takes (localMode.difficulties, capped by its size; unset: every ticket).
+    const wanted = options.local ?? ctx.config.localMode.default;
+    const only = wanted ? localDifficultiesFor(ctx.config) : undefined;
+    // localMode.difficulties that the model's size rules out entirely (medium for a 9B model): a cloud plan.
+    const localMode = wanted && only?.length !== 0;
+    const scope = localMode ? { localMode: true, ...(only ? { localDifficulties: only } : {}) } : {};
+    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, routing, planning: { stage: "interview", noQuestions }, ...scope });
     announceParked(ctx, parked);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     await announce(ctx, state.taskId, "interview", routing);
     showStatus(ctx);
-    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${localMode ? " (local mode: every ticket goes to the local model)" : ""}:\n\n${safe}`);
+    const mode = !localMode ? "" : only ? ` (local mode: ${only.join("/")} tickets go to the local model, the rest to the cloud)` : " (local mode: every ticket goes to the local model)";
+    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${mode}:\n\n${safe}`);
     const profile = localMode ? localProfile(ctx.config) : undefined;
     // Say which model and size the tickets are written for, so a wrong tiers.local is caught before planning.
-    const where = profile ? ` Local mode: tickets will be written for a ${profile.label} (${profile.model}) and built only there.` : "";
+    const where = !profile
+      ? wanted
+        ? ` Local mode is off for this plan: the ${localProfile(ctx.config).label} in tiers.local takes no ${ctx.config.localMode.difficulties!.join("/")} tickets.`
+        : ""
+      : only
+        ? ` Local mode: ${only.join("/")} tickets will be written for a ${profile.label} (${profile.model}) and built there; the rest go to the cloud ticket tiers.`
+        : ` Local mode: tickets will be written for a ${profile.label} (${profile.model}) and built only there.`;
     return done(
       `${noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`}${where}`,
       { taskId: state.taskId, routing },
@@ -425,7 +437,12 @@ export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const found = activePlanning(ctx);
   if (!found) return undefined;
   const text = stagePrompt(ctx, found);
-  return found.task.localMode ? `${text}\n\n${LOCAL_PLAN_NOTE(localProfile(ctx.config))}` : text;
+  return found.task.localMode ? `${text}\n\n${LOCAL_PLAN_NOTE(localTarget(ctx, found.task))}` : text;
+}
+
+/** The local model the planner writes for, and the difficulties it takes in a hybrid plan. */
+function localTarget(ctx: WorkflowContext, task: TaskState): LocalPlanTarget {
+  return { ...localProfile(ctx.config), ...(task.localDifficulties ? { only: task.localDifficulties } : {}) };
 }
 
 function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof activePlanning>>): string {
@@ -434,9 +451,13 @@ function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof 
   const feedback = revision ? ["", "The user sent the drafted plan back with these requested changes:", revision] : [];
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
-    const rules = task.localMode
-      ? [TICKET_RULES(localProfile(ctx.config).targetTokens, true), "", LOCAL_TICKET_RULES(localProfile(ctx.config))]
-      : [TICKET_RULES(ctx.config.workers.ticketContextTokens)];
+    // A hybrid plan keeps the cloud rules (difficulty picks the model) and adds the local rules for its local tickets.
+    const target = task.localMode ? localTarget(ctx, task) : undefined;
+    const rules = !target
+      ? [TICKET_RULES(ctx.config.workers.ticketContextTokens)]
+      : target.only
+        ? [TICKET_RULES(ctx.config.workers.ticketContextTokens), "", LOCAL_TICKET_RULES(target)]
+        : [TICKET_RULES(target.targetTokens, true), "", LOCAL_TICKET_RULES(target)];
     return [...rules, ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
   }
   if (revision) {

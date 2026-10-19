@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
-import { DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
+import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { LOCAL_LADDER, TICKET_LADDER, escalateImplementation } from "../router/policy.js";
@@ -435,8 +435,9 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   // An in-progress attempt that never sent a turn (the session did not open) is no attempt: route the ticket fresh.
   const unstarted = stored !== undefined && neverStarted(stored);
   const run = unstarted ? undefined : stored;
-  // Local mode: the local tiers and their two-step ladder only. Nothing here can route a ticket to a cloud model.
-  const local = state.localMode === true;
+  // A local ticket (local mode, and its difficulty in localMode.difficulties if set): the local tier, then premium.
+  // Any other ticket uses the cloud ticket ladder.
+  const local = buildsLocally(state, ticket);
   const ladder = local ? LOCAL_LADDER : TICKET_LADDER;
   const budget = budgetState(ctx, state.taskId);
   if (budget.status === "hard") return { kind: "stopped", code: "BUDGET", reason: "Task or daily budget is exhausted; no further ticket was started. /build resumes after the budget is raised." };

@@ -10,12 +10,15 @@ import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validat
 
 /** Validates model- or person-written tickets against the config's context target and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
-  // The stored task (no git: plan tools run mid-turn). A local-mode task gets the local target and rules.
-  const local = active(ctx)?.localMode === true ? localProfile(ctx.config) : undefined;
+  // The stored task (no git: plan tools run mid-turn). A local-mode task gets the local target and rules; a hybrid one
+  // (localMode.difficulties) only for the tickets the local model builds.
+  const task = active(ctx);
+  const local = task?.localMode === true ? localProfile(ctx.config) : undefined;
+  const only = local ? task?.localDifficulties : undefined;
   return validateTickets(input, {
-    target: local ? local.targetTokens : ctx.config.workers.ticketContextTokens,
+    target: local && !only ? local.targetTokens : ctx.config.workers.ticketContextTokens,
     fileSize: (file) => projectFileSize(ctx.cwd, file),
-    ...(local ? { local: { label: local.label, difficulties: local.difficulties, maxFiles: local.maxFiles, needChecks: ctx.config.checks.length === 0 } } : {}),
+    ...(local ? { local: { label: local.label, difficulties: only ?? local.difficulties, maxFiles: local.maxFiles, needChecks: ctx.config.checks.length === 0, ...(only ? { only, targetTokens: local.targetTokens } : {}) } } : {}),
   });
 }
 
@@ -56,6 +59,7 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
     securitySensitive: routing?.requireHumanApproval ?? false,
     tickets,
     ...(task.localMode ? { localMode: true } : {}),
+    ...(task.localMode && task.localDifficulties ? { localDifficulties: task.localDifficulties } : {}),
     ...(advisorReview ? { advisorReview } : {}),
   };
 }
@@ -90,7 +94,7 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
   }
   if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
-  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config, task.localMode === true).join("\n") };
+  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config, task).join("\n") };
 }
 
 /**

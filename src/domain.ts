@@ -51,6 +51,18 @@ export function isDifficulty(value: string): value is Difficulty {
 }
 /** The ticket tier a difficulty starts on. */
 export const DIFFICULTY_TIER: Record<Difficulty, TicketTier> = { low: "ticketLow", medium: "ticketMedium", high: "ticketHigh" };
+/**
+ * Which tickets of a task the local model builds: none outside local mode, every ticket when `localDifficulties` is
+ * unset, else only tickets of those difficulties (localMode.difficulties, fixed at /plan); the rest use the cloud tiers.
+ */
+export interface LocalScope {
+  localMode?: boolean;
+  localDifficulties?: Difficulty[];
+}
+export function buildsLocally(scope: LocalScope | undefined, ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): boolean {
+  if (scope?.localMode !== true) return false;
+  return scope.localDifficulties === undefined || scope.localDifficulties.includes(ticketDifficulty(ticket));
+}
 /** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
 export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
   if (ticket.difficulty) return ticket.difficulty;
@@ -159,6 +171,8 @@ export interface PlanDocument {
   version: number;
   /** Written for local mode: its tickets are built by the model in tiers.local. */
   localMode?: boolean;
+  /** Local mode with localMode.difficulties: only tickets of these difficulties go to the local model. */
+  localDifficulties?: Difficulty[];
   createdAt: string;
   summary: string;
   risks: string[];
@@ -543,6 +557,8 @@ export interface TaskState {
   closedReason?: string;
   /** Local mode, chosen at /plan: tickets are written for and built by the model in tiers.local only. */
   localMode?: boolean;
+  /** Set from localMode.difficulties at /plan: only these tickets are local, the rest use the cloud ticket tiers. */
+  localDifficulties?: Difficulty[];
   phase: Phase;
   planning?: PlanningProgress;
   /** A freshly drafted plan that has not been shown yet: the extension posts it and asks for the decision when the planning turn settles. */

@@ -97,6 +97,7 @@ The main chat session: a normal Pi model.
 | Key | Type | Default | Project | What it does |
 |---|---|---|---|---|
 | `localMode.default` | bool | `false` | merged | Make every `/plan` local, unless `--cloud` is passed. The model is `tiers.local`; the ticket limits come from its tag and `contextWindow` ([Local mode](../README.md#local-mode)) |
+| `localMode.difficulties` | list of `low`, `medium` | unset (every ticket) | merged | A hybrid local plan: only tickets of these difficulties go to the local model, held to the local ticket rules; the others are written and built as cloud tickets on `ticketLow`/`ticketMedium`/`ticketHigh`. Capped by the model's size (a model under 14B takes `low` only); if the size rules out every listed difficulty, `/plan` plans in the cloud and says so. Fixed for the task at `/plan` |
 
 ### workers
 
