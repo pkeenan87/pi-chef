@@ -64,8 +64,9 @@ export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn,
   const state = active(ctx);
   const taskId = state?.taskId ?? SESSION_TASK_ID;
   if (budgetState(ctx, state?.taskId).status === "hard") return undefined;
-  // A local-mode ticket's transcript stays local: Pi compacts it with the session's (local) model instead.
-  if (state?.localMode && state.build?.currentTicket) return undefined;
+  // A ticket running on the local model keeps its transcript local: Pi compacts it with the session's (local) model.
+  const running = state?.build?.currentTicket ? state.ticketRuns?.[state.build.currentTicket] : undefined;
+  if (running?.status === "in-progress" && running.tier === "local") return undefined;
   const tier = ctx.config.session.compactionTier;
   const selection = selectCandidate({
     tier,

@@ -93,7 +93,19 @@ export interface LocalTicketRules {
   maxFiles: number;
   /** True when the config sets no checks, so each ticket must bring its own. */
   needChecks: boolean;
+  /** localMode.difficulties: only tickets of these difficulties are local (and held to these rules); the rest are cloud tickets. */
+  only?: string[];
+  /** The context target of a local ticket when it differs from the cloud target (`only` set). */
+  targetTokens?: number;
 }
+
+/** A ticket that only touches documentation: no test can check it, so the review is its gate. */
+const DOC_FILE = /\.(?:md|mdx|markdown|rst|adoc|txt)$/i;
+export const docsOnly = (files: string[]) => files.length > 0 && files.every((file) => DOC_FILE.test(file));
+
+/** Whether a ticket of this difficulty is built by the local model under these rules. */
+const isLocal = (rules: LocalTicketRules | undefined, difficulty: string | undefined): rules is LocalTicketRules =>
+  rules !== undefined && (rules.only === undefined || rules.only.includes(difficulty ?? "medium"));
 
 /** What a local-mode ticket must have so a small model can finish it: low or medium, few listed files, numbered steps, a check. */
 function localTicketProblems(label: string, item: { difficulty?: string; files: string[]; implementation: string; checks: string[] }, rules: LocalTicketRules): string[] {
@@ -103,7 +115,7 @@ function localTicketProblems(label: string, item: { difficulty?: string; files: 
   else if (item.files.length > rules.maxFiles) errors.push(`Ticket ${label}: touches ${item.files.length} files; the local ${rules.label} gets at most ${rules.maxFiles}. Split it.`);
   const steps = item.implementation.split("\n").filter((line) => /^\s*\d+[.)]\s+\S/.test(line)).length;
   if (steps < 2) errors.push(`Ticket ${label}: local mode needs implementation as numbered steps ("1. ", "2. "), at least two, each naming the file and the exact function, type or test to change.`);
-  if (rules.needChecks && item.checks.length === 0) errors.push(`Ticket ${label}: local mode needs at least one check (a targeted test command), because the config sets no checks.`);
+  if (rules.needChecks && item.checks.length === 0 && !docsOnly(item.files)) errors.push(`Ticket ${label}: local mode needs at least one check (a targeted test command), because the config sets no checks.`);
   return errors;
 }
 
@@ -155,7 +167,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
         `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are command lines /build runs after the ticket without a shell, one command with plain arguments per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
       );
     }
-    if (options.local) errors.push(...localTicketProblems(label, { difficulty, files, implementation, checks }, options.local));
+    if (isLocal(options.local, difficulty)) errors.push(...localTicketProblems(label, { difficulty, files, implementation, checks }, options.local));
     tickets.push({
       id,
       slug,
@@ -189,8 +201,9 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     for (const ticket of tickets) {
       const code = estimateTicketTokens(ticket, options.fileSize);
       const worst = Math.max(ticket.estimatedContextTokens, code);
-      if (worst > options.target) {
-        errors.push(`Ticket ${ticket.id} (${ticket.title}) is estimated at ${worst} tokens (model ${ticket.estimatedContextTokens}, code-side ${code}), above the ${options.target} target. Split it into smaller vertical slices and call plan_tickets again.`);
+      const target = isLocal(options.local, ticketDifficulty(ticket)) ? (options.local.targetTokens ?? options.target) : options.target;
+      if (worst > target) {
+        errors.push(`Ticket ${ticket.id} (${ticket.title}) is estimated at ${worst} tokens (model ${ticket.estimatedContextTokens}, code-side ${code}), above the ${target} target. Split it into smaller vertical slices and call plan_tickets again.`);
       }
     }
   }

@@ -772,6 +772,18 @@ describe("/build in local mode", () => {
     expect(systems[3]).not.toContain("The implementer is a small local model");
   });
 
+  it("with localMode.difficulties, builds only those tickets locally and the rest on the cloud ticket tiers", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })] });
+    await t.app.store.update(t.taskId, "hybrid", (state) => ({ ...state, localMode: true, localDifficulties: ["low"] }));
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends[0]!.model).toEqual({ provider: "local", id: "qwen3.5:9b" });
+    expect(d.sends[0]!.text).toContain("[BUILD CHUNK · LOCAL MODEL]");
+    expect(d.sends[1]!.model.provider).not.toBe("local");
+    expect(d.sends[1]!.text).not.toContain("[BUILD CHUNK · LOCAL MODEL]");
+    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "ticketMedium" });
+  });
+
   it("stops with a clear reason when the local server is down, instead of using a cloud model", async () => {
     const down = readyAuth();
     const auth = { inspect: async (provider: Parameters<NonNullable<typeof down>["inspect"]>[0]) => (provider === "local" ? { provider, status: "unavailable" as const, method: "local" as const, detail: "Local endpoint is not reachable." } : down!.inspect(provider)) };

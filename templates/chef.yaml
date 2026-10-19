@@ -31,6 +31,9 @@
 
 # localMode:
 #   default: false   # true: every /plan is local unless you pass --cloud
+## Unset, every ticket goes to the local model. To send only some, add under localMode (as far as its size allows:
+## a 9B model takes low only); the other tickets use the cloud ticket tiers:
+##   difficulties: [low]
 
 ## ---------------------------------------------------------------------------------------------------------------
 ## Routing: which tier and model run each job.

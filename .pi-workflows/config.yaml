@@ -91,6 +91,7 @@ tiers:
 # alone, sized from that model: under 14B (or no size in the tag) low tickets in up to 2 files, 14B and up low or
 # medium in up to 3; numbered steps, a check each, half its contextWindow. /build runs them on that model only.
 # Planning and the per-ticket review stay on the session and review models. Local models are priced at $0.
+# difficulties: [low] sends only low tickets (and docs-only ones) to the local model, the rest to the cloud tiers.
 localMode:
   default: false              # true: every /plan is local unless you pass --cloud
 

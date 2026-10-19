@@ -1,3 +1,4 @@
+import type { TaskState } from "../src/domain.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -229,13 +230,18 @@ describe("session_before_compact", () => {
     return { app, calls, run };
   }
 
-  it("leaves a local-mode ticket's compaction to Pi (the local model), so its transcript never reaches the cloud tier", async () => {
+  it("leaves a local ticket's compaction to Pi (the local model), so its transcript never reaches the cloud tier", async () => {
     const { app, calls, run } = await setup();
     expect((await app.plan(singleTaskRequest)).ok).toBe(true);
     const id = app.activeTaskId()!;
-    await app.store.update(id, "local ticket", (state) => ({ ...state, localMode: true, build: { branch: "b", base: "main", baseSha: "a", currentTicket: "01" } }));
+    const running = (tier: string) => (state: TaskState): TaskState => ({ ...state, localMode: true, build: { branch: "b", base: "main", baseSha: "a", currentTicket: "01" }, ticketRuns: { "01": { status: "in-progress", tier, attempts: 1 } } }) as never;
+    await app.store.update(id, "local ticket", running("local"));
     expect(await run()).toBeUndefined();
     expect(calls).toEqual([]);
+    // A cloud ticket of a hybrid plan (or Opus finishing a local one) compacts on the cheap tier as usual.
+    await app.store.update(id, "cloud ticket", running("ticketMedium"));
+    await run();
+    expect(calls.length).toBeGreaterThan(0);
   });
 
   it("summarizes the discarded messages with the compaction tier (Haiku) and returns Pi's compaction shape", async () => {
