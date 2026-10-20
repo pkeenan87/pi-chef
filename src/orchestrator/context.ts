@@ -31,6 +31,8 @@ export interface WorkflowContext {
   shutdown: AbortController;
   /** Keys of warnings already shown, so each appears once. */
   readonly warned: Set<string>;
+  /** Ledger ids of Pi's own calls already recorded (`recordPiUsage`), loaded from the ledger on first use. */
+  piLedgered?: Set<string>;
   confirm: (title: string, message: string) => Promise<boolean>;
   notify: (message: string) => void;
   /** Progress lines for the chat while /build runs. Absent without a UI. */

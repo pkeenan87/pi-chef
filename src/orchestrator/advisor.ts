@@ -1,5 +1,5 @@
 import { modelLabel, tierCandidates } from "../config.js";
-import { emptyUsage, ticketDifficulty, WorkflowError, type CommandResult, type TaskState } from "../domain.js";
+import { ticketDifficulty, WorkflowError, type CommandResult, type TaskState } from "../domain.js";
 import { clipMiddle, isSecuritySensitive } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
@@ -7,6 +7,7 @@ import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from ".
 import { done, fail, guard, type WorkflowContext } from "./context.js";
 import { activeTask } from "./tasks.js";
 import { announce, availability, candidateCheck } from "./routing.js";
+import { failedUsage } from "../providers/clients.js";
 
 /** Redacted, size-capped task context for the advisor: request, rating, plan, tickets, last failure, diff stat. */
 async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined): Promise<string> {
@@ -77,7 +78,7 @@ Question: ${ask}` },
       });
     } catch (error) {
       const message = redact((error as Error).message || "Advisor call failed.");
-      record(ctx, taskId ?? "advisor", state?.phase ?? "IDLE", "advisor", candidate.provider, candidate.model, emptyUsage(), "failure", 0, "advisor");
+      record(ctx, taskId ?? "advisor", state?.phase ?? "IDLE", "advisor", candidate.provider, candidate.model, failedUsage(error), "failure", 0, "advisor");
       await ctx.store.bumpMetric(taskType, "advisor", false, ctx.now(), candidate);
       return fail(error instanceof WorkflowError ? error.code : "ERROR", message);
     }

@@ -1,5 +1,5 @@
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
-import { emptyUsage, type AdvisorAnswer, type AdvisorConcern, type AdvisorOpinion, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
+import { type AdvisorAnswer, type AdvisorConcern, type AdvisorOpinion, type Difficulty, type ProviderId, type TokenUsage } from "../domain.js";
 import { budgetRemainingUsd, budgetState, record } from "../orchestrator/budget.js";
 import type { WorkflowContext } from "../orchestrator/context.js";
 import { availability, candidateCheck } from "../orchestrator/routing.js";
@@ -7,6 +7,7 @@ import { redact } from "../redact.js";
 import { hardExclusion } from "../router/select.js";
 import { tierCost } from "../router/stats.js";
 import { bracketSpans } from "./model-review.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * The shared advisor client: a compact packet and a few specific questions go to advisor-tier models in parallel,
@@ -236,8 +237,8 @@ export async function consultAdvisors(
           signal,
         });
       } catch (error) {
-        // It may or may not have been billed: unknown, never zero.
-        const costUsd = ledger(emptyUsage(), "failure");
+        // What the provider reported before it failed, else unknown, never zero.
+        const costUsd = ledger(failedUsage(error), "failure");
         const why = timeout.aborted ? `timed out after ${(timeoutMs / 1000).toFixed(1)}s` : redact((error as Error).message || "unknown error");
         return { provider: candidate.provider, model: candidate.model, answers: [], concerns: [], error: why.slice(0, 300), costUsd };
       }

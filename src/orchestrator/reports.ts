@@ -39,19 +39,24 @@ function jobOf(entry: CostRecord): string {
   return job.startsWith("observed assistant usage") ? "chat turns (session and tickets)" : job || "other";
 }
 
-/** Known spend and unknown-cost rows per key, largest first. */
-function spendRows(records: CostRecord[], key: (entry: CostRecord) => string, extra?: (key: string) => string[]): string[][] {
-  const rows = new Map<string, { calls: number; usd: number; unknown: number }>();
-  for (const entry of records) {
-    const found = rows.get(key(entry)) ?? { calls: 0, usd: 0, unknown: 0 };
-    found.calls += entry.requests;
-    if (entry.actualUsd === null) found.unknown += 1;
-    else found.usd += entry.actualUsd;
-    rows.set(key(entry), found);
-  }
-  return [...rows.entries()]
-    .sort((a, b) => b[1].usd - a[1].usd)
-    .map(([name, row]) => [cell(name), String(row.calls), formatUsd(row.usd), row.unknown > 0 ? String(row.unknown) : "-", ...(extra?.(name) ?? [])]);
+/**
+ * Per key, largest first: calls, known spend, rows whose cost is unknown, and the total with those rows at the estimate
+ * budgets count them at (tokens at the provider's dearest row, else Pi's own price, else budgets.unknownCallUsd).
+ */
+function spendRows(ctx: WorkflowContext, records: CostRecord[], key: (entry: CostRecord) => string, extra?: (key: string) => string[]): string[][] {
+  const groups = new Map<string, CostRecord[]>();
+  for (const entry of records) groups.set(key(entry), [...(groups.get(key(entry)) ?? []), entry]);
+  return [...groups.entries()]
+    .map(([name, rows]) => ({ name, calls: rows.reduce((sum, entry) => sum + entry.requests, 0), spend: summarize(rows, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd }) }))
+    .sort((a, b) => b.spend.knownUsd + b.spend.estimatedUnknownUsd - (a.spend.knownUsd + a.spend.estimatedUnknownUsd))
+    .map(({ name, calls, spend }) => [
+      cell(name),
+      String(calls),
+      formatUsd(spend.knownUsd),
+      spend.unknownRecords > 0 ? String(spend.unknownRecords) : "-",
+      spend.unknownRecords > 0 ? `≈ ${formatUsd(spend.knownUsd + spend.estimatedUnknownUsd)}` : formatUsd(spend.knownUsd),
+      ...(extra?.(name) ?? []),
+    ]);
 }
 
 /** Success and failure counts the router learned per `provider/model`, over every tier and task type. */
@@ -86,7 +91,7 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
   const unpriced = unpricedModels(records, ctx.config.pricing);
   const results = outcomes(ctx);
   const names = new Map(listTasks(ctx).map((item) => [item.taskId, displayName(item)]));
-  const line = `Known spend ${formatUsd(summary.knownUsd)} across ${records.length} record(s)${summary.unknownRecords > 0 ? ` · ${summary.unknownRecords} with unknown cost (budgets count them at about ${formatUsd(summary.estimatedUnknownUsd)})` : ""}`;
+  const line = `Known spend ${formatUsd(summary.knownUsd)} across ${records.length} record(s)${summary.unknownRecords > 0 ? ` · ${summary.unknownRecords} with unknown cost, estimated at ${formatUsd(summary.estimatedUnknownUsd)} · total ≈ ${formatUsd(summary.knownUsd + summary.estimatedUnknownUsd)}` : ""}`;
   const markdown = [
     `## Cost · ${line}`,
     "",
@@ -95,18 +100,18 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
     "",
     "### By model",
     "",
-    ...mdTable(["Model", "Calls", "Known", "Unknown rows", "Success / failure"], spendRows(records, (entry) => `${entry.provider}/${entry.model}`, (name) => {
+    ...mdTable(["Model", "Calls", "Known", "Unknown rows", "Total", "Success / failure"], spendRows(ctx, records, (entry) => `${entry.provider}/${entry.model}`, (name) => {
       const found = results.get(name);
       return [found ? `${found.wins} / ${found.losses}` : "-"];
     })),
     "",
     "### By job",
     "",
-    ...mdTable(["Job", "Calls", "Known", "Unknown rows"], spendRows(records, jobOf)),
+    ...mdTable(["Job", "Calls", "Known", "Unknown rows", "Total"], spendRows(ctx, records, jobOf)),
     "",
     "### By task",
     "",
-    ...mdTable(["Task", "Calls", "Known", "Unknown rows"], spendRows(records, (entry) => names.get(entry.taskId) ?? entry.taskId)),
+    ...mdTable(["Task", "Calls", "Known", "Unknown rows", "Total"], spendRows(ctx, records, (entry) => names.get(entry.taskId) ?? entry.taskId)),
     ...(Object.keys(quota).length > 0 ? ["", "### Subscription quota (ranks models; never billed or budgeted)", "", ...quotaLines(quota).map((item) => `- ${item}`)] : []),
   ].join("\n");
   ctx.report?.(markdown);

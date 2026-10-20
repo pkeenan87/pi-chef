@@ -19,14 +19,15 @@ describe("/cost", () => {
     const result = await app.cost();
     expect(result.ok, result.text).toBe(true);
     // The command result is one line; the tables go to the chat block.
-    expect(result.text).toMatch(/^Known spend \$0\.7500 across 3 record\(s\) · 1 with unknown cost/);
+    expect(result.text).toMatch(/^Known spend \$0\.7500 across 3 record\(s\) · 1 with unknown cost, estimated at \$\d+\.\d{4} · total ≈ \$0\.75\d\d$/);
     const markdown = reports.at(-1)!;
-    expect(markdown).toContain("| Model | Calls | Known | Unknown rows | Success / failure |");
-    expect(markdown).toContain("| anthropic/claude-opus-5-5 | 1 | $0.5000 | - | - |");
-    expect(markdown).toContain("| chat turns (session and tickets) | 1 | $0.2500 | - |");
-    expect(markdown).toContain("| ticket review | 1 | $0.5000 | - |");
-    expect(markdown).toContain("| batch summary | 1 | $0.0000 | 1 |");
-    expect(markdown).toContain(`| ${app.store.load(taskId)!.name} | 3 | $0.7500 | 1 |`);
+    expect(markdown).toContain("| Model | Calls | Known | Unknown rows | Total | Success / failure |");
+    expect(markdown).toContain("| anthropic/claude-opus-5-5 | 1 | $0.5000 | - | $0.5000 | - |");
+    expect(markdown).toContain("| chat turns (session and tickets) | 1 | $0.2500 | - | $0.2500 |");
+    expect(markdown).toContain("| ticket review | 1 | $0.5000 | - | $0.5000 |");
+    // The unknown row is counted at an estimate, shown apart from known spend.
+    expect(markdown).toMatch(/\| batch summary \| 1 \| \$0\.0000 \| 1 \| ≈ \$\d+\.\d{4} \|/);
+    expect(markdown).toMatch(new RegExp(`\\| ${app.store.load(taskId)!.name} \\| 3 \\| \\$0\\.7500 \\| 1 \\| ≈ \\$0\\.75\\d\\d \\|`));
     expect(markdown).not.toMatch(/By phase|Last route|\{"/);
 
     const csv = await app.cost("csv");

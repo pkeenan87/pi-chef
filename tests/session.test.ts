@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
-import { bindWorkflow, registerWorkflow } from "../src/extension.js";
+import { bindWorkflow, currentWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
 import { addTask, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
@@ -382,5 +382,26 @@ describe("input budget gate", () => {
     handlers.get("session_start")!({}, { ...ctx, model: { provider: "anthropic", id: "claude-opus-5-5" }, modelRegistry: { find: () => undefined } });
     expect(input("third prompt")).toEqual({ action: "continue" });
     expect(notices.filter((text) => text.includes("Budget warning"))).toHaveLength(2);
+  });
+});
+
+describe("Pi's own calls and prices reach the ledger through the extension", () => {
+  it("sweeps cache warming and Pi's compaction from the session file, and keeps Pi's price on each message", async () => {
+    const cwd = await tempRepo();
+    writeProject(cwd, tieredYaml());
+    const { handlers } = fakePi();
+    const entries: unknown[] = [];
+    const ctx = { cwd, hasUI: false, model: OPUS, modelRegistry: { find: () => undefined }, ui: { notify() {}, setStatus() {} }, sessionManager: { getSessionId: () => "sess", getEntries: () => entries } };
+    handlers.get("session_start")!({}, ctx);
+    const workflow = currentWorkflow()!;
+    const later = new Date(Date.now() + 60_000).toISOString();
+    entries.push({ type: "usage", id: "w1", timestamp: later, kind: "cache_warm", provider: "anthropic", model: "claude-opus-5-5", usage: { input: 0, output: 1, cacheRead: 90_000, cacheWrite: 0, cost: { total: 0.045 } } });
+    entries.push({ type: "compaction", id: "c1", timestamp: later, usage: { input: 50_000, output: 3_000, cacheRead: 0, cacheWrite: 0 } });
+    await handlers.get("agent_settled")!({ aborted: false }, ctx);
+    handlers.get("session_compact")!({}, ctx);
+    handlers.get("message_end")!({ message: { role: "assistant", content: [], provider: "anthropic", model: "claude-opus-5-5", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.0004 } }, stopReason: "stop" } }, ctx);
+    const ledger = workflow.store.readLedger();
+    expect(ledger.filter((row) => row.id.startsWith("pi-sess-")).map((row) => row.reason)).toEqual(["Pi cache warming", "Pi compaction"]);
+    expect(ledger.find((row) => row.reason === "observed assistant usage")?.listPriceUsd).toBe(0.0004);
   });
 });

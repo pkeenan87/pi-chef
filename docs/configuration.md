@@ -402,11 +402,21 @@ OpenAI, Anthropic, Foundry, Vercel, and local chat models are called through Pi'
 
 ## Cost
 
-Every model call the workflow records goes to `.pi-workflows/cost/ledger.jsonl`: provider, model, input, output, cache tokens, requests, estimated and actual charge, phase, retries, and outcome.
+Every model call goes to `.pi-workflows/cost/ledger.jsonl`: provider, model, input, output, cache tokens, requests, the charge (`actualUsd`), Pi's own price for the call when it gave one (`listPriceUsd`), phase, retries, outcome, and a reason that names the job (and ` · ticket <id>` while a `/build` ticket runs). The row goes to the active task, so a task's total covers:
 
-Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. A deterministic step that made no model call is a known zero.
+| Call | Recorded from |
+|---|---|
+| The session's turns: planning, chat, and every ticket turn | each assistant message (`message_end`) |
+| The per-ticket review, its advisors and resolve call; `/review`'s model pass, advisors and resolve; `plan_consult`; `/advisor`; summaries of cut files; compaction on `session.compactionTier`; `web_search` | the call itself |
+| Calls Pi makes on its own: cache-warming refreshes, Pi's own compaction (when the cheap-tier hook declines, for example during a local ticket), and branch summaries on `/tree` | the session file, swept after each turn, compaction, tree move and command, and at shutdown; each entry once (id `pi-<session>-<entry>`), from when pi-chef started watching that session |
 
-Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, and a row with nothing to price it from (for example a call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null` and `/cost` still lists those rows as unknown, with a count. An unknown row no longer makes the budget soft by itself.
+A call that fails or times out keeps the tokens the provider reported before it stopped (a stream cut off by a timeout is still billed). Only a call that reported nothing is unknown.
+
+Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. Work that made no model call is a known zero. `listPriceUsd` is never the charge: it is what Pi's model catalog says the call costs at list price, kept for comparison and used to estimate an unknown row.
+
+Not priced: Anthropic's 1-hour cache writes are billed above the 5-minute rate, and some models charge more above a long-context threshold; a pricing row has one rate for each token kind, so those calls are under-priced by that difference. Compare `actualUsd` with `listPriceUsd` in `/cost csv` if you bill per token. Per-search fees of `web_search` are not priced.
+
+Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, a row that only carries Pi's own price counts at that, and a row with nothing to price it from (for example a call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null`, and `/cost` lists those rows as unknown, with a count, and shows the Total column with them at the estimate (`≈`). An unknown row no longer makes the budget soft by itself.
 
 `/cost` also names models seen in the ledger that have no pricing row: their spend is unknown and estimated at the provider's dearest row for its current billing (subscription rows while on account login), which keeps the budget "soft", so add a row for each. Failures before any model request (a git error, a plan cycle) are ledgered as a known $0 and do not count against the model. Nothing classifies by model: the request gets a keyword scan and the planner rates the task.
 

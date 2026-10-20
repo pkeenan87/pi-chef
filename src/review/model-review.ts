@@ -1,7 +1,8 @@
-import { emptyUsage, type ModelFinding, type ModelReview, type ModelReviewPart, type PlanDocument, type ProviderId, type TokenUsage } from "../domain.js";
+import { type ModelFinding, type ModelReview, type ModelReviewPart, type PlanDocument, type ProviderId, type TokenUsage } from "../domain.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
 import { acceptedLines, advisorSummaryLines, rejectedLines, unresolvedConcernLines } from "./review-resolution.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * The model pass of /review: a review-tier model reads the branch diff against the plan and lists findings for a
@@ -294,13 +295,13 @@ export async function runModelReview(
         if (input.signal?.aborted) {
           // The session ended under the call: not the model's fault, and nothing more runs.
           stopped = "the session is ending";
-          await input.onCall?.({ candidate, part: index + 1, retry, usage: emptyUsage(), outcome: "stopped" });
+          await input.onCall?.({ candidate, part: index + 1, retry, usage: failedUsage(error), outcome: "stopped" });
           result.failures.push(`${label(candidate)}: stopped because ${stopped}`);
           break;
         }
         const why = timeout?.aborted ? `timed out after ${formatSeconds(input.timeoutMs!)}` : redact((error as Error).message || "unknown error");
         failed.set(label(candidate), (failed.get(label(candidate)) ?? 0) + 1);
-        await input.onCall?.({ candidate, part: index + 1, retry, usage: emptyUsage(), outcome: "failure" });
+        await input.onCall?.({ candidate, part: index + 1, retry, usage: failedUsage(error), outcome: "failure" });
         result.failures.push(`${label(candidate)}: ${why}`);
         input.onProgress?.(`part ${index + 1}: ${label(candidate)} failed: ${why.slice(0, 160)}`);
         continue;

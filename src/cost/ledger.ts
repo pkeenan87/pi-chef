@@ -34,6 +34,7 @@ export function buildCostRecord(input: UsageInput, pricing: PricingRow[], at: Da
     cacheReadTokens: input.usage.cacheRead,
     cacheWriteTokens: input.usage.cacheWrite,
     actualUsd,
+    ...(typeof input.usage.listPriceUsd === "number" && Number.isFinite(input.usage.listPriceUsd) ? { listPriceUsd: input.usage.listPriceUsd } : {}),
     usageKnown: actualUsd !== null,
     outcome: input.outcome,
     retries: input.retries,
@@ -96,10 +97,12 @@ function fromMicro(micro: number): number {
  * current billing count: a subscription session is not estimated at API-key rates.
  */
 function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number | null {
-  if (record.inputTokens === null && record.outputTokens === null) return null;
+  // Pi's own price for the call, when it gave one, is the next best thing to a pricing row.
+  const listed = typeof record.listPriceUsd === "number" && record.listPriceUsd > 0 ? toMicro(record.listPriceUsd) : null;
+  if (record.inputTokens === null && record.outputTokens === null) return listed;
   const apiKey = billingFor(record.provider) === "api-key";
   const rows = pricing.filter((row) => row.provider === record.provider && (row.billing === "api-key") === apiKey);
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return listed;
   let worst = 0;
   for (const row of rows) {
     const usd =
@@ -111,7 +114,7 @@ function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number
       MICRO;
     worst = Math.max(worst, toMicro(usd));
   }
-  return worst;
+  return Math.max(worst, listed ?? 0);
 }
 
 interface MicroBucket {

@@ -9,7 +9,7 @@ import type { ChatFn } from "../providers/pi-chat.js";
 import { runAz } from "../providers/runtime.js";
 import { advisor } from "./advisor.js";
 import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
-import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
+import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordPiUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import { active, type WorkflowContext } from "./context.js";
 import { statusLine } from "./state-label.js";
@@ -307,6 +307,11 @@ export class Workflow {
 
   observeUsage(input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
     return observeUsage(this.ctx, input);
+  }
+
+  /** Ledgers the calls Pi made on its own (cache warming, its own compaction and branch summaries) from the session file. */
+  recordPiUsage(input: Parameters<typeof recordPiUsage>[1]): CostRecord[] {
+    return recordPiUsage(this.ctx, input);
   }
 
   /**

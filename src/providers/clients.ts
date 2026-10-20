@@ -29,12 +29,20 @@ export interface ChatResponse {
 
 export class ProviderCallError extends Error {
   readonly kind: "expired" | "rate_limit" | "outage" | "bad_response" | "config";
+  /** What the provider reported before the call failed or was aborted (a timeout mid-stream still bills its tokens). */
+  readonly usage?: TokenUsage;
 
-  constructor(kind: ProviderCallError["kind"], message: string) {
+  constructor(kind: ProviderCallError["kind"], message: string, usage?: TokenUsage) {
     super(message);
     this.name = "ProviderCallError";
     this.kind = kind;
+    if (usage) this.usage = usage;
   }
+}
+
+/** The usage to ledger for a failed call: what the provider reported before it failed, else unknown (never zero). */
+export function failedUsage(error: unknown): TokenUsage {
+  return error instanceof ProviderCallError && error.usage ? error.usage : { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 };
 }
 
 export interface FoundryConfig {

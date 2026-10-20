@@ -212,11 +212,11 @@ It makes no model call. The Foundry sign-in check behind the Logins and Routing 
 
 Reads `.pi-workflows/cost/` and posts:
 
-- known spend, and the number of records whose cost is unknown, with the estimate budgets count them at;
+- known spend, the number of records whose cost is unknown, the estimate budgets count them at, and the total (`≈` when it includes an estimate);
 - the task and daily budgets, with their status;
-- **By model:** calls, known spend, unknown-cost rows, and the successes and failures the router recorded;
-- **By job:** chat turns (the session and tickets), reviews, advisors, compaction, web search, summaries of cut files;
-- **By task;**
+- **By model:** calls, known spend, unknown-cost rows, total, and the successes and failures the router recorded;
+- **By job:** chat turns (the session and tickets), reviews, advisors, compaction, web search, summaries of cut files, and the calls Pi makes on its own (cache warming, its own compaction, branch summaries);
+- **By task:** everything the task spent, each with its total;
 - subscription quota use, when quota is configured (it ranks models; it is never billed or budgeted).
 
 Unknown cost is never shown as $0. The exports are files because a chat line is clipped. Changes nothing else.

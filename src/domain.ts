@@ -200,6 +200,8 @@ export interface TokenUsage {
   cacheRead: number | null;
   cacheWrite: number | null;
   requests: number;
+  /** Pi's own price for the call (its model catalog), when Pi reported one. Stored, and used to estimate an unpriced row. */
+  listPriceUsd?: number;
 }
 
 export interface CostRecord {
@@ -216,7 +218,10 @@ export interface CostRecord {
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
   actualUsd: number | null;
-  /** Pi's own cost figure for the call (its list-price pricing), kept for information when the config priced the call differently. */
+  /**
+   * Pi's own price for the call (its model catalog). Never the charge: `actualUsd` comes from the config's rows. Budgets
+   * use it to estimate a row whose cost is unknown, before the flat `budgets.unknownCallUsd`.
+   */
   listPriceUsd?: number | null;
   usageKnown: boolean;
   outcome: "success" | "failure" | "unknown";

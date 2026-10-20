@@ -1,4 +1,3 @@
-import { emptyUsage } from "../domain.js";
 import { redact } from "../redact.js";
 import { clipDiff, clipNote, type CutFile } from "../review/advisors.js";
 import { bracketSpans } from "../review/model-review.js";
@@ -7,6 +6,7 @@ import { selectCandidate } from "../router/select.js";
 import { budgetRemainingUsd, budgetState, quotaState, record } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
 import { availability, candidateCheck } from "./routing.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * One-line summaries of the files a diff clip cut, written by the batch tier (a standalone job: no conversation).
@@ -81,9 +81,9 @@ export async function summarizeCutFiles(ctx: WorkflowContext, taskId: string, fi
   let response: Awaited<ReturnType<typeof ctx.chat>>;
   try {
     response = await ctx.chat(candidate, { messages: [{ role: "system", content: SYSTEM }, { role: "user", content: user }], maxTokens: MAX_TOKENS, signal });
-  } catch {
-    // It may or may not have been billed: unknown, never zero.
-    ledger(emptyUsage(), "failure");
+  } catch (error) {
+    // What the provider reported before it failed, else unknown, never zero.
+    ledger(failedUsage(error), "failure");
     return none;
   }
   const parsed = parseSummaries(response.text, listed.map((file) => file.name));
