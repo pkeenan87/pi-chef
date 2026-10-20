@@ -13,7 +13,7 @@ function record(over: Partial<CostRecord>): CostRecord {
   return {
     id: "r", at: "2026-10-14T12:00:00.000Z", taskId: "t", phase: "IMPLEMENTING", provider: "openai", model: "cheap", tier: "cheap",
     requests: 1, inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null,
-    estimatedUsd: null, actualUsd: null, usageKnown: false, outcome: "unknown", retries: 0, reason: "", ...over,
+    actualUsd: null, usageKnown: false, outcome: "unknown", retries: 0, reason: "", ...over,
   };
 }
 

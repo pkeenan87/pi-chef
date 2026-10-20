@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { Billing } from "../config.js";
-import { isAccountProvider, WorkflowError, type AccountProvider, type ProviderId } from "../domain.js";
+import { isAccountProvider, type AccountProvider, type ProviderId } from "../domain.js";
 import { redact } from "../redact.js";
 
 export type AuthStatus = "ready" | "missing" | "expired" | "blocked" | "unavailable";

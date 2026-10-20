@@ -79,24 +79,6 @@ export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Wo
   });
 }
 
-export const tasksRequest = `
-Maintain the ingest parser.
-AC: ingest rejects empty events
-\`\`\`tasks
-[
-  {"id":"ingest","summary":"Guard ingest","files":["src/ingest.ts"],"edits":[{"path":"src/ingest.ts","content":"export function ingest(value: string) {\\n  if (!value) throw new Error(\\"empty\\");\\n  return value;\\n}\\n"}]},
-  {"id":"alert","summary":"Route alerts","files":["src/alert.ts"],"edits":[{"path":"src/alert.ts","content":"export function alert(kind: string) {\\n  return kind;\\n}\\n"}]}
-]
-\`\`\`
-`;
-
-export const singleTaskRequest = `
-Maintain the ingest parser.
-\`\`\`tasks
-[{"id":"ingest","summary":"Guard ingest","files":["src/ingest.ts"],"edits":[{"path":"src/ingest.ts","content":"export const ingest = 1;\\n"}]}]
-\`\`\`
-`;
-
 /** A build driver whose "session" writes `src/ingest.ts` into the checkout, like a model finishing a ticket. */
 export function writingDriver(cwd: string, files: Record<string, string> = { "src/ingest.ts": "export const ingest = 1;\n" }): BuildDriver {
   return {
@@ -135,8 +117,6 @@ providers:
   vercel: { type: vercel-ai-gateway, auth: vercel-cli, projectDir: ".", envFile: .env.local }
   local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b" }
 tiers:
-  deterministic:
-    - { provider: local, model: "qwen2.5-coder:7b" }
   cheap:
     - { provider: openai, model: gpt-6-luna }
     - { provider: anthropic, model: claude-haiku-5-5 }
@@ -214,10 +194,10 @@ export function sampleTicket(id: string, extra: Partial<Ticket> = {}): Ticket {
 export const sampleSpec = { summary: "Retry failed ingests.", context: "src/ingest.ts parses and drops failures.", approach: "Wrap parse() in retryParse() with a fixed backoff.", changes: [{ path: "src/ingest.ts", change: "add retryParse(input, attempts)" }], reuse: ["sleep() in src/util.ts"], verification: ["npm test"], decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: [], outOfScope: [], risks: [] };
 
 /** A workflow in a fresh repo with a ticket plan saved through the /plan tools and, unless `approve` is false, approved. */
-export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string } = {}) {
+export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string; request?: string } = {}) {
   const cwd = options.cwd ?? (await tempRepo());
   const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, ...extras });
-  if (!(await app.startPlan("Add retry to the ingest parser")).ok) throw new Error("startPlan failed in fixture");
+  if (!(await app.startPlan(options.request ?? "Add retry to the ingest parser")).ok) throw new Error("startPlan failed in fixture");
   await app.savePlanSpec(sampleSpec);
   await app.commitTickets(tickets);
   if (options.approve !== false && !(await app.approveDraft()).ok) throw new Error("approveDraft failed in fixture");
@@ -292,8 +272,6 @@ export async function addTask(app: Workflow, name: string, options: { branch?: s
     updatedAt: at,
     phaseEnteredAt: at,
     request: options.request ?? `Request for ${name}`,
-    publishApproved: false,
-    attempts: [],
     ...(options.branch ? { build: { branch: options.branch, base: "main", baseSha: "0".repeat(40) } } : {}),
   };
   return contextOf(app).store.create(base);

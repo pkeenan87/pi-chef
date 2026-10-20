@@ -1,10 +1,12 @@
-import { localProfile, modelLabel, tierCandidates } from "../config.js";
+import path from "node:path";
+import { localProfile, modelLabel, tierCandidates, type WorkflowConfig } from "../config.js";
 import { selectCandidate } from "../router/select.js";
 import { foundrySection } from "./status-foundry.js";
-import { LOCAL_TIERS, PROVIDERS, TIER_KEYS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type RoutingDecision, type TaskState } from "../domain.js";
+import { PROVIDERS, ticketDifficulty, type AcceptedClassification, type CommandResult, type CostRecord, type ReviewReport, type TaskState, type TierKey } from "../domain.js";
 import type { ProviderAuthView } from "../providers/auth.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { quotaLines } from "../cost/quota.js";
+import { atomicWrite } from "../storage/store.js";
 import { availability, candidateCheck, routingSummary } from "./routing.js";
 import { clock, reviewOutOfDate, taskState, type GitFacts } from "./state-label.js";
 import { reviewRows } from "./review-report.js";
@@ -15,52 +17,57 @@ import { isSecuritySensitive } from "../router/classify.js";
 import { costLabel, resultLabel, reviewLabel } from "./build.js";
 import { cell, flat, formatDuration, formatUsd, formatUsdShort, mdTable } from "./format.js";
 
-/** Per-model lines: spend from the ledger and success/failure counts learned by the router. */
-function modelBreakdown(ctx: WorkflowContext, records: CostRecord[] = ctx.store.readLedger()): string[] {
-  const metrics = ctx.store.readMetrics();
-  const rows = new Map<string, { calls: number; usd: number; unknown: number; wins: number; losses: number }>();
-  const row = (key: string) => {
-    const found = rows.get(key) ?? { calls: 0, usd: 0, unknown: 0, wins: 0, losses: 0 };
-    rows.set(key, found);
-    return found;
-  };
-  for (const entry of records) {
-    if (!entry.model) continue;
-    const found = row(`${entry.provider}/${entry.model}`);
-    found.calls += entry.requests;
-    if (entry.actualUsd === null) found.unknown += 1;
-    else found.usd += entry.actualUsd;
-  }
-  for (const types of Object.values(metrics)) {
-    for (const [key, cell] of Object.entries(types ?? {})) {
-      const match = key.match(/^model:[^:]+:(.+)$/);
-      if (!match) continue;
-      const found = row(match[1]!);
-      found.wins += cell.success;
-      found.losses += cell.failure;
-    }
-  }
-  return [...rows.entries()].map(
-    ([key, v]) => `${key}: ${v.calls} call(s), $${v.usd.toFixed(4)} known${v.unknown ? ` (+${v.unknown} unknown)` : ""}, ${v.wins} success / ${v.losses} failure`,
-  );
-}
-
-/** How the task is rated and by whom: the planner's rating once plan_spec ran, else the keyword scan of the request. */
-function classificationLine(classification: AcceptedClassification): string {
-  const security = isSecuritySensitive(classification) ? ", security-sensitive" : "";
+/**
+ * How the task is rated and by whom: the planner's rating once plan_spec ran, else the keyword scan of the request.
+ * Only risk and the security flag act on anything (premium review, the /build confirmation).
+ */
+function ratingLine(classification: AcceptedClassification): string {
+  const security = isSecuritySensitive(classification) ? " · security-sensitive" : "";
   const reason = classification.reason_codes.find((code) => code.startsWith("reason: "));
   return classification.source === "planner"
-    ? `Rating (planner): ${classification.complexity} complexity, ${classification.risk} risk${security}${reason ? ` · ${reason.slice(8)}` : ""}`
-    : `Rating (keyword scan; the planner rates it during /plan): ${classification.complexity} complexity, ${classification.risk} risk${security}`;
-}
-
-function routeLine(ctx: WorkflowContext, routing: RoutingDecision): string {
-  const target = routing.provider === "none" ? "literal edits" : modelLabel(ctx.config, routing.provider, routing.model);
-  return `${routing.tier} → ${target}${routing.selectionReason ? ` · ${routing.selectionReason}` : ""}`;
+    ? `${classification.risk} risk${security} (planner${reason ? `: ${reason.slice(8)}` : ""})`
+    : `${classification.risk} risk${security} (keyword scan; the planner rates it during /plan)`;
 }
 
 export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> {
-  return guard(() => costReport(ctx, format));
+  return guard(() => costReport(ctx, format.trim()));
+}
+
+/** The job a ledger row paid for: its reason without the ticket tag and the detail in parentheses. */
+function jobOf(entry: CostRecord): string {
+  const job = entry.reason.replace(/ · ticket \S+$/, "").replace(/\s*[(:].*$/, "").trim();
+  return job.startsWith("observed assistant usage") ? "chat turns (session and tickets)" : job || "other";
+}
+
+/** Known spend and unknown-cost rows per key, largest first. */
+function spendRows(records: CostRecord[], key: (entry: CostRecord) => string, extra?: (key: string) => string[]): string[][] {
+  const rows = new Map<string, { calls: number; usd: number; unknown: number }>();
+  for (const entry of records) {
+    const found = rows.get(key(entry)) ?? { calls: 0, usd: 0, unknown: 0 };
+    found.calls += entry.requests;
+    if (entry.actualUsd === null) found.unknown += 1;
+    else found.usd += entry.actualUsd;
+    rows.set(key(entry), found);
+  }
+  return [...rows.entries()]
+    .sort((a, b) => b[1].usd - a[1].usd)
+    .map(([name, row]) => [cell(name), String(row.calls), formatUsd(row.usd), row.unknown > 0 ? String(row.unknown) : "-", ...(extra?.(name) ?? [])]);
+}
+
+/** Success and failure counts the router learned per `provider/model`, over every tier and task type. */
+function outcomes(ctx: WorkflowContext): Map<string, { wins: number; losses: number }> {
+  const out = new Map<string, { wins: number; losses: number }>();
+  for (const types of Object.values(ctx.store.readMetrics())) {
+    for (const [key, stat] of Object.entries(types ?? {})) {
+      const match = key.match(/^model:[^:]+:(.+)$/);
+      if (!match) continue;
+      const found = out.get(match[1]!) ?? { wins: 0, losses: 0 };
+      found.wins += stat.success;
+      found.losses += stat.failure;
+      out.set(match[1]!, found);
+    }
+  }
+  return out;
 }
 
 async function costReport(ctx: WorkflowContext, format: string): Promise<CommandResult> {
@@ -69,53 +76,89 @@ async function costReport(ctx: WorkflowContext, format: string): Promise<Command
   const summary = summarize(records, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd });
   const budget = budgetState(ctx, task?.taskId, records);
   const quota = quotaState(ctx, records);
-  const quotaText = quotaLines(quota);
-  const lines = [
-    `Known spend $${summary.knownUsd.toFixed(4)} across ${records.length} record(s). Unknown usage records: ${summary.unknownRecords}, shown as unknown and never as zero (budgets count them at an estimate, $${summary.estimatedUnknownUsd.toFixed(4)} in all).`,
-    ...(unpricedModels(records, ctx.config.pricing).length ? [`Models with no pricing row (their spend is unknown and estimated at the provider's dearest rate): ${unpricedModels(records, ctx.config.pricing).join(", ")}. Add a pricing row for each.`] : []),
-    `Task budget: ${budget.task.knownUsd.toFixed(4)} / ${ctx.config.budgets.taskUsd} (${statusFor(ctx, budget.task, ctx.config.budgets.taskUsd)}).`,
-    `Daily budget: ${budget.daily.knownUsd.toFixed(4)} / ${ctx.config.budgets.dailyUsd} (${statusFor(ctx, budget.daily, ctx.config.budgets.dailyUsd)}).`,
-    `By phase: ${JSON.stringify(summary.byPhase)}`,
-    `By provider: ${JSON.stringify(summary.byProvider)}`,
-    `By model: ${JSON.stringify(summary.byModel)}`,
-    ...modelBreakdown(ctx, records).map((line) => `  ${line}`),
-    quotaText.length > 0 ? "Subscription quota (ranking only; not billed, not counted toward budgets):" : "",
-    ...quotaText.map((line) => `  ${line}`),
-    task?.routing ? `Last route: ${routeLine(ctx, task.routing)}` : "",
-  ].filter(Boolean);
-  if (format.trim() === "csv") return done(toCsv(records), records);
-  if (format.trim() === "json") return done(JSON.stringify({ summary, quota, records }, null, 2), { summary, quota, records });
-  return done(lines.join("\n"), summary);
+  // The exports are files: a chat line is clipped, and a ledger is long.
+  if (format === "csv" || format === "json") {
+    const file = path.join(ctx.store.root, "reports", `cost-${ctx.now().toISOString().replace(/[-:.]/g, "").slice(0, 15)}.${format}`);
+    atomicWrite(file, format === "csv" ? toCsv(records) : JSON.stringify({ summary, quota, records }, null, 2));
+    return done(`Wrote ${records.length} ledger record(s) to ${file}.`, { file, summary });
+  }
+  if (format !== "") return fail("USAGE", "Use /cost, /cost csv, or /cost json.");
+  const unpriced = unpricedModels(records, ctx.config.pricing);
+  const results = outcomes(ctx);
+  const names = new Map(listTasks(ctx).map((item) => [item.taskId, displayName(item)]));
+  const line = `Known spend ${formatUsd(summary.knownUsd)} across ${records.length} record(s)${summary.unknownRecords > 0 ? ` · ${summary.unknownRecords} with unknown cost (budgets count them at about ${formatUsd(summary.estimatedUnknownUsd)})` : ""}`;
+  const markdown = [
+    `## Cost · ${line}`,
+    "",
+    `Budget: task ${formatUsdShort(budget.task.knownUsd)} / $${ctx.config.budgets.taskUsd} (${statusFor(ctx, budget.task, ctx.config.budgets.taskUsd)}) · daily ${formatUsdShort(budget.daily.knownUsd)} / $${ctx.config.budgets.dailyUsd} (${statusFor(ctx, budget.daily, ctx.config.budgets.dailyUsd)})`,
+    ...(unpriced.length ? ["", `No pricing row for ${unpriced.join(", ")}: their spend is unknown. Add a row to pricing.`] : []),
+    "",
+    "### By model",
+    "",
+    ...mdTable(["Model", "Calls", "Known", "Unknown rows", "Success / failure"], spendRows(records, (entry) => `${entry.provider}/${entry.model}`, (name) => {
+      const found = results.get(name);
+      return [found ? `${found.wins} / ${found.losses}` : "-"];
+    })),
+    "",
+    "### By job",
+    "",
+    ...mdTable(["Job", "Calls", "Known", "Unknown rows"], spendRows(records, jobOf)),
+    "",
+    "### By task",
+    "",
+    ...mdTable(["Task", "Calls", "Known", "Unknown rows"], spendRows(records, (entry) => names.get(entry.taskId) ?? entry.taskId)),
+    ...(Object.keys(quota).length > 0 ? ["", "### Subscription quota (ranks models; never billed or budgeted)", "", ...quotaLines(quota).map((item) => `- ${item}`)] : []),
+  ].join("\n");
+  ctx.report?.(markdown);
+  return done(ctx.report ? line : markdown, summary);
 }
 
 export function status(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {
   return guard(() => statusReport(ctx, arg.trim()));
 }
 
-/** One row of the Routing table: the tier, what would run now, and each skipped candidate with its reason. */
+/** One row of the Routing table: the jobs a tier serves, what would run now, and each skipped candidate with its reason. */
 export interface RoutingRow {
   tier: string;
+  jobs: string;
   runs: string;
   skipped: string[];
 }
 
+/** The tiers the config uses, each with the jobs it serves, in workflow order. Tiers no job uses are left out. */
+export function tierJobs(config: WorkflowConfig): [TierKey, string[]][] {
+  const jobs = new Map<TierKey, string[]>();
+  const add = (tier: TierKey, job: string) => jobs.set(tier, [...(jobs.get(tier) ?? []), job]);
+  add("ticketLow", "low tickets");
+  add("ticketMedium", "medium tickets");
+  add("ticketHigh", "high tickets");
+  if (config.providers.local) add("local", "local-mode tickets");
+  add("premium", "a failed high ticket");
+  add(config.routing.reviewTier, "review (per ticket and /review)");
+  if (config.routing.reviewTier !== "premium") add("premium", "review of security-sensitive work");
+  add("advisor", "advisors");
+  add(config.session.compactionTier, "compaction");
+  add(tierCandidates(config, "batch").length > 0 ? "batch" : "cheap", "summaries of cut files");
+  return [...jobs.entries()];
+}
+
 /**
- * The Routing table's rows: for each tier the candidate that would run now, and every skipped candidate with its reason
- * (the same reasons route events and stop messages use). Nothing is called and nothing is recorded.
+ * The Routing table's rows: for each tier a job uses, the candidate that would run now, and every skipped candidate
+ * with its reason (the same reasons route events and stop messages use). Nothing is called and nothing is recorded.
  */
 export async function routingCheckRows(ctx: WorkflowContext): Promise<RoutingRow[]> {
   const seen = await availability(ctx);
   const check = candidateCheck(ctx);
   const table = ctx.store.readMetrics();
   const rows: RoutingRow[] = [];
-  // The local-mode tiers are listed only when a local server is configured; otherwise they are noise.
-  for (const tier of TIER_KEYS.filter((key) => ctx.config.providers.local || !(LOCAL_TIERS as readonly string[]).includes(key))) {
+  for (const [tier, jobs] of tierJobs(ctx.config)) {
     const selection = selectCandidate({ tier, taskType: "general", config: ctx.config, table, availability: seen, candidateCheck: check, strictAvailability: true, rng: () => 0.5, at: ctx.now() });
     const label = (item: { provider: string; model: string }) => modelLabel(ctx.config, item.provider, item.model);
     const usable = selection.considered.filter((item) => !item.excludedReason);
     const others = usable.filter((item) => item.provider !== selection.candidate?.provider || item.model !== selection.candidate?.model).map(label);
     rows.push({
       tier,
+      jobs: jobs.join(", "),
       runs: selection.candidate
         ? `${label(selection.candidate)}${others.length > 0 ? ` (also usable: ${others.join(", ")})` : ""}`
         : `nothing usable${tierCandidates(ctx.config, tier).length === 0 ? " (no model configured)" : ""}`,
@@ -140,13 +183,13 @@ function reviewSummary(review: ReviewReport | undefined, git: GitFacts): string 
 }
 
 /** The Tickets table: each planned ticket with its difficulty, implementer, review, cost, and status. */
-function ticketTable(state: TaskState): string[] {
+function ticketTable(ctx: WorkflowContext, state: TaskState): string[] {
   const tickets = state.plan?.tickets ?? [];
   if (tickets.length === 0) return [];
   const rows = tickets.map((ticket) => {
     const run = state.ticketRuns?.[ticket.id];
     const result = resultLabel(run, true);
-    return [cell(ticket.id), cell(ticket.title, 60), ticketDifficulty(ticket), cell(run?.provider && run.model ? `${run.provider}/${run.model}` : "-"), cell(reviewLabel(run)), cell(costLabel(run)), cell(result, 80)];
+    return [cell(ticket.id), cell(ticket.title, 60), ticketDifficulty(ticket), cell(run?.provider && run.model ? modelLabel(ctx.config, run.provider, run.model) : "-"), cell(reviewLabel(run)), cell(costLabel(run)), cell(result, 80)];
   });
   return ["### Tickets", "", ...mdTable(["#", "Ticket", "Difficulty", "Implementer", "Review", "Cost", "Status"], rows)];
 }
@@ -184,11 +227,10 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
     ["Next", label.next],
     ["Budget", budgetCell],
     ["Session model", `${summary.session}${ctx.config.session.pin ? " (pinned)" : ""}`],
-    ...(state?.classification ? [["Rating", classificationLine(state.classification).replace(/^Rating \(([^)]*)\): /, "$1: ")] as [string, string]] : []),
-    ...(state?.routing ? [["Last route", routeLine(ctx, state.routing)] as [string, string]] : []),
+    ...(state?.classification ? [["Rating", ratingLine(state.classification)] as [string, string]] : []),
   ];
-  const routing = (await routingCheckRows(ctx)).map((row) => [cell(row.tier), cell(row.runs, 160), cell(row.skipped.join("; ") || "-", 400)]);
-  const logins = auth.map((view) => [cell(view.provider), view.method === "api-key" && view.status === "ready" ? "api-key" : view.status, cell(`${view.method}${view.detail ? ` · ${view.detail}` : ""}`, 160)]);
+  const routing = (await routingCheckRows(ctx)).map((row) => [cell(row.jobs), cell(row.tier), cell(row.runs, 160), cell(row.skipped.join("; ") || "-", 400)]);
+  const logins = loginRows(auth);
   const missingPricing = unpricedModels(records, ctx.config.pricing);
   const warnings = [
     ...(ctx.config.warnings ?? []).map((warning) => `Config: ${warning}`),
@@ -196,7 +238,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
     ...(missingPricing.length > 0 ? [`No pricing row for ${missingPricing.join(", ")}; their spend is unknown. Add a row to pricing.`] : []),
     ...(state?.blockedReason && !["BLOCKED", "PAUSED", "FAILED"].includes(state.phase) ? [`Note: ${state.blockedReason}`] : []),
   ];
-  const tickets = state ? ticketTable(state) : [];
+  const tickets = state ? ticketTable(ctx, state) : [];
   const others = unfinishedTasks(listTasks(ctx)).filter((task) => task.taskId !== state?.taskId).length;
   const markdown = [
     `## Status · ${label.line}`,
@@ -209,7 +251,7 @@ export async function statusMarkdown(ctx: WorkflowContext, state: TaskState | un
     "",
     "### Routing",
     "",
-    ...mdTable(["Tier", "Runs", "Skipped"], routing),
+    ...mdTable(["Job", "Tier", "Runs", "Skipped"], routing),
     "",
     "### Logins",
     "",
@@ -284,6 +326,11 @@ async function statusReport(ctx: WorkflowContext, arg: string): Promise<CommandR
   return done(ctx.report ? stateLine : markdown, { state, auth, budget, corruptEventLines: state ? ctx.store.corruptEventLines(state.taskId) : 0, stateLine });
 }
 
+/** The Logins table rows, shared by /status and /auth. */
+function loginRows(auth: ProviderAuthView[]): string[][] {
+  return auth.map((view) => [cell(view.provider), view.method === "api-key" && view.status === "ready" ? "api-key" : view.status, cell(`${view.method}${view.detail ? ` · ${view.detail}` : ""}`, 160)]);
+}
+
 export function auth(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {
   return guard(() => authReport(ctx, arg));
 }
@@ -307,6 +354,10 @@ async function authReport(ctx: WorkflowContext, arg: string): Promise<CommandRes
     }
     return fail("USAGE", "Use /auth login openai|anthropic|xai|foundry|vercel|local.");
   }
+  if (command && command !== "status") return fail("USAGE", "Use /auth, /auth status, or /auth login <provider>.");
   const views = await Promise.all(PROVIDERS.map((item) => ctx.authProbe.inspect(item)));
-  return done(views.map((view) => `${view.provider}\t${view.status}\t${view.method}\t${view.detail}`).join("\n"), views);
+  const markdown = ["## Logins", "", ...mdTable(["Provider", "Status", "Detail"], loginRows(views))].join("\n");
+  ctx.report?.(markdown);
+  const ready = views.filter((view) => view.status === "ready").map((view) => view.provider);
+  return done(ctx.report ? `Signed in: ${ready.join(", ") || "none"}.` : markdown, views);
 }

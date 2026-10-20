@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderAuthView } from "../src/providers/auth.js";
 import type { ProviderId } from "../src/domain.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
-import { seededRng, singleTaskRequest, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { sampleTicket, seededRng, tempRepo, ticketWorkflow, tieredConfig, workflow } from "./helpers.js";
 
 function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"]>> = {}) {
   return {
@@ -16,7 +16,6 @@ function authWith(statuses: Partial<Record<ProviderId, ProviderAuthView["status"
 }
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
-const fence = "```";
 
 function fakeChat(reply: (provider: string, model: string) => string) {
   const calls: { provider: string; model: string; user: string; system: string }[] = [];
@@ -32,37 +31,17 @@ function fakeChat(reply: (provider: string, model: string) => string) {
   return { chat, calls };
 }
 
-describe("/route", () => {
-  it("uses the keyword scan only and says the planner sets complexity during /plan", async () => {
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), rng: seededRng(1) });
-    const result = await app.route("add a feature to the exporter");
-    expect(result.ok, result.text).toBe(true);
-    const data = JSON.parse(result.text) as { note: string; classification: { source: string; recommended_tier: string; task_type: string } };
-    expect(data.classification).toMatchObject({ source: "keywords", task_type: "general", recommended_tier: "standard" });
-    expect(data.note).toMatch(/planner sets complexity and risk during \/plan/);
-    expect(app.store.readLedger().filter((record) => record.reason === "classify")).toEqual([]);
-    const secure = (await app.route("rotate the oauth credentials")).data as { classification: { source: string; risk: string } };
-    expect(secure.classification).toMatchObject({ source: "keywords", risk: "high" });
-  });
-});
-
-describe("route display", () => {
-  it("sets the status line and appends a route event with the considered summary", async () => {
-    const statuses: (string | undefined)[] = [];
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), status: (text) => statuses.push(text), rng: seededRng(2) });
-    const planned = await app.plan(singleTaskRequest);
-    expect(planned.ok).toBe(true);
-    expect(statuses.at(-1)).toMatch(/^standard → (anthropic\/claude-sonnet-5-5|foundry\/grok-4-7) · /);
+describe("planning picks no model", () => {
+  it("records no route event and no planning spend, and /status shows no planning route", async () => {
+    const { app } = await ticketWorkflow([sampleTicket("01")], { auth: authWith(), rng: seededRng(2) }, { approve: false });
     const events = readFileSync(path.join(app.store.root, "tasks", app.activeTaskId()!, "events.jsonl"), "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    const route = events.find((event) => event.type === "route");
-    expect(route.route).toMatchObject({ purpose: "plan", tier: "standard" });
-    expect(route.route.considered).toHaveLength(2);
-    expect(route.route.considered[0]).toMatch(/^anthropic\/claude-sonnet-5-5: /);
+    expect(events.filter((event) => event.type === "route")).toEqual([]);
+    expect(app.store.readLedger()).toEqual([]);
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
-    expect((await app.status()).text).toMatch(/\| Last route \| standard → /);
+    expect((await app.status()).text).not.toContain("Last route");
   });
 });
 
@@ -73,8 +52,7 @@ describe("advisor", () => {
     const { chat, calls } = fakeChat(() => advisorReply);
     const notes: string[] = [];
     const statuses: (string | undefined)[] = [];
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat, notify: (m) => notes.push(m), status: (t) => statuses.push(t), rng: seededRng(3), ...extras });
-    await app.plan(singleTaskRequest);
+    const { app } = await ticketWorkflow([sampleTicket("01", { title: "Guard ingest" })], { auth: authWith(), chat, notify: (m) => notes.push(m), status: (t) => statuses.push(t), rng: seededRng(3), ...extras }, { approve: false });
     return { app, calls, notes, statuses };
   }
 
@@ -103,7 +81,7 @@ describe("advisor", () => {
     const { app, calls } = await withTask();
     app.store.appendLedger({
       id: "big", at: "2026-10-14T12:00:00.000Z", taskId: app.activeTaskId()!, phase: "PLANNING", provider: "openai", model: "x", tier: "premium",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     const result = await app.advisor("anything");
     expect(result).toMatchObject({ ok: false, code: "BUDGET" });
@@ -143,11 +121,9 @@ describe("advisor", () => {
   it("suggests the advisor (never calls it) on a security-sensitive plan, but not on an ordinary one", async () => {
     const { chat, calls } = fakeChat(() => advisorReply);
     const notes: string[] = [];
-    const app = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat, notify: (m) => notes.push(m) });
-    await app.plan(singleTaskRequest);
+    await ticketWorkflow([sampleTicket("01")], { auth: authWith(), chat, notify: (m) => notes.push(m) }, { approve: false });
     expect(notes.filter((m) => m.includes("/advisor"))).toHaveLength(0);
-    const secure = workflow(await tempRepo(), { config: tieredConfig(), auth: authWith(), chat, notify: (m) => notes.push(m) });
-    await secure.plan(`Rotate the production API key and fix auth\n${fence}tasks\n[{"id":"a","files":["src/a.ts"],"edits":[{"path":"src/a.ts","content":"export {};\\n"}]}]\n${fence}`);
+    await ticketWorkflow([sampleTicket("01")], { auth: authWith(), chat, notify: (m) => notes.push(m) }, { approve: false, request: "Rotate the production API key and fix auth" });
     expect(notes.some((m) => /^Consider \/advisor/.test(m) && /security-sensitive/.test(m))).toBe(true);
     expect(calls).toHaveLength(0);
   });

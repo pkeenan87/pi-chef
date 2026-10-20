@@ -576,9 +576,4 @@ export class TaskStore {
     mkdirSync(this.root, { recursive: true });
     writeFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), message })}\n`, { flag: "a" });
   }
-
-  statAgeMs(file: string): number | undefined {
-    if (!existsSync(file)) return undefined;
-    return Date.now() - statSync(file).mtimeMs;
-  }
 }

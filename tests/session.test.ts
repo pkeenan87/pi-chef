@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
 import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { contextOf, readyAuth, sampleTicket, singleTaskRequest, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
+import { addTask, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string };
@@ -232,8 +232,8 @@ describe("session_before_compact", () => {
 
   it("leaves a local ticket's compaction to Pi (the local model), so its transcript never reaches the cloud tier", async () => {
     const { app, calls, run } = await setup();
-    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
-    const id = app.activeTaskId()!;
+    const id = (await addTask(app, "local")).taskId;
+    app.store.setActive(id);
     const running = (tier: string) => (state: TaskState): TaskState => ({ ...state, localMode: true, build: { branch: "b", base: "main", baseSha: "a", currentTicket: "01" }, ticketRuns: { "01": { status: "in-progress", tier, attempts: 1 } } }) as never;
     await app.store.update(id, "local ticket", running("local"));
     expect(await run()).toBeUndefined();
@@ -321,7 +321,7 @@ describe("session_before_compact", () => {
     const { app, calls, run } = await setup();
     app.store.appendLedger({
       id: "big", at: "2026-10-14T10:00:00.000Z", taskId: "session", phase: "IDLE", provider: "anthropic", model: "claude-sonnet-5-5", tier: "interactive",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     await expect(run()).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
@@ -339,7 +339,7 @@ describe("input budget gate", () => {
   const spend = (app: Workflow, usd: number) =>
     app.store.appendLedger({
       id: `spend-${usd}`, at: "2026-10-14T10:00:00.000Z", taskId: "session", phase: "IDLE", provider: "anthropic", model: "claude-sonnet-5-5", tier: "interactive",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: usd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: usd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
 
   async function setup() {

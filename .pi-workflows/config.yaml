@@ -32,7 +32,6 @@ providers:
   local:
     type: openai-compatible
     baseUrl: http://127.0.0.1:11434/v1
-    model: qwen2.5-coder:7b
 
 # Candidates per tier. With routing.selection: ordered (the default) the first usable entry runs and the
 # rest are fallbacks, in this order. With selection: adaptive the router picks by learned expected cost per
@@ -56,8 +55,6 @@ providers:
 # Nothing classifies by model: the planner (Opus) rates complexity, risk and security in plan_spec, and a keyword scan
 # can raise the security flag. Foundry and Vercel serve chat models such as the Astra deployment below.
 tiers:
-  deterministic:        # used only when the local server answers; otherwise the plan's literal edits apply
-    - { provider: local, model: "qwen2.5-coder:7b" }
   cheap:                # compaction summaries (session.compactionTier)
     - { provider: anthropic, model: claude-haiku-5-5 }
   batch:                # standalone jobs the extension runs by itself, outside any conversation (cut-file summaries)
@@ -162,7 +159,7 @@ proprietaryCode: false
 # listed at 0 on purpose; keep the rows so the candidates are explicit. A subscription can still
 # bill extra usage, which this file cannot see.
 pricing:
-  - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
+  - { provider: local, model: "qwen3.5:9b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   # Subscription-backed (0 marginal; placeholder)
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }

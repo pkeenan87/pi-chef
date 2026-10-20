@@ -71,13 +71,12 @@ export function record(
   outcome: CostRecord["outcome"],
   retries: number,
   reason: string,
-  estimatedUsd: number | null = null,
 ): CostRecord {
   // Any call while a /build ticket runs (compaction, web_search, a batch summary) counts toward that ticket's cost.
   const running = ctx.store.load(taskId)?.build?.currentTicket;
   if (running && !/ ticket \S+$/.test(reason)) reason = `${reason} · ticket ${running}`;
-  const entry = buildCostRecord({ provider, model, phase, taskId, tier, usage, outcome, retries, reason, estimatedUsd }, ctx.config.pricing, ctx.now(), ctx.id());
-  // Literal edits and other model-free work report zero tokens: that is a known zero charge, not an unknown one.
+  const entry = buildCostRecord({ provider, model, phase, taskId, tier, usage, outcome, retries, reason }, ctx.config.pricing, ctx.now(), ctx.id());
+  // Model-free work (a failure before any request) reports zero tokens: that is a known zero charge, not an unknown one.
   if (usage.input === 0 && usage.output === 0 && entry.actualUsd === null) {
     entry.actualUsd = 0;
     entry.usageKnown = true;
@@ -99,7 +98,7 @@ export function remember(
   retries: number,
   reason: string,
 ): CostRecord {
-  return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason, state.routing?.estimatedUsd ?? null);
+  return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason);
 }
 
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {

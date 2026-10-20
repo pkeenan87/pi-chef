@@ -1,6 +1,6 @@
 import path from "node:path";
 import { loadConfig, modelLabel, type WorkflowConfig } from "../config.js";
-import { WorkflowError, type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
+import { type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
 import { GitWorkspace } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
@@ -8,24 +8,23 @@ import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { runAz } from "../providers/runtime.js";
 import { advisor } from "./advisor.js";
-import type { QuotaUsage } from "../cost/quota.js";
 import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
-import { budgetRemainingUsd, budgetState, checkBudget, quotaState, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
+import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import { active, type WorkflowContext } from "./context.js";
 import { statusLine } from "./state-label.js";
 import { displayName } from "./tasks.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
-import { adviceForTickets, clearConsult, consultPlan } from "./plan-consult.js";
-import { checkTickets, commitTickets, previewPlan, requireTicketStage } from "./ticket-plan.js";
+import { adviceForTickets, consultPlan } from "./plan-consult.js";
+import { checkTickets, commitTickets, requireTicketStage } from "./ticket-plan.js";
 import { presentPendingPlan } from "./present-plan.js";
 import { plans, taskNames } from "./plans.js";
-import { approveDraft, plan, route, showPlan } from "./planning.js";
+import { approveDraft, showPlan } from "./planning.js";
 import { ProgressIndicator } from "./progress.js";
 import { review } from "./review.js";
 import { auth, cost, status } from "./reports.js";
-import { announce, availability, decide } from "./routing.js";
+import { availability, decide } from "./routing.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
 
 export type { PlanReviewFn, PlanReviewRequest, WorkflowBinding, WorkflowOptions } from "./types.js";
@@ -128,35 +127,16 @@ export class Workflow {
     return budgetRemainingUsd(this.ctx, taskId);
   }
 
-  /** Subscription quota use per provider, for shadow-price ranking. */
-  quotaUsage(): QuotaUsage {
-    return quotaState(this.ctx);
-  }
-
   /** decideRoute with live availability, remaining budget, and learned per-model metrics. Does not announce. */
   decide(
     classification: AcceptedClassification,
-    purpose: "plan" | "implement" | "review" | "preview",
+    purpose: "implement" | "review",
     extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
   ): Promise<RoutingDecision> {
     return decide(this.ctx, classification, purpose, extra);
   }
 
-  /** Shows the chosen model in the status line and records a `route` event in the task log. */
-  announce(
-    taskId: string | undefined,
-    purpose: string,
-    decision: Parameters<typeof announce>[3],
-    setStatus?: (text: string) => void,
-  ): Promise<void> {
-    return announce(this.ctx, taskId, purpose, decision, setStatus);
-  }
-
-  plan(request: string): Promise<CommandResult> {
-    return plan(this.ctx, request);
-  }
-
-  /** `/plan`: starts or resumes the model-run interview (or drafts directly for a literal ```tasks request). */
+  /** `/plan`: starts or resumes the model-run interview. */
   startPlan(request: string, options: { noQuestions?: boolean; local?: boolean } = {}): Promise<CommandResult> {
     return startPlan(this.ctx, request, options);
   }
@@ -169,10 +149,6 @@ export class Workflow {
   /** "plan" while a /plan interview or ticket stage is running (read-only tools apply), else undefined. */
   planningStage(): "interview" | "tickets" | undefined {
     return activePlanning(this.ctx)?.task.planning?.stage;
-  }
-
-  planningStatus(): string | undefined {
-    return planningStatusText(this.ctx);
   }
 
   /** The persistent status line for the stored active task (no git call), or undefined to clear it. */
@@ -224,12 +200,6 @@ export class Workflow {
   adviceForTickets(resolution: string | undefined, tickets: Ticket[], reconsultWaived?: boolean) {
     return adviceForTickets(this.ctx, resolution, tickets, reconsultWaived);
   }
-
-  /** The draft was sent back for changes: the revised draft may consult again. */
-  clearConsult() {
-    return clearConsult(this.ctx);
-  }
-
   checkTickets(input: unknown) {
     return checkTickets(this.ctx, input);
   }
@@ -248,12 +218,6 @@ export class Workflow {
   presentPendingPlan(): Promise<void> {
     return presentPendingPlan(this.ctx);
   }
-
-  /** The full plan these tickets would produce, for review before they are saved. */
-  previewPlan(tickets: Parameters<typeof previewPlan>[1], advisorReview?: Parameters<typeof previewPlan>[2]): string {
-    return previewPlan(this.ctx, tickets, advisorReview);
-  }
-
   /** Approves the active draft: freezes plan.vN.approved.json. The choice was made on a review screen. */
   approveDraft(): Promise<CommandResult> {
     return approveDraft(this.ctx);
@@ -324,9 +288,6 @@ export class Workflow {
     return review(this.ctx);
   }
 
-  route(task: string): Promise<CommandResult> {
-    return route(this.ctx, task);
-  }
 
   advisor(question: string): Promise<CommandResult> {
     return advisor(this.ctx, question);
@@ -379,8 +340,4 @@ export class Workflow {
   showStatus(text: string): void {
     this.ctx.status?.(text);
   }
-}
-
-export function workflowFromCwd(cwd: string, auth: AuthProbe, extras: Partial<WorkflowOptions> = {}): Workflow {
-  return new Workflow({ cwd, auth, ...extras });
 }

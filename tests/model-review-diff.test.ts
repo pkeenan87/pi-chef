@@ -3,7 +3,7 @@ import type { PlanDocument } from "../src/domain.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
 import { MODEL_REVIEW_SYSTEM, omitLockfiles, runModelReview } from "../src/review/model-review.js";
 
-const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false };
+const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], groups: [], overlap: [], securitySensitive: false };
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, requests: 1 };
 
 const lockBody = ['+    "node_modules/@octokit/auth-token": {', '+      "version": "4.0.0"', "+    },", '-    "node_modules/old": {'].join("\n");

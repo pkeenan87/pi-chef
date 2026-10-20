@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AcceptedClassification } from "../src/domain.js";
-import { decideRoute, nextTier, TICKET_LADDER } from "../src/router/policy.js";
+import { decideRoute, needsConfirmation, nextTier, TICKET_LADDER } from "../src/router/policy.js";
 import { modelMetricKey } from "../src/domain.js";
 import { tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const classification = (extra: Partial<AcceptedClassification> = {}): AcceptedClassification => ({
-  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], recommended_tier: "standard", reason_codes: [], source: "planner", ...extra,
+  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], reason_codes: [], source: "planner", ...extra,
 });
 const rng = () => 0.5;
 const opusOnly = () => {
@@ -41,7 +41,8 @@ describe("ticket tiers in decideRoute", () => {
   it("does not raise security-sensitive work above its ticket's difficulty tier, but still asks for approval", () => {
     const config = opusOnly();
     const decision = decideRoute(classification({ required_capabilities: ["auth"] }), config, {}, { purpose: "implement", ticketTier: "ticketLow", rng, strictAvailability: true });
-    expect(decision).toMatchObject({ tier: "ticketLow", model: "grok-4.7", requireHumanApproval: true });
+    expect(decision).toMatchObject({ tier: "ticketLow", model: "grok-4.7" });
+    expect(needsConfirmation(classification({ required_capabilities: ["auth"] }), config)).toBe(true);
     expect(decision.reason).not.toContain("ticket_sensitive_floor");
   });
 
@@ -78,7 +79,7 @@ describe("ticket tiers in decideRoute", () => {
   });
 });
 
-describe("/status and /route show who does what", () => {
+describe("/status shows who does what", () => {
   it("/status lists the session, compaction, review and ticket models", async () => {
     const app = workflow(await tempRepo(), { config: opusOnly() });
     const text = (await app.status()).text;
@@ -87,12 +88,5 @@ describe("/status and /route show who does what", () => {
     expect(text).toMatch(/\| ticketMedium \| anthropic\/claude-sonnet-5-5/);
     expect(text).toMatch(/\| ticketHigh \| openai\/gpt-6\.1-sol/);
     expect(text).toMatch(/\| premium \| anthropic\/claude-opus-5-5/);
-  });
-
-  it("/route returns the routing summary", async () => {
-    const app = workflow(await tempRepo(), { config: opusOnly() });
-    const result = await app.route("add a retry counter to the parser");
-    expect(result.ok, result.text).toBe(true);
-    expect(JSON.parse(result.text).routing).toMatchObject({ session: "anthropic/claude-opus-5-5", tickets: { low: ["xai/grok-4.7"], high: ["openai/gpt-6.1-sol"] } });
   });
 });

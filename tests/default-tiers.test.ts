@@ -7,7 +7,7 @@ import type { AcceptedClassification } from "../src/domain.js";
 import { decideRoute } from "../src/router/policy.js";
 
 const classification = (): AcceptedClassification => ({
-  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], recommended_tier: "standard", reason_codes: [], source: "planner", ...{},
+  task_type: "feature", complexity: "medium", risk: "medium", required_capabilities: [], reason_codes: [], source: "planner", ...{},
 });
 const rng = () => 0.5;
 
@@ -60,7 +60,6 @@ describe("built-in tiers", () => {
   ticketMedium: [{ provider: openai, model: gpt-x }]
   ticketHigh: [{ provider: openai, model: gpt-x }]
   advisor: [{ provider: openai, model: gpt-x }]
-  deterministic: [{ provider: openai, model: gpt-x }]
 providers:
   openai: { type: openai, auth: account-login }
 pricing:

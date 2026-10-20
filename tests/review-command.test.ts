@@ -318,7 +318,6 @@ describe("/review after /build", () => {
     const after = t.app.store.load(t.taskId)!;
     expect(after.phase).toBe("IMPLEMENTING");
     expect(after.review?.passed).toBe(true);
-    expect(after.pullRequest).toBeUndefined();
     const dir = t.app.store.taskDir(t.taskId);
     expect(existsSync(path.join(dir, "reports", "review.json"))).toBe(true);
     expect(readFileSync(path.join(dir, "reports", "review.md"), "utf8")).toContain("## Review passed");

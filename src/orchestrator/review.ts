@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
-import { ticketDifficulty, type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewReport, type ReviewStage, type RoutingDecision, type TaskState, type TierCandidate } from "../domain.js";
+import { ticketDifficulty, type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewStage, type RoutingDecision, type TaskState, type TierCandidate } from "../domain.js";
 import { availableAdvisors, reviewAdvisorsFor } from "../review/advisors.js";
 import { runModelReview, unreviewedDiff } from "../review/model-review.js";
 import { advisorsHeader } from "../review/review-resolution.js";
@@ -258,7 +258,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
     runner: ctx.checkRunner,
     planAcceptance: plan?.acceptance ?? [],
   });
-  const reviewPlan: PlanDocument = plan ?? { version: 0, createdAt: iso(ctx), summary: `Ad-hoc changes on ${branch}.`, risks: [], acceptance: [], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false };
+  const reviewPlan: PlanDocument = plan ?? { version: 0, createdAt: iso(ctx), summary: `Ad-hoc changes on ${branch}.`, risks: [], acceptance: [], groups: [], overlap: [], securitySensitive: false };
   const modelReview = await modelPass(ctx, taskId, classification.task_type, reviewPlan, decision, report.diff ?? diff, !!pick?.advisors.length);
   if (modelReview && pick) {
     const rule = { reason: pick.reason, planned: pick.advisors.map((item) => item.model) };

@@ -26,7 +26,7 @@ export function isAccountProvider(value: string): value is AccountProvider {
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /** The general ladder: cheapest to strongest. */
-export const BASE_TIERS = ["deterministic", "cheap", "standard", "premium"] as const;
+export const BASE_TIERS = ["cheap", "standard", "premium"] as const;
 /** /build ticket tiers, by the difficulty the planner assigns. A failed ticket climbs low, medium, high, then premium. */
 export const TICKET_TIERS = ["ticketLow", "ticketMedium", "ticketHigh"] as const;
 export type TicketTier = (typeof TICKET_TIERS)[number];
@@ -35,7 +35,6 @@ export type TicketTier = (typeof TICKET_TIERS)[number];
  * pass in three review rounds is finished by premium (Opus), the only step up (`LOCAL_LADDER`).
  */
 export const LOCAL_TIERS = ["local"] as const;
-export type LocalTier = (typeof LOCAL_TIERS)[number];
 /**
  * Standalone jobs the extension runs by itself, outside any conversation (for example the one-line summaries of files a
  * diff clip cut). Not part of any ladder; a config without it runs them on `cheap`.
@@ -59,12 +58,12 @@ export interface LocalScope {
   localMode?: boolean;
   localDifficulties?: Difficulty[];
 }
-export function buildsLocally(scope: LocalScope | undefined, ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): boolean {
+export function buildsLocally(scope: LocalScope | undefined, ticket: { difficulty?: Difficulty; suggestedTier?: string }): boolean {
   if (scope?.localMode !== true) return false;
   return scope.localDifficulties === undefined || scope.localDifficulties.includes(ticketDifficulty(ticket));
 }
 /** Difficulty of a ticket from an old plan that only has suggestedTier: deterministic/cheap low, standard medium, premium high. */
-export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: Tier }): Difficulty {
+export function ticketDifficulty(ticket: { difficulty?: Difficulty; suggestedTier?: string }): Difficulty {
   if (ticket.difficulty) return ticket.difficulty;
   switch (ticket.suggestedTier) {
     case "deterministic":
@@ -125,7 +124,6 @@ export interface Classification {
   complexity: Complexity;
   risk: Complexity;
   required_capabilities: string[];
-  recommended_tier: Tier;
   reason_codes: string[];
 }
 
@@ -133,17 +131,11 @@ export interface AcceptedClassification extends Classification {
   source: "keywords" | "planner";
 }
 
-export interface PlanEdit {
-  path: string;
-  content: string;
-}
-
 export interface PlanGroup {
   id: string;
   summary: string;
   files: string[];
   dependsOn: string[];
-  edits: PlanEdit[];
 }
 
 /** One vertical slice of work that fits a single fresh context window. */
@@ -159,8 +151,8 @@ export interface Ticket {
   blockedBy: string[];
   /** How hard the ticket is; picks the model tier for the first attempt. Wins over suggestedTier. */
   difficulty?: Difficulty;
-  /** Read from old plans only; use ticketDifficulty(). */
-  suggestedTier?: Tier;
+  /** Read from old plans only (a tier name, "deterministic" included); use ticketDifficulty(). */
+  suggestedTier?: string;
   /** Ownership hints, not a hard allowlist. */
   files?: string[];
   estimatedContextTokens: number;
@@ -177,7 +169,6 @@ export interface PlanDocument {
   summary: string;
   risks: string[];
   acceptance: string[];
-  estimatedUsd: number | null;
   groups: PlanGroup[];
   overlap: string[];
   securitySensitive: boolean;
@@ -192,19 +183,14 @@ export interface RoutingDecision {
   provider: ProviderId | "none";
   model: string;
   reason: string[];
-  estimatedUsd: number | null;
-  expectedUsd: number | null;
-  rateUsdPerMillion: number | null;
-  requireHumanApproval: boolean;
-  reviewTier: Tier;
   escalations: number;
   circuitOpen: boolean;
-  /** The selected candidate, when the tier has a model. Absent for the literal-edit path. */
+  /** The selected candidate. Absent when the route is blocked. */
   candidate?: TierCandidate;
   /** One line on why this candidate won (or why none could be used). */
   selectionReason?: string;
   considered?: ConsideredCandidate[];
-  /** Set when no model can serve the tier. Callers must stop instead of running literal edits. */
+  /** Set when no model can serve the tier: the caller stops and says why. */
   blocked?: string;
 }
 
@@ -229,7 +215,6 @@ export interface CostRecord {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
-  estimatedUsd: number | null;
   actualUsd: number | null;
   /** Pi's own cost figure for the call (its list-price pricing), kept for information when the config priced the call differently. */
   listPriceUsd?: number | null;
@@ -352,31 +337,6 @@ export interface ReviewReport {
   elapsedMs?: number;
   /** Time per stage, and spend for the model stages (from the ledger entries this review recorded). */
   stages?: { setup?: ReviewStage; checks?: ReviewStage; model?: ReviewStage; advisors?: ReviewStage };
-}
-
-export interface WorkerArtifact {
-  summary: string;
-  changedFiles: string[];
-  testResults: CheckEvidence[];
-  unresolvedIssues: string[];
-  usage: TokenUsage;
-}
-
-export interface PullRequestRef {
-  number: number;
-  url: string;
-  branch: string;
-  base: string;
-  headSha: string;
-  baseSha: string;
-}
-
-export interface AttemptRecord {
-  tier: Tier;
-  provider: string;
-  model: string;
-  outcome: "success" | "failure";
-  at: string;
 }
 
 /** Where an interview-driven /plan stands while the task is in PLANNING (or PAUSED from it). */
@@ -568,18 +528,14 @@ export interface TaskState {
   updatedAt: string;
   request: string;
   classification?: AcceptedClassification;
-  routing?: RoutingDecision;
   plan?: PlanDocument;
   approvedVersion?: number;
   /** When the plan was approved (ISO); shown by /status. */
   approvedAt?: string;
-  publishApproved: boolean;
   /** Per-ticket progress, keyed by ticket id. */
   ticketRuns?: Record<string, TicketRun>;
   build?: BuildRecord;
   review?: ReviewReport;
-  pullRequest?: PullRequestRef;
-  attempts: AttemptRecord[];
   blockedReason?: string;
   phaseEnteredAt: string;
 }

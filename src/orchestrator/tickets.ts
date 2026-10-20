@@ -150,7 +150,9 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     const model = typeof item.estimatedContextTokens === "number" && Number.isFinite(item.estimatedContextTokens) && item.estimatedContextTokens > 0 ? item.estimatedContextTokens : undefined;
     if (model === undefined) errors.push(`Ticket ${label}: estimatedContextTokens must be a positive number.`);
     const tier = typeof item.suggestedTier === "string" ? item.suggestedTier : undefined;
-    if (tier !== undefined && !isTier(tier)) errors.push(`Ticket ${label}: suggestedTier "${tier}" is not a tier.`);
+    // Old plans only: any tier name, including the retired "deterministic".
+    const oldTier = (value: string) => isTier(value) || value === "deterministic";
+    if (tier !== undefined && !oldTier(tier)) errors.push(`Ticket ${label}: suggestedTier "${tier}" is not a tier.`);
     const difficulty = typeof item.difficulty === "string" ? item.difficulty : undefined;
     if (difficulty !== undefined && !isDifficulty(difficulty)) errors.push(`Ticket ${label}: difficulty "${difficulty}" must be one of ${DIFFICULTIES.join(", ")}.`);
     const files = strings(item.files).map((file) => file.replace(/^\.\//, ""));
@@ -177,7 +179,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       acceptanceCriteria,
       blockedBy: strings(item.blockedBy),
       ...(difficulty && isDifficulty(difficulty) ? { difficulty } : {}),
-      ...(tier && isTier(tier) ? { suggestedTier: tier } : {}),
+      ...(tier && oldTier(tier) ? { suggestedTier: tier } : {}),
       ...(files.length ? { files } : {}),
       estimatedContextTokens: model ?? 0,
       ...(checks.length ? { checks } : {}),
@@ -359,11 +361,4 @@ export function tickCriteria(markdown: string, met: boolean[]): string {
     return done ? `${lead}[x]` : `${lead}[${mark}]`;
   });
   return markdown.slice(0, start) + block + markdown.slice(end);
-}
-
-/** Adds a one-line warning block under the title area once (idempotent on the exact text). */
-export function addTicketWarning(markdown: string, warning: string): string {
-  const line = `> Warning: ${warning}`;
-  if (markdown.includes(line)) return markdown;
-  return markdown.replace(/^(# .*\n)/m, `$1\n${line}\n`);
 }

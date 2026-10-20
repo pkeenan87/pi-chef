@@ -19,12 +19,6 @@ export function clipMiddle(text: string, maxChars: number): string {
   return `${text.slice(0, half)}${marker}${text.slice(text.length - half)}`;
 }
 
-/** The tier a rating points at: premium for sensitive or high-complexity work, standard for medium, cheap for low. */
-function tierFor(complexity: Complexity, sensitive: boolean): AcceptedClassification["recommended_tier"] {
-  if (sensitive || complexity === "high") return "premium";
-  return complexity === "medium" ? "standard" : "cheap";
-}
-
 const SECURITY_CAPABILITIES = ["security-sensitive", "auth"];
 
 /** True when the classification marks the task security-sensitive. */
@@ -45,7 +39,6 @@ export function classifyKeywords(text: string, reason = "keyword_scan"): Accepte
       complexity: "high",
       risk: "high",
       required_capabilities: [...SECURITY_CAPABILITIES],
-      recommended_tier: "premium",
       reason_codes: [reason, strong ? "security_keywords_strong" : "security_keywords_weak"],
       source: "keywords",
     };
@@ -55,7 +48,6 @@ export function classifyKeywords(text: string, reason = "keyword_scan"): Accepte
     complexity: "medium",
     risk: "medium",
     required_capabilities: [],
-    recommended_tier: "standard",
     reason_codes: [reason],
     source: "keywords",
   };
@@ -86,7 +78,6 @@ export function plannerClassification(rating: PlannerRating, scanned: string): A
     complexity: rating.complexity,
     risk: sensitive ? "high" : rating.risk,
     required_capabilities: sensitive ? [...SECURITY_CAPABILITIES] : [],
-    recommended_tier: tierFor(rating.complexity, sensitive),
     reason_codes: [
       "planner",
       ...(hit && !rating.securitySensitive ? ["security_keyword_override", "security_keywords_strong"] : rating.securitySensitive ? ["planner_security_sensitive"] : []),

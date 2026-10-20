@@ -14,8 +14,6 @@ function blank(id: string): TaskState {
     updatedAt: at,
     phaseEnteredAt: at,
     request: "ship it sk-live-SECRETVALUE123456",
-    publishApproved: false,
-    attempts: [],
   };
 }
 

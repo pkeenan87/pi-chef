@@ -1,3 +1,4 @@
+import { needsConfirmation } from "../src/router/policy.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -71,7 +72,7 @@ async function planning(extras: { noQuestions?: boolean; request?: string } = {}
 const specParams = { summary: "Retry failed ingests.", context: "src/ingest.ts parses and drops failures.", approach: "Wrap parse() in retryParse() with a fixed backoff.", changes: [{ path: "src/ingest.ts", change: "add retryParse(input, attempts)" }], reuse: ["sleep() in src/util.ts"], verification: ["npm test"], decisions: [{ question: "Backoff?", answer: "Fixed", rationale: "simple" }], assumptions: ["Node 20"], outOfScope: ["Metrics"], risks: ["Duplicate events"] };
 
 describe("plan interview start", () => {
-  it("creates a PLANNING task, persists interview.json, records a route event, and starts a model turn", async () => {
+  it("creates a PLANNING task, persists interview.json, and starts a model turn, routing nothing", async () => {
     const { app, turns, status } = await planning();
     const task = app.store.load(app.activeTaskId()!)!;
     expect(task.phase).toBe("PLANNING");
@@ -81,15 +82,15 @@ describe("plan interview start", () => {
     expect(turns[0]).toContain("Add retry to the ingest parser");
     expect(status.at(-1)).toBe("plan · interview round 1 (0/7 questions)");
     const events = readFileSync(path.join(app.store.taskDir(task.taskId), "events.jsonl"), "utf8");
-    expect(events).toContain('"purpose":"interview"');
+    // Planning runs on the session model: no route is picked or logged for it.
+    expect(events).not.toContain('"type":"route"');
     expect(app.planningPrompt()).toContain("Never more than 7");
   });
 
-  it("drafts directly for a literal tasks block or when the host cannot start a turn", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd);
-    expect((await app.startPlan("Rename a variable")).ok).toBe(true);
-    expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
+  it("needs a session that can start a model turn", async () => {
+    const app = workflow(await tempRepo());
+    expect((await app.startPlan("Rename a variable")).code).toBe("NO_SESSION");
+    expect(app.activeTaskId()).toBeUndefined();
   });
 
   it("parses --no-questions from the /plan command", async () => {
@@ -299,20 +300,19 @@ describe("plan_tickets", () => {
       const result = await call(spec, { ...specParams, ...rating }, headless);
       expect(textOf(result)).toContain("Rated low complexity, low risk.");
       const after = app.store.load(app.activeTaskId()!)!;
-      expect(after.classification).toMatchObject({ source: "planner", complexity: "low", risk: "low", task_type: "general", recommended_tier: "cheap", required_capabilities: [] });
+      expect(after.classification).toMatchObject({ source: "planner", complexity: "low", risk: "low", task_type: "general", required_capabilities: [] });
       expect(after.classification!.reason_codes).toContain("reason: one parser wrapper");
-      expect(after.routing?.tier).toBe("cheap");
       const status = (await app.status()).text;
-      expect(status).toContain("| Rating | planner: low complexity, low risk · one parser wrapper |");
+      expect(status).toContain("| Rating | low risk (planner: one parser wrapper) |");
     });
 
     it("raises risk and the flag when the planner says security-sensitive", async () => {
       const { app, spec } = await planning();
       await call(spec, { ...specParams, ...rating, securitySensitive: true, risk: "medium" }, headless);
       const task = app.store.load(app.activeTaskId()!)!;
-      expect(task.classification).toMatchObject({ task_type: "security", risk: "high", recommended_tier: "premium", source: "planner" });
+      expect(task.classification).toMatchObject({ task_type: "security", risk: "high", source: "planner" });
       expect(task.classification!.required_capabilities).toContain("security-sensitive");
-      expect(task.routing?.requireHumanApproval).toBe(true);
+      expect(needsConfirmation(task.classification!, app.config)).toBe(true);
     });
 
     it("does not let the planner lower a keyword hit in the request", async () => {

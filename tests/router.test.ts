@@ -1,67 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { testConfig } from "./helpers.js";
 import { classifyKeywords, clipMiddle, isSecuritySensitive, plannerClassification } from "../src/router/classify.js";
-import { decideRoute, nextTier } from "../src/router/policy.js";
+import { decideRoute, needsConfirmation, needsPremiumReview, nextTier, type SuccessTable } from "../src/router/policy.js";
 
 describe("classification and policy", () => {
-  it("starts implementation low, escalates once, and stops at the cap", () => {
-    const config = testConfig();
-    const mechanical = decideRoute(
-      { task_type: "general", complexity: "low", risk: "low", required_capabilities: [], recommended_tier: "cheap", reason_codes: [], source: "planner" },
-      config,
-      {},
-      { purpose: "implement" },
-    );
-    expect(mechanical.tier).toBe("cheap");
-    const escalated = decideRoute(
-      { task_type: "mechanical", complexity: "low", risk: "low", required_capabilities: [], recommended_tier: "deterministic", reason_codes: [], source: "keywords" },
-      config,
-      {},
-      { purpose: "implement", failedTier: "deterministic", escalations: 1 },
-    );
-    expect(escalated.tier).toBe("cheap");
-    expect(nextTier("premium", "premium")).toBeUndefined();
-    const security = decideRoute(
-      { task_type: "security", complexity: "high", risk: "high", required_capabilities: ["auth", "secrets"], recommended_tier: "premium", reason_codes: [], source: "keywords" },
-      config,
-      {},
-      { purpose: "review" },
-    );
-    expect(security.requireHumanApproval).toBe(true);
-    expect(security.reviewTier).toBe("premium");
-    const open = decideRoute(
-      { task_type: "security", complexity: "high", risk: "high", required_capabilities: ["auth"], recommended_tier: "premium", reason_codes: [], source: "keywords" },
-      config,
-      { security: { standard: { success: 0, failure: 3 } } },
-      { purpose: "implement" },
-    );
-    // standard is open but premium is healthy, so the escalated route is usable.
-    expect(open.tier).toBe("premium");
-    expect(open.circuitOpen).toBe(false);
-    expect(open.reason).toContain("circuit_escalated_from_standard");
-  });
-
-  const base = { task_type: "general", complexity: "medium" as const, risk: "low" as const, required_capabilities: [], recommended_tier: "cheap" as const, reason_codes: [], source: "planner" as const };
+  const base = { task_type: "general", complexity: "medium" as const, risk: "low" as const, required_capabilities: [], reason_codes: [], source: "planner" as const };
   const at = new Date("2026-10-14T12:00:00Z");
+
+  it("escalates a failed tier one step, stops at the cap, and flags security work for confirmation", () => {
+    const config = testConfig();
+    expect(decideRoute(base, config, {}, { purpose: "implement", failedTier: "cheap", at }).tier).toBe("standard");
+    expect(nextTier("premium", "premium")).toBeUndefined();
+    const security = { task_type: "security", complexity: "high" as const, risk: "high" as const, required_capabilities: ["auth", "secrets"], reason_codes: [], source: "keywords" as const };
+    expect(needsPremiumReview(security, config)).toBe(true);
+    expect(needsConfirmation(security, config)).toBe(true);
+    expect(decideRoute(security, config, {}, { purpose: "review", at }).tier).toBe("premium");
+    // High risk alone asks for confirmation, but premium review is only for the configured categories.
+    expect(needsConfirmation({ ...base, risk: "high", required_capabilities: ["perf"] }, config)).toBe(true);
+    expect(needsPremiumReview({ ...base, risk: "high", required_capabilities: ["perf"] }, config)).toBe(false);
+    expect(needsConfirmation(base, config)).toBe(false);
+  });
 
   it("opens the circuit per tier within a time window", () => {
     const config = testConfig();
     const stamp = (minutesAgo: number, ok: boolean) => ({ at: new Date(at.getTime() - minutesAgo * 60_000).toISOString(), ok });
+    const route = (table: SuccessTable, cfg = config) => decideRoute(base, cfg, table, { purpose: "implement", ticketTier: "cheap", at });
     const failing = { general: { cheap: { success: 5, failure: 3, recent: [stamp(30, false), stamp(20, false), stamp(10, false)] } } };
-    const open = decideRoute(base, config, failing, { purpose: "implement", at });
+    const open = route(failing);
+    // A failing tier is skipped: the ticket moves up to a healthy one, which is not a stall.
     expect(open.circuitOpen).toBe(false);
     expect(open.tier).toBe("standard");
     expect(open.reason).toContain("circuit_escalated_from_cheap");
     // R1: when the final tier is open too (nothing healthy above it), the circuit is reported open.
     const capped = testConfig();
     capped.routing.maxTier = "cheap";
-    expect(decideRoute(base, capped, failing, { purpose: "implement", at }).circuitOpen).toBe(true);
-    const stale = { general: { cheap: { success: 5, failure: 3, recent: [stamp(300, false), stamp(290, false), stamp(280, false)] } } };
-    expect(decideRoute(base, config, stale, { purpose: "implement", at }).circuitOpen).toBe(false);
-    const mixed = { general: { cheap: { success: 5, failure: 3, recent: [stamp(30, false), stamp(20, true), stamp(10, false)] } } };
-    expect(decideRoute(base, config, mixed, { purpose: "implement", at }).circuitOpen).toBe(false);
-    const otherTier = { general: { premium: { success: 0, failure: 9 } } };
-    expect(decideRoute(base, config, otherTier, { purpose: "implement", at }).circuitOpen).toBe(false);
+    expect(route(failing, capped).circuitOpen).toBe(true);
+    expect(route({ general: { cheap: { success: 5, failure: 3, recent: [stamp(300, false), stamp(290, false), stamp(280, false)] } } }).circuitOpen).toBe(false);
+    expect(route({ general: { cheap: { success: 5, failure: 3, recent: [stamp(30, false), stamp(20, true), stamp(10, false)] } } }).circuitOpen).toBe(false);
+    expect(route({ general: { premium: { success: 0, failure: 9 } } }).circuitOpen).toBe(false);
   });
 
   it("skips escalation tiers that resolve to the same provider and model", () => {
@@ -73,28 +49,13 @@ describe("classification and policy", () => {
     expect(decideRoute(base, config, {}, { purpose: "implement", failedTier: "cheap", at }).tier).toBe("cheap");
   });
 
-  it("never routes an implementation to the deterministic tier from a classification", () => {
-    const config = testConfig();
-    expect(decideRoute({ ...base, complexity: "low" }, config, {}, { purpose: "implement", at }).tier).toBe("cheap");
-    expect(decideRoute({ ...base, complexity: "low", task_type: "mechanical", recommended_tier: "deterministic" }, config, {}, { purpose: "implement", at }).tier).toBe("cheap");
-  });
-
-  it("limits premium review to configured categories and prices a 4:1 token mix", () => {
+  it("routes review to routing.reviewTier, and the premium-review categories to premium", () => {
     const config = testConfig();
     const risky = { ...base, risk: "high" as const, required_capabilities: ["perf"] };
-    // The review pass routes to routing.reviewTier (premium by default).
-    const decision = decideRoute(risky, config, {}, { purpose: "review", at });
-    expect(decision.requireHumanApproval).toBe(true);
-    expect(decision.tier).toBe("premium");
+    expect(decideRoute(risky, config, {}, { purpose: "review", at }).tier).toBe("premium");
     config.routing.reviewTier = "standard";
-    const lowered = decideRoute(risky, config, {}, { purpose: "review", at });
-    expect(lowered.tier).toBe("standard");
-    expect(lowered.reviewTier).toBe("standard");
-    const auth = decideRoute({ ...base, required_capabilities: ["auth"] }, config, {}, { purpose: "review", at });
-    expect(auth.tier).toBe("premium");
-    const cheap = decideRoute(base, config, {}, { purpose: "preview", at });
-    // 6400 input at 0.15 + 1600 output at 0.6 per million, success prior 0.5
-    expect(cheap.expectedUsd).toBeCloseTo(((6400 * 0.15 + 1600 * 0.6) / 1e6) / 0.5, 8);
+    expect(decideRoute(risky, config, {}, { purpose: "review", at }).tier).toBe("standard");
+    expect(decideRoute({ ...base, required_capabilities: ["auth"] }, config, {}, { purpose: "review", at }).tier).toBe("premium");
   });
 
   it("does not flag common words as security-sensitive", () => {
@@ -103,23 +64,23 @@ describe("classification and policy", () => {
     expect(classifyKeywords("fix the author field").task_type).toBe("general");
     expect(classifyKeywords("rotate the oauth credentials").task_type).toBe("security");
     expect(classifyKeywords("token handling in prod").task_type).toBe("security");
-    expect(classifyKeywords("rename a typo in README")).toMatchObject({ task_type: "general", recommended_tier: "standard", source: "keywords" });
+    expect(classifyKeywords("rename a typo in README")).toMatchObject({ task_type: "general", source: "keywords" });
     expect(classifyKeywords("anything")).not.toHaveProperty("confidence");
   });
 
   it("keyword scan marks security work high risk and premium", () => {
     const hit = classifyKeywords("rotate the oauth credentials");
-    expect(hit).toMatchObject({ risk: "high", complexity: "high", recommended_tier: "premium", source: "keywords" });
+    expect(hit).toMatchObject({ risk: "high", complexity: "high", source: "keywords" });
     expect(isSecuritySensitive(hit)).toBe(true);
     expect(isSecuritySensitive(classifyKeywords("add a retry counter"))).toBe(false);
   });
 
   it("takes complexity and risk from the planner", () => {
     const rated = plannerClassification({ complexity: "low", risk: "low", securitySensitive: false, reason: "one-line config change" }, "Add a retry counter to the parser");
-    expect(rated).toMatchObject({ task_type: "general", complexity: "low", risk: "low", recommended_tier: "cheap", source: "planner", required_capabilities: [] });
+    expect(rated).toMatchObject({ task_type: "general", complexity: "low", risk: "low", source: "planner", required_capabilities: [] });
     expect(rated.reason_codes).toEqual(["planner", "reason: one-line config change"]);
-    expect(plannerClassification({ complexity: "high", risk: "medium", securitySensitive: false }, "Rework the scheduler")).toMatchObject({ complexity: "high", recommended_tier: "premium" });
-    expect(plannerClassification({ complexity: "medium", risk: "low", securitySensitive: true }, "Add a retry counter")).toMatchObject({ task_type: "security", risk: "high", recommended_tier: "premium", reason_codes: expect.arrayContaining(["planner_security_sensitive"]) });
+    expect(plannerClassification({ complexity: "high", risk: "medium", securitySensitive: false }, "Rework the scheduler")).toMatchObject({ complexity: "high" });
+    expect(plannerClassification({ complexity: "medium", risk: "low", securitySensitive: true }, "Add a retry counter")).toMatchObject({ task_type: "security", risk: "high", reason_codes: expect.arrayContaining(["planner_security_sensitive"]) });
   });
 
   it("lets the keyword scan raise the security flag but never lets the planner lower it", () => {
@@ -132,7 +93,7 @@ describe("classification and policy", () => {
   it("does not let weak keywords alone overrule the planner", () => {
     const rated = plannerClassification({ complexity: "medium", risk: "low", securitySensitive: false }, "Cache the session token count and log it in production");
     expect(isSecuritySensitive(rated)).toBe(false);
-    expect(rated).toMatchObject({ task_type: "general", risk: "low", recommended_tier: "standard" });
+    expect(rated).toMatchObject({ task_type: "general", risk: "low" });
   });
 
   it("clips long text in the middle", () => {

@@ -11,7 +11,6 @@ export interface UsageInput {
   outcome: CostRecord["outcome"];
   retries: number;
   reason: string;
-  estimatedUsd?: number | null;
 }
 
 export function buildCostRecord(input: UsageInput, pricing: PricingRow[], at: Date, id: string): CostRecord {
@@ -34,7 +33,6 @@ export function buildCostRecord(input: UsageInput, pricing: PricingRow[], at: Da
     outputTokens: input.usage.output,
     cacheReadTokens: input.usage.cacheRead,
     cacheWriteTokens: input.usage.cacheWrite,
-    estimatedUsd: input.estimatedUsd ?? null,
     actualUsd,
     usageKnown: actualUsd !== null,
     outcome: input.outcome,
@@ -242,7 +240,6 @@ export function toCsv(records: CostRecord[]): string {
     "outputTokens",
     "cacheReadTokens",
     "cacheWriteTokens",
-    "estimatedUsd",
     "actualUsd",
     "usageKnown",
     "outcome",

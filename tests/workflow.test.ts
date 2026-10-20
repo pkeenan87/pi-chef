@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ReviewReport } from "../src/domain.js";
 import { Workflow } from "../src/orchestrator/service.js";
 import { runBuild } from "../src/orchestrator/build.js";
-import { builtWorkflow, checkRunner, readyAuth, sampleSpec, sampleTicket, singleTaskRequest, tasksRequest, tempRepo, testConfig, tieredConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
+import { builtWorkflow, checkRunner, readyAuth, sampleSpec, sampleTicket, tempRepo, testConfig, tieredConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
 
 const exec = promisify(execFile);
 
@@ -23,9 +23,7 @@ function walk(dir: string): string[] {
 describe("workflow", () => {
   it("refuses a build before approval, freezes the approved plan once, and rebuilds state from the event log after a restart", async () => {
     const cwd = await tempRepo();
-    const app = workflow(cwd);
-    const planned = await app.plan(tasksRequest);
-    expect(planned.ok).toBe(true);
+    const { app } = await ticketWorkflow([sampleTicket("01"), sampleTicket("02")], { config: testConfig() }, { cwd, approve: false });
     const refused = await app.startBuild();
     expect(refused.ok).toBe(false);
     expect(refused.code).toBe("APPROVAL_REQUIRED");
@@ -51,8 +49,7 @@ describe("workflow", () => {
   it("keeps secrets out of artifacts", async () => {
     const cwd = await tempRepo();
     const secret = "sk-live-SECRETVALUE123456";
-    const app = workflow(cwd);
-    await app.plan(`Rotate the ${secret} in the ingest parser`);
+    await ticketWorkflow([sampleTicket("01")], {}, { cwd, approve: false, request: `Rotate the ${secret} in the ingest parser` });
     const root = path.join(cwd, ".pi-workflows");
     const blob = walk(root).map((file) => readFileSync(file, "utf8")).join("\n");
     expect(blob).not.toContain(secret);
@@ -124,7 +121,7 @@ describe("a new /plan closes a finished task", () => {
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
   });
 
-  it("closes a task an older version left in PUBLISHED, AUTOPILOT, or MERGE_READY, via either entry point", async () => {
+  it("closes a task an older version left in PUBLISHED, AUTOPILOT, or MERGE_READY", async () => {
     for (const phase of ["PUBLISHED", "AUTOPILOT", "MERGE_READY"] as const) {
       const lines: string[] = [];
       const { app } = await builtWorkflow({ progress: (line) => void lines.push(line), startTurn: () => undefined });
@@ -134,12 +131,6 @@ describe("a new /plan closes a finished task", () => {
       expect(app.store.load(firstId)!.phase).toBe("COMPLETE");
       expect(lines).toContain(`Closed ${app.store.load(firstId)!.name}.`);
     }
-    const { app } = await builtWorkflow();
-    const id = app.activeTaskId()!;
-    await app.store.update(id, "old file", (task) => ({ ...task, phase: "PUBLISHED" }));
-    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
-    expect(app.store.load(id)!.phase).toBe("COMPLETE");
-    expect(app.activeTaskId()).not.toBe(id);
   });
 
   it("parks, rather than closes or revises, a task that still has unfinished tickets", async () => {
@@ -159,12 +150,10 @@ describe("a new /plan closes a finished task", () => {
     expect(parked).toBe(`Parked ${before.name} (Approved v1 · run /build). /plans ${before.name} switches back.`);
   });
 
-  it("never replans another task: the same request twice makes two tasks, a literal plan too", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd, { startTurn: () => undefined });
-    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
+  it("never replans another task: the same request twice makes two tasks", async () => {
+    const { app } = await ticketWorkflow([sampleTicket("01")], {}, { approve: false });
     const first = app.activeTaskId()!;
-    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
+    expect((await app.startPlan("Add retry to the ingest parser")).ok).toBe(true);
     const second = app.activeTaskId()!;
     expect(second).not.toBe(first);
     expect(app.store.load(first)!.phase).toBe("AWAITING_PLAN_APPROVAL");
@@ -188,7 +177,7 @@ describe("build and review robustness", () => {
     const spend = (actualUsd: number) =>
       app.store.appendLedger({
         id: `s${actualUsd}`, at: "2026-10-14T12:00:00.000Z", taskId: id, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
-        requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+        requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
       });
     spend(0.9);
     expect((await app.startBuild()).code).toBe("SECURITY_PAUSE");
@@ -201,10 +190,7 @@ describe("build and review robustness", () => {
   });
 
   it("reports corrupt event lines in status", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd);
-    await app.plan(singleTaskRequest);
-    await app.approveDraft();
+    const { app, cwd } = await ticketWorkflow([sampleTicket("01")]);
     const dir = path.join(cwd, ".pi-workflows", "tasks", app.activeTaskId()!);
     const events = path.join(dir, "events.jsonl");
     writeFileSync(events, `${readFileSync(events, "utf8").replace(/\n$/, "")}\nnot json\n{"seq":99}\n`);
@@ -212,9 +198,11 @@ describe("build and review robustness", () => {
   });
 
   it("rejects a dependency cycle at plan time", async () => {
-    const cyclic = `Loop\n\`\`\`tasks\n[{"id":"a","files":["x.ts"],"dependsOn":["b"]},{"id":"b","files":["y.ts"],"dependsOn":["a"]}]\n\`\`\``;
-    const rejected = await workflow(await tempRepo()).plan(cyclic);
-    expect(rejected.code).toBe("PLAN_CYCLE");
+    const app = workflow(await tempRepo(), { startTurn: () => undefined });
+    await app.startPlan("Add retry to the ingest parser");
+    await app.savePlanSpec(sampleSpec);
+    const cyclic = app.checkTickets([sampleTicket("01", { blockedBy: ["02"] }), sampleTicket("02", { blockedBy: ["01"] })]);
+    expect(cyclic.errors.join("\n")).toMatch(/cycle/);
   });
 
   it("skips the /review re-run of a check that already passed on the same tree", async () => {

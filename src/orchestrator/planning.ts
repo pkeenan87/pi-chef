@@ -1,15 +1,10 @@
 import path from "node:path";
-import type { AcceptedClassification, CommandResult, PlanDocument, TaskState } from "../domain.js";
-import { classifyKeywords } from "../router/classify.js";
-import { redact } from "../redact.js";
-import { budgetState, remember } from "./budget.js";
-import { active, done, fail, guard, iso, knownZero, type WorkflowContext } from "./context.js";
-import { move } from "./machine.js";
-import { acceptanceCriteria, applyOverlap, assertGraph, parseGroups, PLAN_FILE, renderPlan, renderPlanReview } from "./plan.js";
+import type { CommandResult, TaskState } from "../domain.js";
+import { done, fail, guard, iso, type WorkflowContext } from "./context.js";
+import { assertGraph, PLAN_FILE, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
-import { announce, availability, decide, routingSummary, suggestAdvisor } from "./routing.js";
 import { taskState } from "./state-label.js";
-import { activeTask, closeTask, displayName, isFinished, nameForNewTask, requireActiveTask } from "./tasks.js";
+import { closeTask, displayName, isFinished, nameForNewTask, requireActiveTask } from "./tasks.js";
 
 export function blank(taskId: string, request: string, at: string, name?: string): TaskState {
   return {
@@ -20,8 +15,6 @@ export function blank(taskId: string, request: string, at: string, name?: string
     updatedAt: at,
     phaseEnteredAt: at,
     request,
-    publishApproved: false,
-    attempts: [],
   };
 }
 
@@ -29,11 +22,6 @@ export function blank(taskId: string, request: string, at: string, name?: string
 export function newTask(ctx: WorkflowContext, request: string, at: string): TaskState {
   const taskId = `task-${at.replace(/[-:.TZ]/g, "").slice(0, 14)}-${ctx.id()}`;
   return blank(taskId, request, at, nameForNewTask(ctx, request));
-}
-
-/** Moves a task back to AWAITING_PLAN_APPROVAL for a new draft; a paused task resumes through PLANNING first. */
-export function backToApproval(task: TaskState, at: string, note?: string): TaskState {
-  return move(task.phase === "PAUSED" ? move(task, "PLANNING", at) : task, "AWAITING_PLAN_APPROVAL", at, note);
 }
 
 /**
@@ -56,43 +44,6 @@ export function announceParked(ctx: WorkflowContext, parked: TaskState | undefin
   if (!parked) return;
   const name = displayName(parked);
   ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.`);
-}
-
-/** Starts a new task for a literal ```tasks request and drafts its plan. The old active task is closed if finished, else parked. */
-export function plan(ctx: WorkflowContext, request: string): Promise<CommandResult> {
-  return guard(async () => {
-    const safe = redact(request);
-    const at = iso(ctx);
-    if (budgetState(ctx).status === "hard") {
-      return fail("BUDGET", "Task or daily budget is exhausted. /plan was not run. Run /cost for details.");
-    }
-    const parsed = applyOverlap(parseGroups(safe));
-    assertGraph(parsed.groups);
-    const parked = await retireCurrent(ctx, await activeTask(ctx));
-    const classification: AcceptedClassification = classifyKeywords(safe);
-    const routing = await decide(ctx, classification, "plan", {});
-    let state = await ctx.store.create(newTask(ctx, safe, at));
-    announceParked(ctx, parked);
-    const draft: PlanDocument = {
-      version: 1,
-      createdAt: at,
-      summary: safe.slice(0, 400),
-      risks: classification.risk === "high" ? ["Security-sensitive change. Human approval stays required."] : ["Ordinary change. Plan approval stays required."],
-      acceptance: acceptanceCriteria(safe),
-      estimatedUsd: routing.expectedUsd,
-      groups: parsed.groups,
-      overlap: parsed.overlap,
-      securitySensitive: routing.requireHumanApproval,
-    };
-    state = await ctx.store.update(state.taskId, "plan drafted", (task) => move({ ...task, plan: draft, classification, routing, request: safe }, "AWAITING_PLAN_APPROVAL", at));
-    ctx.store.writeText(state.taskId, "plan.json", JSON.stringify(draft, null, 2));
-    ctx.store.writeText(state.taskId, PLAN_FILE, renderPlan(draft));
-    remember(ctx, state, state.phase, routing.tier, routing.provider, routing.model, knownZero(), "success", 0, "plan");
-    await announce(ctx, state.taskId, "plan", routing);
-    if (draft.securitySensitive) suggestAdvisor(ctx, state.taskId, "security-sensitive plan");
-    const overlap = draft.overlap.length ? ` Overlap on ${draft.overlap.join(", ")} will be serialized.` : " No file overlap.";
-    return done(`Draft v${draft.version} of ${displayName(state)} is waiting for approval (/show-plan).${overlap} Nothing was committed.`, { taskId: state.taskId, plan: draft, routing });
-  });
 }
 
 /** The plan document for a task as it is shown for review: `plan.md`, or rendered from the stored plan. */
@@ -159,17 +110,4 @@ export async function showTaskPlan(ctx: WorkflowContext, current: TaskState): Pr
   if (ctx.show) ctx.show(markdown);
   const status = approved ? "approved" : current.phase === "AWAITING_PLAN_APPROVAL" ? "a draft; /show-plan in a session with a UI approves it" : current.phase.toLowerCase();
   return done(ctx.show ? `Plan v${version} (${status}) is shown above. File: ${where}` : markdown, { taskId: current.taskId, file: where });
-}
-
-/** Previews the keyword classification and route for a task without changing its state. The planner sets complexity during /plan. */
-export function route(ctx: WorkflowContext, task: string): Promise<CommandResult> {
-  return guard(async () => {
-    const classification = classifyKeywords(redact(task));
-    const current = await activeTask(ctx);
-    const decision = await decide(ctx, classification, "preview", { taskId: current?.taskId });
-    await announce(ctx, current?.taskId, "preview", decision);
-    const routing = routingSummary(ctx);
-    const note = "Keyword scan only: security keywords raise risk, and the planner sets complexity and risk during /plan (plan_spec).";
-    return done(JSON.stringify({ note, classification, decision, routing }, null, 2), { classification, decision, routing });
-  });
 }

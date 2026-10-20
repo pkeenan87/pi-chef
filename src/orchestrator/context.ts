@@ -1,4 +1,4 @@
-import { WorkflowError, type CommandResult, type Phase, type ProviderId, type TaskState, type TokenUsage } from "../domain.js";
+import { WorkflowError, type CommandResult, type Phase, type TaskState, type TokenUsage } from "../domain.js";
 import type { WorkflowConfig } from "../config.js";
 import type { GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
