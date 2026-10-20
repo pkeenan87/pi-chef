@@ -5,7 +5,7 @@ import type { ProviderAuthView } from "../src/providers/auth.js";
 import { registryProblem } from "../src/providers/usable.js";
 import { tempRepo, workflow } from "./helpers.js";
 
-const classification: AcceptedClassification = { task_type: "feature", complexity: "high", risk: "medium", required_capabilities: [], recommended_tier: "premium", reason_codes: [], source: "planner" };
+const classification: AcceptedClassification = { task_type: "feature", complexity: "high", risk: "medium", required_capabilities: [], reason_codes: [], source: "planner" };
 
 /** Pi's login state as the auth probe sees it. */
 const probe = (status: Partial<Record<ProviderId, ProviderAuthView["status"]>>) => ({

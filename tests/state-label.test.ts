@@ -13,11 +13,9 @@ function task(extra: Partial<TaskState> = {}): TaskState {
     createdAt: "2026-10-14T12:00:00.000Z",
     updatedAt: "2026-10-14T12:00:00.000Z",
     request: "x",
-    publishApproved: false,
-    attempts: [],
     phaseEnteredAt: "2026-10-14T12:00:00.000Z",
     approvedVersion: 2,
-    plan: { version: 2, createdAt: "", summary: "", risks: [], acceptance: [], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false, tickets: [sampleTicket("01"), sampleTicket("02"), sampleTicket("03")] },
+    plan: { version: 2, createdAt: "", summary: "", risks: [], acceptance: [], groups: [], overlap: [], securitySensitive: false, tickets: [sampleTicket("01"), sampleTicket("02"), sampleTicket("03")] },
     build: { branch: "chef/task-1", base: "main", baseSha: "a" },
     ...extra,
   };

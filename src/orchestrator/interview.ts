@@ -5,10 +5,9 @@ import { classifyKeywords, isSecuritySensitive, plannerClassification, type Plan
 import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
-import { announceParked, newTask, plan, retireCurrent } from "./planning.js";
+import { announceParked, newTask, retireCurrent } from "./planning.js";
 import { INTERVIEW_RULES, LOCAL_PLAN_NOTE, type LocalPlanTarget, LOCAL_TICKET_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
 import { renderTicketsMarkdown } from "./tickets.js";
-import { announce, decide } from "./routing.js";
 import { activeTask, displayName } from "./tasks.js";
 
 export interface InterviewOption {
@@ -129,16 +128,12 @@ function resumeMessage(request: string): string {
   return `Resume planning: ${request}`;
 }
 
-/**
- * `/plan` entry point. Starts (or resumes) the model-run interview. A request with a literal ```tasks block, or a
- * host that cannot start a model turn, drafts the plan directly as before.
- */
+/** `/plan` entry point. Starts (or resumes) the model-run interview in the session. */
 export function startPlan(ctx: WorkflowContext, request: string, options: { noQuestions?: boolean; local?: boolean } = {}): Promise<CommandResult> {
   return guard(async () => {
     const current = await activeTask(ctx);
     const text = request.trim();
     if (!text && !current?.planning) return fail("USAGE", "Usage: /plan [--no-questions] [--local | --cloud] <request>");
-    if (text && (/```tasks/.test(text) || !ctx.startTurn)) return plan(ctx, request);
     if (!ctx.startTurn) return fail("NO_SESSION", "Planning needs a Pi session to run the interview.");
     const safe = redact(text);
     const noQuestions = options.noQuestions ?? false;
@@ -160,7 +155,6 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     const parked = await retireCurrent(ctx, current);
     // Until plan_spec saves the planner's rating, the task has the keyword classification.
     const classification: AcceptedClassification = classifyKeywords(safe);
-    const routing = await decide(ctx, classification, "plan", {});
     // Local mode: --local or --cloud, else localMode.default. Fixed for the task once planning starts, with the
     // difficulties the local model takes (localMode.difficulties, capped by its size; unset: every ticket).
     const wanted = options.local ?? ctx.config.localMode.default;
@@ -168,10 +162,9 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     // localMode.difficulties that the model's size rules out entirely (medium for a 9B model): a cloud plan.
     const localMode = wanted && only?.length !== 0;
     const scope = localMode ? { localMode: true, ...(only ? { localDifficulties: only } : {}) } : {};
-    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, routing, planning: { stage: "interview", noQuestions }, ...scope });
+    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, planning: { stage: "interview", noQuestions }, ...scope });
     announceParked(ctx, parked);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
-    await announce(ctx, state.taskId, "interview", routing);
     showStatus(ctx);
     const mode = !localMode ? "" : only ? ` (local mode: ${only.join("/")} tickets go to the local model, the rest to the cloud)` : " (local mode: every ticket goes to the local model)";
     ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${mode}:\n\n${safe}`);
@@ -186,7 +179,7 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
         : ` Local mode: tickets will be written for a ${profile.label} (${profile.model}) and built only there.`;
     return done(
       `${noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`}${where}`,
-      { taskId: state.taskId, routing },
+      { taskId: state.taskId },
     );
   });
 }
@@ -389,11 +382,9 @@ export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promis
   const file = ctx.store.writeText(task.taskId, SPEC_FILE, redact(renderSpec(spec)));
   // The planner's rating replaces the keyword classification. A rating left out keeps the one the task has.
   const classification = rating ? plannerClassification(rating, redact(`${task.request}\n${specScanText(spec)}`)) : task.classification ?? classifyKeywords(task.request);
-  const routing = await decide(ctx, classification, "plan", { taskId: task.taskId });
   await ctx.store.update(task.taskId, "spec saved", (current) => ({
     ...current,
     classification,
-    routing,
     planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}), ...(current.planning?.stage === "tickets" && current.planning.consult ? { consult: current.planning.consult } : {}) },
     updatedAt: iso(ctx),
   }));

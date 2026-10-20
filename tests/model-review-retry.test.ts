@@ -10,7 +10,7 @@ import { tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, requests: 1 };
 const STREAM_ERROR = "OpenAI Responses stream ended before a terminal response event";
-const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false };
+const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], groups: [], overlap: [], securitySensitive: false };
 const grok = { provider: "xai" as const, model: "grok-4.7" };
 const sonnet = { provider: "anthropic" as const, model: "claude-sonnet-5-5" };
 

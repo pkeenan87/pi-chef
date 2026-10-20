@@ -20,7 +20,6 @@ Tab completion covers `/plan` flags, `/plans` task names and `close`/`--all`, `/
 | [`/review`](#review) | Check the branch, list findings, and fix them in this session |
 | [`/status`](#status) | Where the task stands, and what to do next |
 | [`/cost`](#cost) | Spend against budgets, from the ledger |
-| [`/route`](#route) | Preview which tier and model a request would get |
 | [`/advisor`](#advisor) | Ask the advisor tier one question |
 | [`/auth`](#auth) | Login status, or how to sign in to a provider |
 | [`/chef`](#chef) | List these commands |
@@ -64,7 +63,7 @@ What it changes:
 - **The task that was active:** a finished one (built, review passed) is closed. Any other is parked untouched; `/plans <name>` brings it back.
 - **The interview:** answers are saved, so a plan interrupted by a restart resumes when you run `/plan` with no request, or with the same request.
 
-A request containing a literal ```` ```tasks ```` block is drafted directly, with no model turn. Such a plan has no tickets, so `/build` cannot run it.
+Planning runs on your session model (`session.model`), so `/plan` picks no other model and records no route. It needs a Pi session that can start a model turn.
 
 It refuses to start when the task or daily budget is exhausted.
 
@@ -187,13 +186,13 @@ It never commits or pushes. Run `/review` again after fixing.
 - **Overview:**
   - task, local mode, plan, branch and commits ahead;
   - review, next step, budget;
-  - session model, rating, last route.
+  - session model, and the rating (risk and whether the task is security-sensitive, from the planner or the keyword scan).
 - **Tickets:** difficulty, implementer, review, cost, status. A ticket committed without checks or review shows as `unverified`.
-- **Routing:** for each tier, what would run now and each skipped model with its reason.
+- **Routing:** one row per tier a job uses, naming the jobs (low, medium and high tickets, local-mode tickets, a failed high ticket, review, advisors, compaction, summaries of cut files), what would run now, and each skipped model with its reason.
 - **Logins:** each provider's sign-in status.
 - **Warnings:** config values that were ignored, models with no pricing row, a corrupt event log.
 
-It makes no model call and runs no `az`.
+It makes no model call. The Foundry sign-in check behind the Logins and Routing tables runs `az account show` (cached); nothing else runs `az`.
 
 `/status <ticket>` shows:
 
@@ -206,32 +205,21 @@ It makes no model call and runs no `az`.
 ## /cost
 
 ```text
-/cost                      # summary
-/cost json                 # summary, quota use, and every ledger row as JSON
-/cost csv                  # every ledger row as CSV
+/cost                      # summary and tables
+/cost json                 # writes the summary, quota use and every ledger row to .pi-workflows/reports/cost-<time>.json
+/cost csv                  # writes every ledger row to .pi-workflows/reports/cost-<time>.csv
 ```
 
-Reads `.pi-workflows/cost/` and shows:
+Reads `.pi-workflows/cost/` and posts:
 
-- known spend, and the number of records whose cost is unknown;
+- known spend, the number of records whose cost is unknown, the estimate budgets count them at, and the total (`≈` when it includes an estimate);
 - the task and daily budgets, with their status;
-- spend by phase, provider and model, with success counts;
-- subscription quota use (ranking only) and the last route.
+- **By model:** calls, known spend, unknown-cost rows, total, and the successes and failures the router recorded;
+- **By job:** chat turns (the session and tickets), reviews, advisors, compaction, web search, summaries of cut files, and the calls Pi makes on its own (cache warming, its own compaction, branch summaries);
+- **By task:** everything the task spent, each with its total;
+- subscription quota use, when quota is configured (it ranks models; it is never billed or budgeted).
 
-Unknown cost is never shown as $0. Budgets count it at an estimate. Changes nothing.
-
-## /route
-
-```text
-/route <request>
-```
-
-Previews, without changing anything:
-
-- the tier, provider and model this request would get, and why (the reason and each candidate considered);
-- who serves the session, compaction, batch jobs, the review, and each ticket difficulty.
-
-It uses the keyword scan only; during `/plan` the planner rates complexity and risk itself. It records a `route` event when a task is active.
+Unknown cost is never shown as $0. The exports are files because a chat line is clipped. Changes nothing else.
 
 ## /advisor
 
@@ -239,7 +227,7 @@ It uses the keyword scan only; during `/plan` the planner rates complexity and r
 /advisor <question>
 ```
 
-Asks the advisor tier (`tiers.advisor`: Astra, then Fable in the sample) one question about the active task. It costs money, runs only when you ask, and never changes the phase. It refuses when no advisor is configured or the budget is exhausted, and obeys `orgProviderAllowlist` and `proprietaryCode`.
+Asks the advisor tier (`tiers.advisor`: Astra, then Fable in the sample) one question about the active task: it gets the request, the rating, the plan summary, each ticket with its status, the last failure and the diff stat, redacted. The answer is posted as a block in the chat. It costs money, runs only when you ask, and never changes the phase. It refuses when no advisor is configured or the budget is exhausted, and obeys `orgProviderAllowlist` and `proprietaryCode`.
 
 ## /auth
 
@@ -248,7 +236,7 @@ Asks the advisor tier (`tiers.advisor`: Astra, then Fable in the sample) one que
 /auth login <provider>     # openai | anthropic | xai | foundry | vercel | local
 ```
 
-`/auth status` prints each provider's sign-in status, method and detail. For Vercel it refreshes a missing or expiring token with `vercel env pull` first.
+`/auth status` posts the Logins table that `/status` shows: each provider's sign-in status, method and detail. For Vercel it refreshes a missing or expiring token with `vercel env pull` first. Any other argument is a usage error.
 
 `/auth login <provider>` explains how to sign in:
 

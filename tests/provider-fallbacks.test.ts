@@ -119,7 +119,6 @@ pricing:
     task_type: "feature",
     complexity: "medium",
     risk: "low",
-    recommended_tier: "standard",
     required_capabilities: [],
     reason_codes: [],
     source: "planner",

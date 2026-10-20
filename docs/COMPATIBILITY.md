@@ -141,7 +141,7 @@ Shipped as library modules plus `src/extension.ts`. No hosted coordinator, datab
 | Milestone | Slice |
 |---|---|
 | M1 | Config, redaction, locked journal, auth gate for the four providers, `/status`, `/cost`, `/auth`. Compatibility test asserts Pi's oauth objects exist and Azure's does not |
-| M2 | `/plan`, `/route`, keyword classification and the planner's rating, approval freeze, versioned plans |
+| M2 | `/plan`, keyword classification and the planner's rating, approval freeze, versioned plans |
 | M3 | `/build` refuses without approval. Tickets in dependency order, each in a fresh session on a routed model, checks, one commit per ticket on one branch, resume, restart-safe state |
 | M4 | `/review` with tool evidence (setup, checks, static scan, advisory model pass), numbered findings with Fix all / Fix… in the current session, security and failing-check fixtures. Works for ad-hoc branches; never commits or pushes |
 | M5 | Plan review screen with approval, `/show-plan`, a new `/plan` closes a finished task. No merge: `approvals.merge` stays `manual` |

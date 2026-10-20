@@ -113,15 +113,6 @@ export class GitWorkspace {
     return this.head(cwd);
   }
 
-  async diff(cwd: string, base: string): Promise<string> {
-    const result = await this.git(["diff", `${base}...HEAD`, "--"], cwd);
-    if (result.code !== 0) {
-      const fallback = await this.git(["diff", base, "--"], cwd);
-      return fallback.stdout;
-    }
-    return result.stdout;
-  }
-
   /** The checked-out branch name, or "HEAD" when detached. */
   async currentBranch(): Promise<string> {
     const result = await this.git(["rev-parse", "--abbrev-ref", "HEAD"]);

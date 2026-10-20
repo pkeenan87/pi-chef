@@ -50,11 +50,13 @@ async function statusOf(config: string, az: ReturnType<typeof fakeAz>, arg = "",
 describe("/status Routing check", () => {
   it("shows, per tier, the candidate that will run and each skipped one with its reason", async () => {
     const text = await statusOf(CONFIG(), fakeAz(() => ok("[]")));
-    expect(text).toContain("| Tier | Runs | Skipped |");
-    expect(text).toContain("| ticketHigh | foundry/gpt-6.1-sol → my-sol | openai/gpt-6.1-sol: provider openai has no login (run /login openai) |");
-    expect(text).toContain("| ticketLow | foundry/grok-4-7 |");
-    expect(text).toContain("| deterministic | nothing usable |");
-    expect(text).toContain("local/qwen2.5-coder:7b: provider local is not registered (no providers.local in ~/.pi/agent/chef.yaml)");
+    expect(text).toContain("| Job | Tier | Runs | Skipped |");
+    expect(text).toContain("| high tickets | ticketHigh | foundry/gpt-6.1-sol → my-sol | openai/gpt-6.1-sol: provider openai has no login (run /login openai) |");
+    expect(text).toContain("| low tickets | ticketLow | foundry/grok-4-7 |");
+    // Each row names the jobs its tier serves; a tier no job uses (standard here) is not listed.
+    expect(text).toMatch(/\| a failed high ticket, review \(per ticket and \/review\) \| premium \|/);
+    expect(text).toMatch(/\| compaction \| cheap \|/);
+    expect(text).not.toMatch(/\| (deterministic|standard) \|/);
   });
 
   it("never runs az without being asked", async () => {

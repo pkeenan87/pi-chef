@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
-import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type TicketTier, type Tier } from "../domain.js";
+import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type Tier } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { LOCAL_LADDER, TICKET_LADDER, escalateImplementation } from "../router/policy.js";
@@ -472,11 +472,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   }
   const escalations = (run?.attemptLog ?? []).filter((item) => item.outcome === "failure").length;
   const classification = state.classification!;
-  // A tier with no model cannot run a chunk, so it moves up one tier (as ticket-run did).
-  let decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(ticket, local), strictAvailability: true });
-  if (decision.provider === "none" && !decision.blocked) {
-    decision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier: decision.tier, escalations, strictAvailability: true });
-  }
+  const decision: RoutingDecision = await decide(ctx, classification, "implement", { taskId: state.taskId, failedTier, escalations, ticketTier: failedTier ? undefined : resumeTier ?? startTier(ticket, local), strictAvailability: true });
   if (decision.blocked || decision.provider === "none") {
     return { kind: "stopped", code: "NO_CANDIDATE", reason: decision.blocked ?? `No model is available for ticket ${ticket.id}.` };
   }

@@ -1,21 +1,23 @@
-import { tierCandidates } from "../config.js";
-import { emptyUsage, WorkflowError, type CommandResult, type TaskState } from "../domain.js";
-import { clipMiddle } from "../router/classify.js";
+import { modelLabel, tierCandidates } from "../config.js";
+import { ticketDifficulty, WorkflowError, type CommandResult, type TaskState } from "../domain.js";
+import { clipMiddle, isSecuritySensitive } from "../router/classify.js";
 import { selectCandidate } from "../router/select.js";
 import { redact } from "../redact.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, warnSoft } from "./budget.js";
 import { done, fail, guard, type WorkflowContext } from "./context.js";
 import { activeTask } from "./tasks.js";
 import { announce, availability, candidateCheck } from "./routing.js";
+import { failedUsage } from "../providers/clients.js";
 
-/** Redacted, size-capped task context for the advisor: request, plan, classification, last failure, diff stat. */
+/** Redacted, size-capped task context for the advisor: request, rating, plan, tickets, last failure, diff stat. */
 async function advisorContext(ctx: WorkflowContext, state: TaskState | undefined): Promise<string> {
   if (!state) return "No active task.";
   const parts = [
     `Phase: ${state.phase}`,
     `Request: ${clipMiddle(state.request, 2000)}`,
-    state.classification ? `Classification: ${state.classification.task_type}, complexity ${state.classification.complexity}, risk ${state.classification.risk}` : "",
-    state.plan ? `Plan v${state.plan.version}: ${state.plan.summary.slice(0, 600)}\nGroups: ${state.plan.groups.map((group) => `${group.id} (${group.files.join(", ")})`).join("; ")}\nRisks: ${state.plan.risks.join("; ")}` : "",
+    state.classification ? `Rating: ${state.classification.risk} risk${isSecuritySensitive(state.classification) ? ", security-sensitive" : ""}` : "",
+    state.plan ? `Plan v${state.plan.version}: ${state.plan.summary.slice(0, 600)}` : "",
+    state.plan?.tickets?.length ? `Tickets: ${state.plan.tickets.map((ticket) => `${ticket.id} ${ticket.title} (${ticketDifficulty(ticket)}, ${state.ticketRuns?.[ticket.id]?.status ?? "not started"})`).join("; ")}` : "",
     state.blockedReason ? `Last failure: ${state.blockedReason.slice(0, 600)}` : "",
   ];
   try {
@@ -76,12 +78,15 @@ Question: ${ask}` },
       });
     } catch (error) {
       const message = redact((error as Error).message || "Advisor call failed.");
-      record(ctx, taskId ?? "advisor", state?.phase ?? "IDLE", "advisor", candidate.provider, candidate.model, emptyUsage(), "failure", 0, "advisor");
+      record(ctx, taskId ?? "advisor", state?.phase ?? "IDLE", "advisor", candidate.provider, candidate.model, failedUsage(error), "failure", 0, "advisor");
       await ctx.store.bumpMetric(taskType, "advisor", false, ctx.now(), candidate);
       return fail(error instanceof WorkflowError ? error.code : "ERROR", message);
     }
     record(ctx, taskId ?? "advisor", state?.phase ?? "IDLE", "advisor", candidate.provider, candidate.model, response.usage, "success", 0, "advisor");
     await ctx.store.bumpMetric(taskType, "advisor", true, ctx.now(), candidate);
-    return done(`Advisor (${candidate.provider}/${candidate.model}):\n${redact(response.text).trim()}`, { candidate, usage: response.usage });
+    // The answer goes to the chat as a block: a command result line is clipped.
+    const answer = `**Advisor** · ${modelLabel(ctx.config, candidate.provider, candidate.model)}\n\n${redact(response.text).trim()}`;
+    ctx.report?.(answer);
+    return done(ctx.report ? `Advisor ${modelLabel(ctx.config, candidate.provider, candidate.model)} answered above.` : answer, { candidate, usage: response.usage });
   });
 }

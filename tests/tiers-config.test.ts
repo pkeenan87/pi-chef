@@ -23,6 +23,12 @@ describe("tiers config", () => {
     ]);
   });
 
+  it("drops the retired deterministic tier of an old file with a warning", () => {
+    const config = parseConfig(`${tieredYaml().replace("tiers:\n", 'tiers:\n  deterministic:\n    - { provider: local, model: "qwen2.5-coder:7b" }\n')}`);
+    expect(Object.keys(config.tiers)).not.toContain("deterministic");
+    expect(config.warnings).toContain("tiers.deterministic is no longer used; plans are tickets, built on the ticket tiers. Remove it.");
+  });
+
   it("drops a tier whose only candidates were Decisions models", () => {
     const config = parseConfig(`providers:\n  anthropic: { type: anthropic, auth: account-login, model: m }\n  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://x.services.ai.azure.com" }\nmodels: { cheap: anthropic, standard: anthropic, premium: anthropic }\ntiers:\n  cheap:\n    - { provider: foundry, model: d1, api: decisions }\n`);
     // models: anthropic gives cheap a one-candidate tier once the dropped Decisions list is gone.
@@ -34,7 +40,6 @@ describe("tiers config", () => {
     const config = tieredConfig();
     expect(tierCandidates(config, "cheap").map((item) => item.model)).toEqual(["gpt-6-luna", "claude-haiku-5-5"]);
     expect(tierCandidates(config, "advisor")).toHaveLength(2);
-    expect(tierCandidates(config, "deterministic")[0]).toMatchObject({ provider: "local" });
   });
 
   it("accepts a batch tier, falls back to cheap without one, and keeps it off the ladder", () => {
@@ -56,7 +61,6 @@ describe("tiers config", () => {
     expect(tierCandidates(config, "cheap")).toEqual([{ provider: "foundry", model: "classifier" }]);
     // No list: the built-in tiers apply, limited to the providers this config defines.
     expect(tierCandidates(config, "advisor").map((item) => `${item.provider}/${item.model}`)).toEqual(["openai/gpt-6-astra", "anthropic/claude-fable-5-1", "foundry/gpt-6-astra"]);
-    expect(tierCandidates(config, "deterministic")).toEqual([{ provider: "local", model: "qwen2.5-coder:7b" }]);
   });
 
   it("mixes: an explicit tier overrides models for that tier only", () => {
@@ -126,7 +130,7 @@ tiers:
     }
     expect(config.pricing.some((row) => row.model === "claude-opus-4-8" && row.billing === "api-key" && row.inputPerMillionUsd === 5 && row.outputPerMillionUsd === 25)).toBe(true);
     // every candidate has an explicit pricing row
-    for (const tier of ["deterministic", "cheap", "batch", "standard", "premium", "ticketLow", "ticketMedium", "ticketHigh", "advisor"] as const) {
+    for (const tier of ["cheap", "batch", "standard", "premium", "ticketLow", "ticketMedium", "ticketHigh", "advisor"] as const) {
       for (const item of tierCandidates(config, tier)) {
         expect(config.pricing.some((row) => row.provider === item.provider && row.model === item.model), `${item.provider}/${item.model}`).toBe(true);
       }

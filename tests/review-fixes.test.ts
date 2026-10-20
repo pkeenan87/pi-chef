@@ -8,7 +8,7 @@ import { type ProviderId } from "../src/domain.js";
 import { move } from "../src/orchestrator/machine.js";
 import { Workflow } from "../src/orchestrator/service.js";
 import type { ProviderAuthView } from "../src/providers/auth.js";
-import { singleTaskRequest, tempRepo, tieredConfig, tieredYaml, workflow } from "./helpers.js";
+import { tempRepo, tieredConfig, tieredYaml, workflow } from "./helpers.js";
 
 const priorHome = process.env.HOME;
 afterEach(() => {
@@ -97,33 +97,6 @@ describe("O3/O4 extension config handling", () => {
     await commands.get("status")!.handler("", { ...uiCtx(cwd, notes), sendMessage: async (message: { content: string }) => void sent.push(message.content) });
     expect(sent.join("\n")).toMatch(/### Warnings\n\n- Config: Ignored project providers\.foundry\.endpoint/);
     expect(currentWorkflow()!.config.providers.foundry?.endpoint).toBe("https://res.services.ai.azure.com");
-  });
-});
-
-describe("O6 re-planning after review", () => {
-  const changed = singleTaskRequest.replaceAll("src/ingest.ts", "src/ingest2.ts");
-
-  it("drops the approval when an approved plan is replanned", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd);
-    await app.plan(singleTaskRequest);
-    await app.approveDraft();
-    expect(app.store.load(app.activeTaskId()!)!.approvedVersion).toBeDefined();
-    const replanned = await app.plan(changed);
-    expect(replanned.ok).toBe(true);
-    const task = app.store.load(app.activeTaskId()!)!;
-    expect(task.phase).toBe("AWAITING_PLAN_APPROVAL");
-    expect(task.approvedVersion).toBeUndefined();
-  });
-
-  it("replans a task paused from another phase through PLANNING", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd);
-    await app.plan(singleTaskRequest);
-    await app.approveDraft();
-    await app.store.update(app.activeTaskId()!, "pause", (task) => move(task, "PAUSED", "2026-10-14T12:00:00.000Z", "paused"));
-    expect((await app.plan(changed)).ok).toBe(true);
-    expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
   });
 });
 

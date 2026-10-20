@@ -49,17 +49,16 @@ export const COMMANDS: CommandSpec[] = [
     complete: () => [],
   },
   { name: "review", run: (w) => w.review(), description: "Review the changes against the base branch (checks, static scan, advisory model pass), then fix the findings in this session. Never commits or pushes.", complete: () => [] },
-  { name: "route", run: (w, args) => w.route(args), description: "Preview provider, tier, and cost for a task without changing state.", complete: () => [] },
-  { name: "advisor", run: (w, args) => w.advisor(args), description: "Ask the advisor tier (Claude Fable or GPT Astra) one question about the active task. Costs money, runs only when you ask, never changes the phase.", complete: () => [] },
-  { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by phase, provider, model, and task against budgets.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
+  { name: "advisor", run: (w, args) => w.advisor(args), description: "Ask the advisor tier one question about the active task (request, plan, tickets, diff stat). Costs money, runs only when you ask, never changes the phase.", complete: () => [] },
+  { name: "cost", run: (w, args) => w.cost(args), description: "Show spend by model, job and task against budgets. /cost json or /cost csv writes the ledger to a file under .pi-workflows/reports/.", complete: (prefix) => completeWords(prefix, ["json", "csv"]) },
   {
     name: "status", run: (w, args) => w.status(args),
-    description: "Show the task's state and next step, then tables for the plan, branch, review, budget, tickets, routing per tier, and logins. /status <ticket> shows one ticket's attempts and reviews. /status foundry also tabulates your Foundry deployments (runs az) and flags tier entries that have none.",
+    description: "Show the task's state and next step, then tables for the plan, branch, review, budget, tickets, routing (each tier with the jobs it serves and what would run), and logins. /status <ticket> shows one ticket's attempts and reviews. /status foundry also tabulates your Foundry deployments (runs az) and flags tier entries that have none.",
     complete: (prefix) => completeWords(prefix, ["foundry"]),
   },
   {
     name: "auth", run: (w, args) => w.auth(args),
-    description: "Show account-login status, or explain /login for a provider. API keys are not accepted.",
+    description: "Show the Logins table (/auth or /auth status), or explain how to sign in to a provider (/auth login <provider>). API keys are not accepted.",
     complete: (prefix) => {
       const [first, second] = prefix.split(/\s+/, 2);
       if (!first || ("status".startsWith(first) && !prefix.includes(" ")) || ("login".startsWith(first) && !prefix.includes(" "))) {

@@ -106,21 +106,18 @@ describe("state carried into a new plan version", () => {
     summary: "s",
     risks: [],
     acceptance: [],
-    estimatedUsd: null,
-    groups: tickets.map((item) => ({ id: `${item.id}-${item.slug}`, summary: item.title, files: [], dependsOn: [], edits: [] })),
+    groups: tickets.map((item) => ({ id: `${item.id}-${item.slug}`, summary: item.title, files: [], dependsOn: [] })),
     overlap: [],
     securitySensitive: false,
     tickets,
   });
-  it("drops the runs of tickets the new plan no longer has, keeps the rest, and restarts attempts", () => {
+  it("drops the runs of tickets the new plan no longer has and keeps the rest", () => {
     const task: TaskState = {
       ...blank("t", "req", "2026-10-15T00:00:00.000Z"),
       plan: draft([ticket("01", "old-slug"), ticket("02", "same")]),
       ticketRuns: { "01": { status: "done", attempts: 1, turns: 1, tokens: 1, costUsd: 0, maxContextTokens: 1, crossedTarget: false }, "02": { status: "done", attempts: 1, turns: 1, tokens: 1, costUsd: 0, maxContextTokens: 1, crossedTarget: false } },
-      attempts: [{ tier: "cheap", provider: "openai", model: "m", outcome: "failure", at: "2026-10-15T00:00:00.000Z" }],
     };
     const next = forNewPlan(task, draft([ticket("01", "new-slug"), ticket("02", "same")]));
-    expect(next.attempts).toEqual([]);
     // The stale "done" for ticket 01 is gone, so the new 01 runs; 02 stays done.
     expect(Object.keys(next.ticketRuns ?? {})).toEqual(["02"]);
   });
@@ -147,7 +144,7 @@ describe("phantom spend", () => {
     { provider: "anthropic", model: "cheap", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 },
     { provider: "anthropic", model: "cheap", billing: "api-key" as const, effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 },
   ];
-  const unknown: CostRecord = { id: "1", at: "2026-10-15T10:00:00.000Z", taskId: "t", phase: "IDLE", provider: "anthropic", model: "other", tier: "interactive", requests: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: null, usageKnown: false, outcome: "unknown", retries: 0, reason: "observed assistant usage" };
+  const unknown: CostRecord = { id: "1", at: "2026-10-15T10:00:00.000Z", taskId: "t", phase: "IDLE", provider: "anthropic", model: "other", tier: "interactive", requests: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: null, usageKnown: false, outcome: "unknown", retries: 0, reason: "observed assistant usage" };
 
   it("estimates an unpriced subscription model from subscription rows only, and api-key rows while on a key", () => {
     expect(summarize([unknown], { pricing }).estimatedUnknownUsd).toBe(0);
@@ -162,7 +159,7 @@ describe("phantom spend", () => {
 });
 
 describe("model review", () => {
-  const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], estimatedUsd: null, groups: [], overlap: [], securitySensitive: false, tickets: [ticket("01", "retry", { acceptanceCriteria: ["retry works"] })] };
+  const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], groups: [], overlap: [], securitySensitive: false, tickets: [ticket("01", "retry", { acceptanceCriteria: ["retry works"] })] };
 
   it("parses a JSON list out of chatty output, fills defaults, and sorts by severity", () => {
     const text = 'Here you go:\n[{"severity":"LOW","category":"tests","message":"No test for the empty case.","file":"src/a.ts"},{"severity":"high","message":"retry() loops forever when attempts is 0.","evidence":"while (true)"},{"message":""},"junk"]';

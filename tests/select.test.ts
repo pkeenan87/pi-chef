@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { layerConfigs, parseConfig } from "../src/config.js";
 import { budgetStatusFor, buildCostRecord, summarize } from "../src/cost/ledger.js";
@@ -164,11 +165,11 @@ describe("selector ranking", () => {
 
 describe("decideRoute integration", () => {
   const classification = (overrides = {}) => ({
-    task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], recommended_tier: "cheap" as const, reason_codes: [], source: "keywords" as const, ...overrides,
+    task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], reason_codes: [], source: "keywords" as const, ...overrides,
   });
 
   it("returns the chosen model, reason and considered list", () => {
-    const decision = decideRoute(classification(), tieredConfig(), {}, { purpose: "implement", at, rng: seededRng(5) });
+    const decision = decideRoute(classification(), tieredConfig(), {}, { purpose: "implement", ticketTier: "cheap", at, rng: seededRng(5) });
     expect(decision.tier).toBe("cheap");
     expect(["gpt-6-luna", "claude-haiku-5-5"]).toContain(decision.model);
     expect(decision.candidate?.model).toBe(decision.model);
@@ -179,22 +180,22 @@ describe("decideRoute integration", () => {
   it("moves up a tier when every candidate is excluded by policy, and blocks when none remain", () => {
     const config = tieredConfig("orgProviderAllowlist: [anthropic]\n");
     // cheap still has anthropic haiku; premium keeps opus
-    expect(decideRoute(classification(), config, {}, { purpose: "implement", at }).provider).toBe("anthropic");
+    expect(decideRoute(classification(), config, {}, { purpose: "implement", ticketTier: "cheap", at }).provider).toBe("anthropic");
     const onlyOpenai = tieredConfig("orgProviderAllowlist: [openai]\n");
-    const standard = decideRoute(classification({ recommended_tier: "standard" }), onlyOpenai, {}, { purpose: "preview", at });
+    const standard = decideRoute(classification(), onlyOpenai, {}, { purpose: "implement", ticketTier: "standard", at });
     // standard has no openai candidate, so the policy escalates to premium (sol)
     expect(standard.tier).toBe("premium");
     expect(standard.model).toBe("gpt-6.1-sol");
     expect(standard.reason).toContain("escalated_from_standard_excluded");
     const capped = tieredConfig("orgProviderAllowlist: [openai]\nrouting: { maxTier: standard }\n");
-    const blocked = decideRoute(classification({ recommended_tier: "standard" }), capped, {}, { purpose: "preview", at });
+    const blocked = decideRoute(classification(), capped, {}, { purpose: "implement", ticketTier: "standard", at });
     expect(blocked.blocked).toMatch(/standard/);
     expect(blocked.provider).toBe("none");
   });
 });
 
 describe("review fixes", () => {
-  const cls = { task_type: "general", complexity: "medium" as const, risk: "high" as const, required_capabilities: ["auth"], recommended_tier: "standard" as const, reason_codes: [], source: "keywords" as const };
+  const cls = { task_type: "general", complexity: "medium" as const, risk: "high" as const, required_capabilities: ["auth"], reason_codes: [], source: "keywords" as const };
 
   it("R3: an exhausted budget excludes unpriced candidates but keeps known-zero prices", () => {
     const config = pair("", "  - { provider: local, model: free, effectiveFrom: \"2026-01-01\", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }\n");
@@ -218,7 +219,7 @@ describe("review fixes", () => {
     const config = pair();
     for (let seed = 1; seed <= 25; seed++) {
       const direct = selectCandidate({ tier: "standard", taskType: "general", config, table: cells([3, 1], [2, 2]), at, rng: seededRng(seed) });
-      const routed = decideRoute(cls, config, cells([3, 1], [2, 2]), { purpose: "implement", at, rng: seededRng(seed) });
+      const routed = decideRoute(cls, config, cells([3, 1], [2, 2]), { purpose: "implement", ticketTier: "standard", at, rng: seededRng(seed) });
       expect(routed.tier).toBe("standard");
       expect(routed.model).toBe(direct.candidate?.model);
     }
@@ -255,7 +256,7 @@ function ledgerRow(provider: string, model: string, when: string, tokens: number
   return {
     id: `${provider}-${when}`, at: when, taskId: "t", phase: "IMPLEMENTING", provider, model, tier: "standard", requests: 1,
     inputTokens: tokens, outputTokens: tokens === null ? null : 0, cacheReadTokens: 0, cacheWriteTokens: 0,
-    estimatedUsd: null, actualUsd, usageKnown: actualUsd !== null, outcome: "success", retries: 0, reason: "test",
+    actualUsd, usageKnown: actualUsd !== null, outcome: "success", retries: 0, reason: "test",
   };
 }
 
@@ -356,7 +357,7 @@ describe("subscription quota shadow prices", () => {
     expect(quotaUsage(records, subscriptions(), at)).toEqual({});
   });
 
-  it("sends easy work to the quota-cheap tier member and keeps hard work in premium", () => {
+  it("sends work to the quota-cheap tier member", () => {
     const yaml = `
 quota:
   models:
@@ -364,17 +365,11 @@ quota:
     - { provider: anthropic, model: claude-haiku-5-5, perMillionTokensUsd: 1 }
 `;
     const config = tieredConfig(yaml);
-    const easy = { task_type: "general", complexity: "low" as const, risk: "low" as const, required_capabilities: [], recommended_tier: "cheap" as const, reason_codes: [], source: "keywords" as const };
+    const easy = { task_type: "general", complexity: "low" as const, risk: "low" as const, required_capabilities: [], reason_codes: [], source: "keywords" as const };
     const proven = { general: { [modelMetricKey("cheap", "openai", "gpt-6-luna")]: { success: 19, failure: 1 }, [modelMetricKey("cheap", "anthropic", "claude-haiku-5-5")]: { success: 19, failure: 1 } } };
     let luna = 0;
-    for (let seed = 1; seed <= 100; seed++) if (decideRoute(easy, config, proven, { purpose: "implement", at, rng: seededRng(seed) }).model === "gpt-6-luna") luna += 1;
+    for (let seed = 1; seed <= 100; seed++) if (decideRoute(easy, config, proven, { purpose: "implement", ticketTier: "cheap", at, rng: seededRng(seed) }).model === "gpt-6-luna") luna += 1;
     expect(luna).toBeGreaterThan(80);
-    // The tier for hard work is policy, not price: planning a high-complexity task stays premium.
-    const hard = decideRoute({ ...easy, complexity: "high" }, config, proven, { purpose: "plan", at, rng: seededRng(1) });
-    expect(hard.tier).toBe("premium");
-    // decideRoute's expected cost is the real one, without the shadow price.
-    const cheap = decideRoute(easy, config, proven, { purpose: "implement", at, rng: seededRng(1) });
-    expect(cheap.expectedUsd).toBe(0);
   });
 
   it("validates the quota block", () => {
@@ -405,9 +400,11 @@ quota:
     app.store.appendLedger(ledgerRow("anthropic", "claude-opus-5-5", app.now().toISOString(), 1500));
     const report = await app.cost();
     expect(report.text).toContain("Known spend $0.0000");
-    expect(report.text).toContain("Subscription quota (ranking only; not billed, not counted toward budgets):");
-    expect(report.text).toContain("  anthropic: 1,500 tokens today / 1,000 cap, 1,500 this week (over cap: shadow prices x4)");
-    const json = (await app.cost("json")).data as { quota: Record<string, { dailyTokens: number; overCap: boolean }> };
+    expect(report.text).toContain("Subscription quota (ranks models; never billed or budgeted)");
+    expect(report.text).toContain("- anthropic: 1,500 tokens today / 1,000 cap, 1,500 this week (over cap: shadow prices x4)");
+    // The JSON export is a file in the workspace's reports folder.
+    const { file } = (await app.cost("json")).data as { file: string };
+    const json = JSON.parse(readFileSync(file, "utf8")) as { quota: Record<string, { dailyTokens: number; overCap: boolean }> };
     expect(json.quota.anthropic).toMatchObject({ dailyTokens: 1500, overCap: true });
   });
 });
@@ -452,7 +449,7 @@ describe("per-attempt overhead (ranking only)", () => {
     expect(result.reason).toMatch(/incl\. \$0\.0200 overhead, sampled p=/);
   });
 
-  it("never reaches the ledger, the budget, the over-budget filter, or expectedUsd", () => {
+  it("never reaches the ledger, the budget, or the over-budget filter", () => {
     const config = freeVersusPriced(5);
     // The over-budget filter looks at the real price only: a $0 model passes with nothing left.
     expect(run(config, {}, { budgetRemainingUsd: 0 }).considered.find((item) => item.model === "a")?.excludedReason).toBeUndefined();
@@ -466,20 +463,12 @@ describe("per-attempt overhead (ranking only)", () => {
     const summary = summarize([entry], { pricing: config.pricing });
     expect(summary.knownUsd).toBe(0);
     expect(budgetStatusFor(summary, 0.01, 0.8)).toBe("ok");
-    const classification = { task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], recommended_tier: "standard" as const, reason_codes: [], source: "keywords" as const };
-    // A $0 model stays $0 in expectedUsd however large the overhead is; the priced one stays on its real price.
-    const onlyFree = { ...config, orgProviderAllowlist: ["anthropic" as const] };
-    expect(decideRoute(classification, onlyFree, {}, { purpose: "preview", at }).expectedUsd).toBe(0);
-    const onlyPriced = { ...config, orgProviderAllowlist: ["openai" as const] };
-    const priced = decideRoute(classification, onlyPriced, {}, { purpose: "preview", at });
-    const real = decideRoute(classification, { ...freeVersusPriced(0), orgProviderAllowlist: ["openai" as const] }, {}, { purpose: "preview", at });
-    expect(priced.expectedUsd).toBe(real.expectedUsd);
   });
 });
 
 describe("review outcomes are keyed apart from implementation", () => {
   it("a failing review record does not change implement selection", () => {
-    const classification = { task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], recommended_tier: "standard" as const, reason_codes: [], source: "keywords" as const };
+    const classification = { task_type: "general", complexity: "medium" as const, risk: "medium" as const, required_capabilities: [], reason_codes: [], source: "keywords" as const };
     const key = modelMetricKey("standard", "anthropic", "a");
     const implement: SuccessTable = { general: { [key]: { success: 19, failure: 1 } } };
     const withReviewFailures: SuccessTable = { ...implement, [reviewMetricType("general")]: { [key]: { success: 0, failure: 30 } } };

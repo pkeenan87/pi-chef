@@ -10,6 +10,7 @@ import { workspaceName, type WorkflowContext } from "./context.js";
 import { clipDiffSummarized } from "./cut-summary.js";
 import { reviewCandidates } from "./review.js";
 import { decide } from "./routing.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * The per-ticket review of /build. After a ticket's checks pass and before its commit, the review-tier model (Opus)
@@ -182,7 +183,7 @@ async function ask(
     try {
       response = await chat({ provider: candidate.provider as never, model: candidate.model }, { messages: [{ role: "system", content: system }, { role: "user", content: user }], maxTokens: REVIEW_MAX_TOKENS, signal });
     } catch (error) {
-      ledger({ input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 }, "failure");
+      ledger(failedUsage(error), "failure");
       if (ctx.shutdown.signal.aborted) {
         errors.push("the session is ending");
         break;

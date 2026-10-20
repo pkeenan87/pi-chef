@@ -71,13 +71,14 @@ export function record(
   outcome: CostRecord["outcome"],
   retries: number,
   reason: string,
-  estimatedUsd: number | null = null,
+  /** A fixed id and time, for a call recorded after the fact (Pi's own calls, read from the session file). */
+  when: { id?: string; at?: Date } = {},
 ): CostRecord {
   // Any call while a /build ticket runs (compaction, web_search, a batch summary) counts toward that ticket's cost.
   const running = ctx.store.load(taskId)?.build?.currentTicket;
   if (running && !/ ticket \S+$/.test(reason)) reason = `${reason} · ticket ${running}`;
-  const entry = buildCostRecord({ provider, model, phase, taskId, tier, usage, outcome, retries, reason, estimatedUsd }, ctx.config.pricing, ctx.now(), ctx.id());
-  // Literal edits and other model-free work report zero tokens: that is a known zero charge, not an unknown one.
+  const entry = buildCostRecord({ provider, model, phase, taskId, tier, usage, outcome, retries, reason }, ctx.config.pricing, when.at ?? ctx.now(), when.id ?? ctx.id());
+  // Model-free work (a failure before any request) reports zero tokens: that is a known zero charge, not an unknown one.
   if (usage.input === 0 && usage.output === 0 && entry.actualUsd === null) {
     entry.actualUsd = 0;
     entry.usageKnown = true;
@@ -99,7 +100,7 @@ export function remember(
   retries: number,
   reason: string,
 ): CostRecord {
-  return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason, state.routing?.estimatedUsd ?? null);
+  return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason);
 }
 
 export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
@@ -111,6 +112,53 @@ export function observeUsage(ctx: WorkflowContext, input: { provider: string; mo
   // While /build runs a ticket, the turn is that ticket's spend (/cost and the build report read it back).
   const reason = state.build?.currentTicket ? `${base} · ticket ${state.build.currentTicket}` : base;
   return remember(ctx, state, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
+}
+
+/** A session-file entry as `sessionManager.getEntries()` returns it; only the fields the ledger reads. */
+interface PiEntry {
+  type?: unknown;
+  id?: unknown;
+  timestamp?: unknown;
+  kind?: unknown;
+  provider?: unknown;
+  model?: unknown;
+  fromHook?: unknown;
+  usage?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; cost?: { total?: unknown } };
+}
+
+/**
+ * Ledgers the model calls Pi makes on its own, which never reach `message_end`: cache-warming refreshes (`usage`
+ * entries), and the compaction and branch summaries Pi wrote itself (a hook's own summary is ledgered where it ran).
+ * Each entry is recorded once, under the id `pi-<session>-<entry>`, at the entry's time, on the active task; entries
+ * older than `since` (when this extension began watching the session) are left alone.
+ * `model` is the session's model, the one Pi summarizes with; a usage entry names its own.
+ */
+export function recordPiUsage(ctx: WorkflowContext, input: { sessionId: string; entries: readonly unknown[]; model?: { provider: string; id: string }; since?: Date }): CostRecord[] {
+  const seen = (ctx.piLedgered ??= new Set(ctx.store.readLedger().map((entry) => entry.id).filter((id) => id.startsWith("pi-"))));
+  const state = active(ctx);
+  const out: CostRecord[] = [];
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  for (const raw of input.entries) {
+    const entry = raw as PiEntry;
+    if (typeof entry?.id !== "string" || !entry.usage) continue;
+    const job =
+      entry.type === "usage" ? `Pi ${String(entry.kind ?? "usage").replace(/_/g, " ").replace(/^cache warm$/, "cache warming")}`
+      : entry.type === "compaction" && entry.fromHook !== true ? "Pi compaction"
+      : entry.type === "branch_summary" && entry.fromHook !== true ? "Pi branch summary"
+      : undefined;
+    if (!job) continue;
+    const id = `pi-${input.sessionId}-${entry.id}`;
+    const at = typeof entry.timestamp === "string" && !Number.isNaN(Date.parse(entry.timestamp)) ? new Date(entry.timestamp) : ctx.now();
+    // A resumed session's history belongs to whatever ran then, not to the task active now.
+    if (seen.has(id) || (input.since && at < input.since)) continue;
+    seen.add(id);
+    const provider = typeof entry.provider === "string" ? entry.provider : input.model?.provider ?? "pi";
+    const model = typeof entry.model === "string" ? entry.model : input.model?.id ?? "unknown";
+    const listed = count(entry.usage.cost?.total);
+    const usage: TokenUsage = { input: count(entry.usage.input), output: count(entry.usage.output), cacheRead: count(entry.usage.cacheRead), cacheWrite: count(entry.usage.cacheWrite), requests: 1, ...(listed !== null ? { listPriceUsd: listed } : {}) };
+    out.push(record(ctx, state?.taskId ?? SESSION_TASK_ID, state?.phase ?? "IDLE", "pi", provider, model, usage, "success", 0, job, { id, at }));
+  }
+  return out;
 }
 
 /**

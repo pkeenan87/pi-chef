@@ -95,7 +95,7 @@ describe("ticket difficulty", () => {
   });
 
   it("maps a suggestedTier-only ticket to a difficulty and lets difficulty win", () => {
-    const of = (item: { difficulty?: Difficulty; suggestedTier?: Tier }) => ticketDifficulty(item);
+    const of = (item: { difficulty?: Difficulty; suggestedTier?: string }) => ticketDifficulty(item);
     expect(of({ suggestedTier: "deterministic" })).toBe("low");
     expect(of({ suggestedTier: "cheap" })).toBe("low");
     expect(of({ suggestedTier: "standard" })).toBe("medium");

@@ -8,6 +8,7 @@ import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
 import { clipDiffSummarized } from "./cut-summary.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * Advisors in the branch-level /review. The review model (Opus) lists its findings and puts 2-3 questions to the
@@ -142,7 +143,7 @@ async function resolveReview(
     try {
       response = await chat(who, { messages: [{ role: "system", content: resolveSystem() }, { role: "user", content: user }], maxTokens: RESOLVE_MAX_TOKENS, signal });
     } catch (error) {
-      ledger({ input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 }, "failure");
+      ledger(failedUsage(error), "failure");
       if (ctx.shutdown.signal.aborted) {
         errors.push("the session is ending");
         break;

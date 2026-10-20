@@ -158,10 +158,9 @@ providers:
   local:
     type: openai-compatible
     baseUrl: http://127.0.0.1:11434/v1
-    model: qwen2.5-coder:7b
 ```
 
-Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This process does not start that server. The deterministic tier uses it only while `<baseUrl>/models` answers.
+Point `baseUrl` at Ollama, vLLM, or llama.cpp's OpenAI-compatible server. This process does not start that server. The model is named under `tiers.local` (below); a local candidate is skipped while `<baseUrl>/models` does not answer.
 
 ### Ollama for local mode
 

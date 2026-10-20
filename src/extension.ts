@@ -478,6 +478,26 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   return { getWorkflow, driver };
 }
 
+/** Since when this extension has watched each session: Pi's own calls from before then are not this run's to ledger. */
+const watchedSince = new Map<string, Date>();
+
+/**
+ * Ledgers the calls Pi made on its own that never reach `message_end` (cache-warming refreshes, Pi's own compaction and
+ * branch summaries), from the session file, once each. Runs after each settled turn, compaction, tree move, command,
+ * and at shutdown. Never throws: a stale ctx or an unreadable session is caught up by the next sweep.
+ */
+function sweepPiUsage(ctx: ExtensionContext): void {
+  try {
+    const sessionId = ctx.sessionManager.getSessionId();
+    const since = watchedSince.get(sessionId);
+    if (!since) return;
+    const model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+    (active ?? tryWorkflowFor(ctx.cwd))?.recordPiUsage({ sessionId, entries: ctx.sessionManager.getEntries(), since, ...(model ? { model } : {}) });
+  } catch {
+    /* caught up by the next sweep */
+  }
+}
+
 export function registerWorkflow(pi: ExtensionAPI): void {
   for (const spec of COMMANDS) {
     pi.registerCommand(spec.name, {
@@ -490,6 +510,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
         }
         let result: CommandResult;
         replacementCtx = undefined;
+        // /cost and /status should see every call Pi made on its own so far.
+        sweepPiUsage(ctx);
         try {
           const workflow = workflowFor(ctx.cwd, ctx as unknown as CommandContext);
           if (spec.drive) {
@@ -528,6 +550,12 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     // A new session may start with an empty provider registry, so register again.
     registeredSignature = undefined;
+    try {
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (!watchedSince.has(sessionId)) watchedSince.set(sessionId, new Date());
+    } catch {
+      /* no session file: nothing of Pi's own to ledger */
+    }
     // Every failure below is shown (once per distinct text), whichever step finds it; the session itself never crashes.
     const shown = new Set<string>();
     const show = (text: string) => {
@@ -568,7 +596,10 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   pi.on("session_before_compact", (event, ctx) => compactWithCheapTier(event, ctx));
   pi.on("input", (event, ctx) => gateInput(event, ctx));
-  pi.on("session_shutdown", () => {
+  pi.on("session_compact", (_event, ctx) => sweepPiUsage(ctx));
+  pi.on("session_tree", (_event, ctx) => sweepPiUsage(ctx));
+  pi.on("session_shutdown", (_event, ctx) => {
+    sweepPiUsage(ctx);
     active?.dispose();
     active = undefined;
   });
@@ -604,6 +635,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     return undefined;
   });
   pi.on("agent_settled", async (event, ctx) => {
+    sweepPiUsage(ctx);
     if (event.aborted && restoreSlot[TURN]) restoreSlot[TURN].aborted = true;
     // plan_tickets saved a draft during this turn: post it as markdown now that Pi is idle, then ask. An aborted turn keeps
     // the flag, and /show-plan still offers the draft. Only this handler's live ctx is used; any failure is shown, never thrown.
@@ -634,6 +666,9 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       cacheWrite: typeof message.usage.cacheWrite === "number" ? message.usage.cacheWrite : null,
       requests: 1,
     };
+    // Pi's own price for the call: stored beside ours, and the estimate when no pricing row prices it.
+    const listed = (message.usage as { cost?: { total?: unknown } }).cost?.total;
+    if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
     // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
     (active ?? tryWorkflowFor(cwd))?.observeUsage({ provider: message.provider, model: message.model, usage });
   });

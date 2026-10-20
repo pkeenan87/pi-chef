@@ -1,4 +1,4 @@
-import { isAccountProvider, WorkflowError, type ProviderId } from "../domain.js";
+import { isAccountProvider, WorkflowError, type ProviderId, type TokenUsage } from "../domain.js";
 import { ProviderCallError, type ChatRequest, type ChatResponse } from "./clients.js";
 
 /** The slice of Pi's ModelRegistry that chat calls need. Structural so tests can fake it. */
@@ -11,10 +11,23 @@ export interface PiRegistryLike {
     options?: { maxTokens?: number; signal?: AbortSignal },
   ): Promise<{
     content: { type: string; text?: string }[];
-    usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
+    usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost?: { total?: number } };
     stopReason: string;
     errorMessage?: string;
   }>;
+}
+
+/** Pi's usage as the ledger takes it, with Pi's own price for the call when it gave one. */
+function usageOf(usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost?: { total?: number } } | undefined): TokenUsage {
+  const listed = usage?.cost?.total;
+  return {
+    input: usage?.input ?? null,
+    output: usage?.output ?? null,
+    cacheRead: usage?.cacheRead ?? null,
+    cacheWrite: usage?.cacheWrite ?? null,
+    requests: 1,
+    ...(typeof listed === "number" && Number.isFinite(listed) ? { listPriceUsd: listed } : {}),
+  };
 }
 
 /** Calls one configured candidate and returns text plus usage. */
@@ -48,13 +61,16 @@ export function createRegistryChat(
       },
       { maxTokens: request.maxTokens, signal: request.signal },
     );
+    const usage = usageOf(result.usage);
     if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new ProviderCallError("outage", result.errorMessage ?? `${candidate.provider} call ${result.stopReason}.`);
+      // A call that failed or timed out mid-stream may still have been billed: the ledger keeps what the provider reported.
+      const billed = (result.usage?.input ?? 0) + (result.usage?.output ?? 0) + (result.usage?.cacheRead ?? 0) + (result.usage?.cacheWrite ?? 0) > 0;
+      throw new ProviderCallError("outage", result.errorMessage ?? `${candidate.provider} call ${result.stopReason}.`, billed ? usage : undefined);
     }
     const text = result.content.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("");
     return {
       text,
-      usage: { input: result.usage.input, output: result.usage.output, cacheRead: result.usage.cacheRead, cacheWrite: result.usage.cacheWrite, requests: 1 },
+      usage,
       provider: candidate.provider,
       model: candidate.model,
     };

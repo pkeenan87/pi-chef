@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { containsSecret, redact } from "./redact.js";
-import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, TICKET_TIERS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
+import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
 export interface ProviderConfig {
   type: string;
@@ -210,7 +210,6 @@ export const DEFAULT_UNKNOWN_CALL_USD = 0.05;
  * No prices live here: a model without a `pricing` row has an unknown cost (see the config warning).
  */
 export const DEFAULT_TIERS: Record<TierKey, TierCandidate[]> = {
-  deterministic: [{ provider: "local", model: "qwen2.5-coder:7b" }],
   cheap: [{ provider: "anthropic", model: "claude-haiku-5-5" }],
   // Foundry entries are fallbacks for when the account login does not work (for example ChatGPT Enterprise, or no SuperGrok).
   // A Foundry candidate with no endpoint or no az login is unavailable and skipped. The `model` is YOUR deployment name:
@@ -471,6 +470,10 @@ function dropLegacy(raw: Record<string, unknown>, warnings: string[]): Record<st
     for (const [key, list] of Object.entries(out.tiers)) {
       if (key === "classifier") {
         warnOnce(warnings, "tiers.classifier is no longer used; the classifier tier is gone (the planner rates complexity during /plan).");
+        continue;
+      }
+      if (key === "deterministic") {
+        warnOnce(warnings, "tiers.deterministic is no longer used; plans are tickets, built on the ticket tiers. Remove it.");
         continue;
       }
       if (!Array.isArray(list)) {
@@ -1368,7 +1371,6 @@ export function localDifficultiesFor(config: WorkflowConfig): ("low" | "medium")
 
 /**
  * Candidates for a tier: the config's `tiers` list, else the built-in list. Never returns an empty model id.
- * `deterministic` and `advisor` are empty when nothing applies.
  */
 export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
   const explicit = config.tiers[tier];

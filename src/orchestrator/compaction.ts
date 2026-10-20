@@ -1,10 +1,11 @@
-import { emptyUsage, type CostRecord, type TokenUsage } from "../domain.js";
+import { type CostRecord, type TokenUsage } from "../domain.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { redact } from "../redact.js";
 import { selectCandidate } from "../router/select.js";
 import { active, type WorkflowContext } from "./context.js";
 import { budgetRemainingUsd, budgetState, quotaState, record, SESSION_TASK_ID } from "./budget.js";
 import { availability, candidateCheck } from "./routing.js";
+import { failedUsage } from "../providers/clients.js";
 
 /**
  * Compaction summaries on a cheap tier. Pi calls `session_before_compact` before it compacts with the session model;
@@ -94,9 +95,9 @@ export async function summarizeForCompaction(ctx: WorkflowContext, chat: ChatFn,
       maxTokens: MAX_TOKENS,
       signal: input.signal,
     });
-  } catch {
-    // It may or may not have been billed: unknown, never zero.
-    ledger(emptyUsage(), "failure");
+  } catch (error) {
+    // What the provider reported before it failed, else unknown, never zero.
+    ledger(failedUsage(error), "failure");
     return undefined;
   }
   const summary = response.text.trim();

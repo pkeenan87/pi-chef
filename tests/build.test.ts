@@ -429,7 +429,7 @@ describe("/build stops", () => {
     const t = await buildTask();
     t.app.store.appendLedger({
       id: "big", at: new Date("2026-10-14T12:00:00.000Z").toISOString(), taskId: t.taskId, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     const d = fakeDriver(t.cwd, () => undefined);
     const result = await t.run(d.driver);
@@ -444,7 +444,7 @@ describe("/build stops", () => {
       d.write(`f${send.ticket}.txt`);
       t.app.store.appendLedger({
         id: "big", at: new Date("2026-10-14T12:00:00.000Z").toISOString(), taskId: t.taskId, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
-        requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+        requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
       });
     });
     const result = await t.run(d.driver);
@@ -712,11 +712,12 @@ describe("/build branch and approval", () => {
     expect(d.state.fresh).toBe(0);
   });
 
-  it("asks for a re-plan when the plan has no tickets", async () => {
-    const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig() });
-    await app.plan("Maintain the ingest parser.\n```tasks\n[{\"id\":\"a\",\"summary\":\"x\",\"files\":[\"a.ts\"],\"edits\":[{\"path\":\"a.ts\",\"content\":\"x\\n\"}]}]\n```");
-    expect((await app.approveDraft()).ok).toBe(true);
+  it("asks for a re-plan when an old plan has no tickets", async () => {
+    const t = await buildTask();
+    // A plan file from before tickets: groups only.
+    await t.app.store.update(t.taskId, "old plan", (state) => ({ ...state, plan: { ...state.plan!, tickets: undefined } }));
+    const cwd = t.cwd;
+    const app = t.app;
     const d = fakeDriver(cwd, () => undefined);
     const result = await runBuild(() => app, d.driver);
     expect(result.code).toBe("NO_TICKETS");

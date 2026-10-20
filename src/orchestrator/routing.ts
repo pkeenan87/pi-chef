@@ -1,5 +1,5 @@
 import { modelLabel, tierCandidates } from "../config.js";
-import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier, type TicketTier } from "../domain.js";
+import { PROVIDERS, type AcceptedClassification, type RoutingDecision, type Tier } from "../domain.js";
 import { decideRoute } from "../router/policy.js";
 import type { Availability, CandidateCheck } from "../router/select.js";
 import { authProblem, configProblem, registryProblem, userConfigPath } from "../providers/usable.js";
@@ -45,7 +45,7 @@ export function candidateCheck(ctx: WorkflowContext): CandidateCheck | undefined
 export async function decide(
   ctx: WorkflowContext,
   classification: AcceptedClassification,
-  purpose: "plan" | "implement" | "review" | "preview",
+  purpose: "implement" | "review",
   extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: Tier; strictAvailability?: boolean } = {},
 ): Promise<RoutingDecision> {
   return decideRoute(classification, ctx.config, ctx.store.readMetrics(), {
@@ -72,7 +72,7 @@ export async function announce(
   setStatus: (text: string) => void = (text) => ctx.status?.(text),
 ): Promise<void> {
   const why = (decision.blocked ?? decision.selectionReason ?? "").split(";")[0]!.slice(0, 80);
-  const target = decision.provider === "none" ? "literal edits" : modelLabel(ctx.config, decision.provider, decision.model);
+  const target = decision.provider === "none" ? "blocked" : modelLabel(ctx.config, decision.provider, decision.model);
   setStatus(`${decision.tier} → ${target}${why ? ` · ${why}` : ""}`);
   if (!taskId) return;
   const considered = (decision.considered ?? []).map(

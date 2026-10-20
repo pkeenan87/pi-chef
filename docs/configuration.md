@@ -142,9 +142,8 @@ Which models serve each job. Each tier is a list of candidates in preference ord
 
 | Tier | Serves |
 |---|---|
-| `deterministic` | Plans made of literal edits (a ```` ```tasks ```` block), on a local model when one answers |
 | `cheap` | Compaction summaries (`session.compactionTier`) and small in-session jobs |
-| `standard` | `/route` previews of an ordinary request (a security-sensitive one previews on `premium`), and the fallback for a failed `/review` part |
+| `standard` | The fallback for a failed `/review` part, and `routing.reviewTier` if you set it there |
 | `premium` | The review gate and `/review` (`routing.reviewTier`), and the last step of the ticket ladder |
 | `ticketLow`, `ticketMedium`, `ticketHigh` | `/build` tickets of difficulty low, medium and high |
 | `local` | Every ticket of a local-mode task |
@@ -297,10 +296,9 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 
 | Tier | Candidates (sample config) |
 |---|---|
-| deterministic | Local OpenAI-compatible model (`qwen2.5-coder:7b`) if configured and reachable; otherwise the plan's literal edits with no model |
 | cheap (`session.compactionTier`) | Claude Haiku `claude-haiku-5-5` (Anthropic account login). Compaction summaries |
 | batch | ChatGPT Luna `gpt-6-luna` (OpenAI account login). Standalone jobs the extension runs by itself, outside any conversation: today the one-line summaries of files a diff clip cut. A config without a `batch` list runs them on `cheap` |
-| standard | Claude Sonnet `claude-sonnet-5-5`, Sol 6.1 `gpt-6.1-sol`. `/route` previews and the fallback for a failed `/review` model part. `/plan` itself runs in your session on `session.model` |
+| standard | Claude Sonnet `claude-sonnet-5-5`, Sol 6.1 `gpt-6.1-sol`. The fallback for a failed `/review` model part. `/plan` itself runs in your session on `session.model` |
 | premium (`routing.reviewTier`) | Claude Opus `claude-opus-5-5`. The `/review` model pass and the last step of the ticket ladder. The main session runs on Opus through `session.model`, not through this tier |
 | ticketLow | Grok 4.7 `grok-4.7` through a SuperGrok subscription (`xai`). Tickets of difficulty `low` |
 | ticketMedium | Claude Sonnet `claude-sonnet-5-5`. Difficulty `medium` |
@@ -324,7 +322,7 @@ The old `models: { cheap: openai, ... }` map is deprecated and loads with a warn
 
 How a candidate is picked. With `routing.selection: ordered` (the default) step 1 filters, then the first remaining candidate in the tier's listed order wins: the list is a fallback chain, and the route reason names each entry it passed over and why (`fallback 1 in the tier's order (openai/gpt-6.1-sol not signed in)`). Scores are still computed and shown in the `route` event, but they do not pick. With `routing.selection: adaptive` steps 2 and 3 pick:
 
-1. Filter out candidates that the org allowlist or `proprietaryCode` excludes, whose own circuit breaker is open, whose expected cost exceeds the remaining task or daily budget, and whose provider is not signed in. For the deterministic tier an unreachable local server also excludes it (a cached `GET <baseUrl>/models` with a short timeout). If no provider is signed in for a tier, the choice ignores sign-in so the usual "run /login" pause appears instead of a silent escalation to a dearer tier.
+1. Filter out candidates that the org allowlist or `proprietaryCode` excludes, whose own circuit breaker is open, whose expected cost exceeds the remaining task or daily budget, and whose provider is not signed in. A local candidate is also excluded while its server does not answer (a cached `GET <baseUrl>/models` with a short timeout). If no provider is signed in for a tier, the choice ignores sign-in so the usual "run /login" pause appears instead of a silent escalation to a dearer tier.
 2. Score each remaining candidate as expected cost per success: its price times the expected token mix (`workers.tokenBudget`, 4:1 input to output), plus its quota shadow price (below) and `routing.attemptOverheadUsd` (default 0.02, ranking only: the time and retry cost of a failed attempt, so a $0 model with a poor record does not always win), divided by its success probability (floored at 0.05). The probability is a Thompson sample from Beta(1 + successes, 1 + failures) for that task type and model, so a new or unlucky model still gets tried now and then.
 3. The lowest score wins. Ties go to config order. A candidate with no `pricing` row ranks after priced ones and the decision is flagged `price_unknown`.
 4. If every candidate is excluded, the policy moves to the next tier, or stops with a clear reason (`/build` stops with `NO_CANDIDATE`).
@@ -350,7 +348,7 @@ quota:
 ```
 
 - **Shadow cost.** For one task the shadow cost is `workers.tokenBudget` tokens at `perMillionTokensUsd`. It is added to the real expected cost when the selector scores candidates within a tier, and when the policy compares proven tiers for `/build`. When a soft budget keeps only the cheapest candidate of a chat tier, the real price decides and the shadow price only breaks ties. A model without a `quota.models` row has no shadow cost.
-- **Ranking only.** Shadow prices (and `routing.attemptOverheadUsd`) never reach the ledger's `actualUsd`, the task or daily budget, or the over-budget filter. A $0 subscription model stays eligible when the budget is spent, whatever its shadow price. `expectedUsd` in a routing decision is the real cost. A model still needs a `pricing` row: a quota weight does not make an unpriced model priced.
+- **Ranking only.** Shadow prices (and `routing.attemptOverheadUsd`) never reach the ledger's `actualUsd`, the task or daily budget, or the over-budget filter. A $0 subscription model stays eligible when the budget is spent, whatever its shadow price. A model still needs a `pricing` row: a quota weight does not make an unpriced model priced.
 - **Soft caps.** Quota use per provider is the sum of the reported tokens (input, output, cache read, and cache write) in the ledger, for the budget day (UTC, like `dailyUsd`) and for the rolling seven days. Unknown token counts add nothing. At or over a provider's `dailyTokens` or `weeklyTokens`, its shadow prices are multiplied by `overCapMultiplier`, which pushes work to the other provider or to metered models. A cap never blocks a call, and the decision reason notes "over quota cap" when an over-cap model still wins.
 - **Tier choice is unchanged.** Hard and security-sensitive work still goes to `premium` by policy. The shadow price only decides which premium model serves it, for example Sol over Opus when Anthropic is over its cap.
 - **Layering.** `quota` is a ranking preference, not a policy field, so a project file overrides the user file per model row and per provider cap.
@@ -373,7 +371,7 @@ Routing checks every candidate the way the `/build` preflight does: Pi's model r
 
 ### Showing the chosen model
 
-Every routing decision (`/plan`, each `/build` ticket and escalation, `/review`, `/route`, `/advisor`) adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate, and shows up in `/status` and `/cost` with per-model spend and success counts.
+Every routing decision (each `/build` ticket and escalation, `/review`, `/advisor`) adds a `route` event to the task's `events.jsonl` with the tier, model, reason and the score or exclusion of each candidate. `/status` shows each tier with the jobs it serves and the model that would run now; `/cost` shows per-model spend and success counts. Planning picks no model: it runs on `session.model`.
 
 ### The main session
 
@@ -404,11 +402,21 @@ OpenAI, Anthropic, Foundry, Vercel, and local chat models are called through Pi'
 
 ## Cost
 
-Every model call the workflow records goes to `.pi-workflows/cost/ledger.jsonl`: provider, model, input, output, cache tokens, requests, estimated and actual charge, phase, retries, and outcome.
+Every model call goes to `.pi-workflows/cost/ledger.jsonl`: provider, model, input, output, cache tokens, requests, the charge (`actualUsd`), Pi's own price for the call when it gave one (`listPriceUsd`), phase, retries, outcome, and a reason that names the job (and ` · ticket <id>` while a `/build` ticket runs). The row goes to the active task, so a task's total covers:
 
-Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. A deterministic step that made no model call is a known zero.
+| Call | Recorded from |
+|---|---|
+| The session's turns: planning, chat, and every ticket turn | each assistant message (`message_end`) |
+| The per-ticket review, its advisors and resolve call; `/review`'s model pass, advisors and resolve; `plan_consult`; `/advisor`; summaries of cut files; compaction on `session.compactionTier`; `web_search` | the call itself |
+| Calls Pi makes on its own: cache-warming refreshes, Pi's own compaction (when the cheap-tier hook declines, for example during a local ticket), and branch summaries on `/tree` | the session file, swept after each turn, compaction, tree move and command, and at shutdown; each entry once (id `pi-<session>-<entry>`), from when pi-chef started watching that session |
 
-Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, and a row with nothing to price it from (for example a call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null` and `/cost` still lists those rows as unknown, with a count. An unknown row no longer makes the budget soft by itself.
+A call that fails or times out keeps the tokens the provider reported before it stopped (a stream cut off by a timeout is still billed). Only a call that reported nothing is unknown.
+
+Prices live only in `pricing:` rows with `effectiveFrom`. There is no price table in source. A missing price or missing token count is an unknown charge (`actualUsd: null`, `usageKnown: false`), not zero. Work that made no model call is a known zero. `listPriceUsd` is never the charge: it is what Pi's model catalog says the call costs at list price, kept for comparison and used to estimate an unknown row.
+
+Not priced: Anthropic's 1-hour cache writes are billed above the 5-minute rate, and some models charge more above a long-context threshold; a pricing row has one rate for each token kind, so those calls are under-priced by that difference. Compare `actualUsd` with `listPriceUsd` in `/cost csv` if you bill per token. Per-search fees of `web_search` are not priced.
+
+Budgets in the sample (`taskUsd: 20`, `dailyUsd: 75`) are operator limits, not prices. Known spend at or above the limit is a hard stop. Known spend at or above `softWarningRatio` (default 0.8) is a warning. Unknown rows are never added in as zero: a row with token counts is estimated at the provider's dearest configured price, a row that only carries Pi's own price counts at that, and a row with nothing to price it from (for example a call whose usage was lost) counts as `budgets.unknownCallUsd` (default 0.05, at least 0; a project can only raise it). The estimate lives in budget math only: the ledger keeps `actualUsd: null`, and `/cost` lists those rows as unknown, with a count, and shows the Total column with them at the estimate (`≈`). An unknown row no longer makes the budget soft by itself.
 
 `/cost` also names models seen in the ledger that have no pricing row: their spend is unknown and estimated at the provider's dearest row for its current billing (subscription rows while on account login), which keeps the budget "soft", so add a row for each. Failures before any model request (a git error, a plan cycle) are ledgered as a known $0 and do not count against the model. Nothing classifies by model: the request gets a keyword scan and the planner rates the task.
 

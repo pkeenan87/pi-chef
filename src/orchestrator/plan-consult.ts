@@ -104,17 +104,6 @@ async function runConsult(ctx: WorkflowContext, input: { tickets: unknown; quest
   return { consult, repeat: false };
 }
 
-/** Drops the stored consult: the draft was sent back for changes, so the revised draft may consult again. */
-export async function clearConsult(ctx: WorkflowContext): Promise<void> {
-  const found = activePlanning(ctx);
-  if (!found?.task.planning?.consult) return;
-  await ctx.store.update(found.task.taskId, "plan consult cleared", (task) => {
-    if (!task.planning) return task;
-    const { consult: _dropped, ...rest } = task.planning;
-    return { ...task, planning: rest };
-  });
-}
-
 /**
  * What plan_tickets needs before it shows the plan. With advisors available it refuses, deterministically, until a
  * consult exists for this draft and the model has written its resolution. With none available, or when the budget

@@ -27,23 +27,11 @@ describe("pi extension surface", () => {
     for (const spec of COMMANDS) {
       expect(commands.get(spec.name)?.description).toBeTruthy();
     }
-    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "plans", "build", "review", "route", "advisor", "cost", "status", "auth"]);
+    expect(COMMANDS.map((spec) => spec.name)).toEqual(["plan", "show-plan", "plans", "build", "review", "advisor", "cost", "status", "auth"]);
     expect([...commands.keys()].sort()).toEqual([...COMMANDS.map((spec) => spec.name), "chef"].sort());
     const auth = commands.get("auth");
     const completions = await auth?.getArgumentCompletions?.("login an");
     expect(completions?.map((item) => item.value)).toContain("anthropic");
-    const resets: string[] = [];
-    await commands.get("route")?.handler("rename a typo", {
-      cwd,
-      hasUI: true,
-      ui: { notify() {}, setStatus() {}, confirm: async () => false },
-      newSession: async (options?: { withSession?: (next: { sendMessage: (message: unknown, extra?: unknown) => Promise<void> }) => Promise<void> }) => {
-        await options?.withSession?.({ async sendMessage() { resets.push("sent"); } });
-        return { cancelled: false };
-      },
-      compact() {},
-    });
-    expect(resets).toEqual([]);
   });
 
   function fakePi() {
@@ -385,7 +373,7 @@ describe("web tools", () => {
     bindWorkflow(app);
     app.store.appendLedger({
       id: "big", at: new Date().toISOString(), taskId: app.activeTaskId()!, phase: "IMPLEMENTING", provider: "openai", model: "gpt-5.4", tier: "premium",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     let called = false;
     const registered = tools({ ...deps, searchTransport: async () => ((called = true), { status: 200, body: searchBody }) });

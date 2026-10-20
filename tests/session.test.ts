@@ -5,9 +5,9 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
-import { bindWorkflow, registerWorkflow } from "../src/extension.js";
+import { bindWorkflow, currentWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { contextOf, readyAuth, sampleTicket, singleTaskRequest, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
+import { addTask, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string };
@@ -232,8 +232,8 @@ describe("session_before_compact", () => {
 
   it("leaves a local ticket's compaction to Pi (the local model), so its transcript never reaches the cloud tier", async () => {
     const { app, calls, run } = await setup();
-    expect((await app.plan(singleTaskRequest)).ok).toBe(true);
-    const id = app.activeTaskId()!;
+    const id = (await addTask(app, "local")).taskId;
+    app.store.setActive(id);
     const running = (tier: string) => (state: TaskState): TaskState => ({ ...state, localMode: true, build: { branch: "b", base: "main", baseSha: "a", currentTicket: "01" }, ticketRuns: { "01": { status: "in-progress", tier, attempts: 1 } } }) as never;
     await app.store.update(id, "local ticket", running("local"));
     expect(await run()).toBeUndefined();
@@ -321,7 +321,7 @@ describe("session_before_compact", () => {
     const { app, calls, run } = await setup();
     app.store.appendLedger({
       id: "big", at: "2026-10-14T10:00:00.000Z", taskId: "session", phase: "IDLE", provider: "anthropic", model: "claude-sonnet-5-5", tier: "interactive",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: 9999, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
     await expect(run()).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
@@ -339,7 +339,7 @@ describe("input budget gate", () => {
   const spend = (app: Workflow, usd: number) =>
     app.store.appendLedger({
       id: `spend-${usd}`, at: "2026-10-14T10:00:00.000Z", taskId: "session", phase: "IDLE", provider: "anthropic", model: "claude-sonnet-5-5", tier: "interactive",
-      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedUsd: null, actualUsd: usd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
+      requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: usd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
     });
 
   async function setup() {
@@ -382,5 +382,26 @@ describe("input budget gate", () => {
     handlers.get("session_start")!({}, { ...ctx, model: { provider: "anthropic", id: "claude-opus-5-5" }, modelRegistry: { find: () => undefined } });
     expect(input("third prompt")).toEqual({ action: "continue" });
     expect(notices.filter((text) => text.includes("Budget warning"))).toHaveLength(2);
+  });
+});
+
+describe("Pi's own calls and prices reach the ledger through the extension", () => {
+  it("sweeps cache warming and Pi's compaction from the session file, and keeps Pi's price on each message", async () => {
+    const cwd = await tempRepo();
+    writeProject(cwd, tieredYaml());
+    const { handlers } = fakePi();
+    const entries: unknown[] = [];
+    const ctx = { cwd, hasUI: false, model: OPUS, modelRegistry: { find: () => undefined }, ui: { notify() {}, setStatus() {} }, sessionManager: { getSessionId: () => "sess", getEntries: () => entries } };
+    handlers.get("session_start")!({}, ctx);
+    const workflow = currentWorkflow()!;
+    const later = new Date(Date.now() + 60_000).toISOString();
+    entries.push({ type: "usage", id: "w1", timestamp: later, kind: "cache_warm", provider: "anthropic", model: "claude-opus-5-5", usage: { input: 0, output: 1, cacheRead: 90_000, cacheWrite: 0, cost: { total: 0.045 } } });
+    entries.push({ type: "compaction", id: "c1", timestamp: later, usage: { input: 50_000, output: 3_000, cacheRead: 0, cacheWrite: 0 } });
+    await handlers.get("agent_settled")!({ aborted: false }, ctx);
+    handlers.get("session_compact")!({}, ctx);
+    handlers.get("message_end")!({ message: { role: "assistant", content: [], provider: "anthropic", model: "claude-opus-5-5", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.0004 } }, stopReason: "stop" } }, ctx);
+    const ledger = workflow.store.readLedger();
+    expect(ledger.filter((row) => row.id.startsWith("pi-sess-")).map((row) => row.reason)).toEqual(["Pi cache warming", "Pi compaction"]);
+    expect(ledger.find((row) => row.reason === "observed assistant usage")?.listPriceUsd).toBe(0.0004);
   });
 });
