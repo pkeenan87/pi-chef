@@ -140,7 +140,7 @@ Unknown cost is never counted as $0: a call with token counts but no price is es
 
 ### tiers
 
-Which models serve each job. Each tier is a list of candidates in preference order. A tier you list replaces the built-in list for that tier only (merged per tier: a project's list replaces the user's). Tiers you do not list keep the built-in models (see [Tiers and who serves them](#tiers-and-who-serves-them)).
+Which models serve each job. Each tier is a list of candidates in preference order. A tier you list replaces the built-in list for that tier only (merged per tier: a project's list replaces the user's, except `tiers.local`: the local model is what runs on your machine, so yours wins and a different project value is ignored with a warning; a project's is used only when your user config names none). Tiers you do not list keep the built-in models (see [Tiers and who serves them](#tiers-and-who-serves-them)).
 
 | Tier | Serves |
 |---|---|

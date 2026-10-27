@@ -74,11 +74,8 @@ tiers:
   ticketHigh:           # difficulty: high (cross-cutting, tricky logic, concurrency, security, large blast radius)
     - { provider: openai, model: "gpt-6.1-sol" }
     - { provider: foundry, model: "gpt-6.1-sol", label: "GPT Sol (Foundry)", api: openai-responses }
-  # Local mode (/plan --local): the one Ollama model on providers.local that builds every ticket. It gets three
-  # review rounds; a ticket it still cannot pass is finished by premium (Opus) in the same /build. Use the tag `ollama list` shows: its size ("9b", "27b") tells
-  # the planner how small to make the tickets. Set contextWindow to what Ollama runs (OLLAMA_CONTEXT_LENGTH=65536).
-  local:
-    - { provider: local, model: "qwen3.5:9b", label: "Qwen 3.5 9B (local)", contextWindow: 65536 }
+  # Local mode (/plan --local): the local model is set in your user config (~/.pi/agent/chef.yaml, tiers.local), since it
+  # is what runs on your machine; with none there, the built-in qwen3.5:9b (Ollama) is used. Not set here on purpose.
   advisor:              # on demand via /advisor <question>; Pi only suggests it, never calls it on its own
     - { provider: openai, model: gpt-6-astra }
     - { provider: anthropic, model: claude-fable-5-1 }
@@ -159,7 +156,6 @@ proprietaryCode: false
 # listed at 0 on purpose; keep the rows so the candidates are explicit. A subscription can still
 # bill extra usage, which this file cannot see.
 pricing:
-  - { provider: local, model: "qwen3.5:9b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   # Subscription-backed (0 marginal; placeholder)
   - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
   - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0, cacheReadPerMillionUsd: 0, cacheWritePerMillionUsd: 0 }
