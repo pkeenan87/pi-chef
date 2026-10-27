@@ -181,6 +181,26 @@ tiers:
 
 The size in the tag (`9b`, `27b`) tells the planner how small to make the tickets; a tag with no size gets the strictest ones. Pick a model that calls tools well: the ticket session uses Pi's read, edit and bash tools. `/auth status` shows whether `<baseUrl>/models` answers, and `/status` shows the local model and its ticket limits. A local ticket can still call `web_search` (Anthropic) and `web_fetch`; its per-ticket review runs on the review tier (Opus).
 
+### llama.cpp for local mode
+
+Qwen 3.8 27B on llama.cpp's `llama-server` is a known model. Start the server with the alias, the context you want, and `--jinja` (tool calls need the model's chat template):
+
+```bash
+llama-server --model <gguf> --alias Qwen3.8-27B --host 127.0.0.1 --port 8081 --ctx-size 131072 --jinja -ngl 999
+```
+
+```yaml
+providers:
+  local:
+    baseUrl: http://127.0.0.1:8081/v1
+tiers:
+  local: [{ provider: local, model: "Qwen3.8-27B", contextWindow: 131072 }]
+localMode:
+  difficulties: [low, medium]
+```
+
+The model id is the server's `--alias`, and `contextWindow` must equal `--ctx-size`. pi-chef knows this model (reasoning on, 32768 output tokens, no developer role, which its chat template rejects), so the tier entry needs only the model and the window; a field you set on the entry wins over the built-in one. At 27B the planner may give it low and medium tickets, in up to 3 files, sized to half the window. With `--parallel 1` (one slot), a `/build` ticket and any other chat on the same server wait for each other.
+
 ## Web tools
 
 The extension registers two tools for the model to call.

@@ -161,6 +161,10 @@ Each candidate:
 | `label` | string | no | Display name in reports |
 | `api` | `openai-responses` \| `openai-completions` \| `azure-openai-responses` | no, Foundry only | The wire API for this deployment, overriding `providers.foundry.api`. When tiers disagree, the first wins with a warning |
 | `contextWindow` | int ≥ 4096 | no | The context window Pi is told (default 128000). Set it for local models to what the server runs, for example Ollama's `OLLAMA_CONTEXT_LENGTH` |
+| `maxTokens` | int ≥ 1024 | no | The output-token limit Pi is told (default 8192). A thinking model needs more, since its reasoning counts against it |
+| `reasoning` | bool | no | A thinking model: Pi sends it reasoning levels (default `false`) |
+
+A known local model (today Qwen 3.8 27B, ids `Qwen3.8-27B`, its GGUF names, `qwen3.8:27b`) gets `label`, `contextWindow` 131072, `maxTokens` 32768 and `reasoning: true` for the fields its entry leaves out, plus the Pi compat settings it needs (no developer role) that config cannot set.
 
 ### providers
 
@@ -305,7 +309,7 @@ Each tier lists candidate models under `tiers:` in the config. The runtime picks
 | ticketLow | Grok 4.7 `grok-4.7` through a SuperGrok subscription (`xai`). Tickets of difficulty `low` |
 | ticketMedium | Claude Sonnet `claude-sonnet-5-5`. Difficulty `medium` |
 | ticketHigh | Sol 6.1 `gpt-6.1-sol`. Difficulty `high` |
-| local | Local mode only: `local/qwen3.5:9b` (Ollama), `contextWindow: 65536`. Builds every ticket of a `/plan --local` task; its size (from the tag) and window decide how small the planner makes them. It gets three review rounds; a ticket it cannot pass is finished by `premium` (Opus), and nothing goes past that |
+| local | Local mode only: `local/qwen3.5:9b` (Ollama), `contextWindow: 65536`. Qwen 3.8 27B on llama.cpp (`Qwen3.8-27B`) is a built-in preset ([providers](providers.md#llamacpp-for-local-mode)). Builds every ticket of a `/plan --local` task; its size (from the tag) and window decide how small the planner makes them. It gets three review rounds; a ticket it cannot pass is finished by `premium` (Opus), and nothing goes past that |
 | advisor (on demand) | GPT Astra `gpt-6-astra` (OpenAI, then a Foundry deployment), then Claude Fable `claude-fable-5-1`. Consulted on every plan (`plan_consult`, both), by `/build`'s per-ticket review (high: both; medium: one with `advisors.fromDifficulty: medium`) and by `/review` (by the branch's highest ticket difficulty). Astra is $0 on a ChatGPT subscription; Fable is billed per token on an API key |
 
 **Built-in tiers.** With no `tiers:` in any config, every tier above uses the sample config's candidates, so a bare user config still routes to real model ids (never an empty one). A config's `tiers` replaces the built-in list per tier. The built-in lists carry no prices: the runtime never prices from source. When the effective config has no `pricing` row for a tier's models, `/status` and session start show one warning, "No pricing rows for <models>: their cost is unknown. Copy the sample .pi-workflows/config.yaml (or run the init command) to price them.", and those models rank last as `price_unknown`. A tier with no usable model (an empty model id is dropped) moves up the ladder; if nothing is usable the route stops with "No model configured for tier <tier>; add tiers.<tier> to your config."

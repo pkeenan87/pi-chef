@@ -8,6 +8,7 @@ import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from ".
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
 import { foundryV1Base, type FoundryConfig } from "./clients.js";
 import { createVercelTokenSource, type VercelTokenSource } from "./vercel.js";
+import { knownModel } from "./local-models.js";
 
 const exec = promisify(execFile);
 
@@ -109,17 +110,20 @@ interface RegisterApi {
   registerProvider(name: string, config: unknown): void;
 }
 
-function modelEntry(id: string, label: string | undefined, api?: string, contextWindow = 128_000) {
+function modelEntry(provider: string, id: string, item: TierCandidate, api?: string) {
+  const known = knownModel(provider, id);
   return {
     ...(api ? { api } : {}),
     id,
-    name: label ?? id,
+    name: item.label ?? id,
     input: ["text" as const],
-    reasoning: false,
+    reasoning: item.reasoning ?? false,
     // Prices are tracked in the ledger's pricing rows, not in Pi's catalog.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow,
-    maxTokens: 8_192,
+    contextWindow: item.contextWindow ?? 128_000,
+    maxTokens: item.maxTokens ?? 8_192,
+    // What the server needs from Pi (no developer role, reasoning levels) comes only from a preset, never from config.
+    ...(known ? { compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : {}),
   };
 }
 
@@ -178,7 +182,7 @@ export function registerChatProviders(
         // The id Pi calls is the Azure deployment name (the model name unless providers.foundry.deployments maps it).
         models: foundryModels.map((item) => {
           const api = apis.get(item.model);
-          return modelEntry(foundryDeployment(config, item.model), item.label, api && api !== providerApi ? api : undefined);
+          return modelEntry("foundry", foundryDeployment(config, item.model), item, api && api !== providerApi ? api : undefined);
         }),
       });
     }
@@ -193,7 +197,7 @@ export function registerChatProviders(
       api: "openai-completions",
       // Reads the token that `vercel env pull` wrote; the auth probe refreshes that file when routing checks Vercel.
       apiKey: `!sed -n 's/^VERCEL_OIDC_TOKEN="\\{0,1\\}\\([^"]*\\)"\\{0,1\\}$/\\1/p' ${shellQuote(envFile)}`,
-      models: vercelModels.map((item) => modelEntry(item.model, item.label)),
+      models: vercelModels.map((item) => modelEntry("vercel", item.model, item)),
     });
   }
   const local = config.providers.local;
@@ -204,7 +208,7 @@ export function registerChatProviders(
       baseUrl: local.baseUrl,
       api: "openai-completions",
       apiKey: local.apiKeyEnv ? `$${local.apiKeyEnv}` : "local",
-      models: localModels.map((item) => modelEntry(item.model, item.label, undefined, item.contextWindow)),
+      models: localModels.map((item) => modelEntry("local", item.model, item)),
     });
   }
   return registered;
