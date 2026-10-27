@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -116,6 +116,47 @@ describe("/build in a worktree", () => {
     expect(t.load().build!.branch).toBe(`${stem}-3`);
     const switched = await t.app.plans(t.load().name!);
     expect(switched.text).toContain(`Its branch ${stem}-3 is checked out in ${t.load().build!.worktree}`);
+  });
+
+  it("copies the untracked .pi project folder into the worktree and keeps it out of the commits", async () => {
+    const t = await worktreeTask();
+    mkdirSync(path.join(t.cwd, ".pi", "git"), { recursive: true });
+    writeFileSync(path.join(t.cwd, ".pi", "settings.json"), '{ "packages": ["git:github.com/pkeenan87/pi-chef"] }\n');
+    writeFileSync(path.join(t.cwd, ".pi", "git", "pkg.txt"), "installed\n");
+    const result = await t.run();
+    expect(result.ok, result.text).toBe(true);
+    const build = t.load().build!;
+    expect(build.copied).toEqual([".pi"]);
+    expect(readFileSync(path.join(build.worktree!, ".pi", "settings.json"), "utf8")).toContain("pi-chef");
+    expect(existsSync(path.join(build.worktree!, ".pi", "git", "pkg.txt"))).toBe(true);
+    expect(t.progress.some((line) => line.startsWith(`Copied ${path.join(t.cwd, ".pi")} into the worktree`))).toBe(true);
+    // The tickets' commits hold their own files, never the copy.
+    expect(await git(t.cwd, "log", "--name-only", "--format=", build.branch)).not.toContain(".pi/");
+    expect(await git(build.worktree!, "status", "--short")).toBe("?? .pi/");
+  });
+
+  it("copies .pi into a worktree that lacks it when the build resumes, and never a tracked .pi", async () => {
+    const t = await worktreeTask();
+    t.driver.fresh = async () => ({ stopped: "gone" });
+    await t.run();
+    const dir = t.load().build!.worktree!;
+    expect(existsSync(path.join(dir, ".pi"))).toBe(false);
+    mkdirSync(path.join(t.cwd, ".pi"));
+    writeFileSync(path.join(t.cwd, ".pi", "settings.json"), "{}\n");
+    t.host.workflow = t.app;
+    await t.run();
+    expect(existsSync(path.join(dir, ".pi", "settings.json"))).toBe(true);
+    expect(t.load().build!.copied).toEqual([".pi"]);
+
+    const tracked = await worktreeTask({ tickets: 1 });
+    mkdirSync(path.join(tracked.cwd, ".pi"));
+    writeFileSync(path.join(tracked.cwd, ".pi", "settings.json"), "{}\n");
+    await git(tracked.cwd, "add", ".pi");
+    await git(tracked.cwd, "commit", "-q", "-m", "pi settings");
+    writeFileSync(path.join(tracked.cwd, ".pi", "local.json"), "{}\n");
+    expect((await tracked.run()).ok).toBe(true);
+    expect(tracked.load().build!.copied).toBeUndefined();
+    expect(existsSync(path.join(tracked.load().build!.worktree!, ".pi", "local.json"))).toBe(false);
   });
 
   it("refuses a second /build of a task another live Pi process is building", async () => {

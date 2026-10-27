@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
@@ -8,7 +8,7 @@ import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { LOCAL_LADDER, TICKET_LADDER, escalateImplementation } from "../router/policy.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
-import { done, fail, guard, iso, requireActive, transition, workspaceName, type WorkflowContext } from "./context.js";
+import { done, excludedPaths, fail, guard, iso, requireActive, transition, type WorkflowContext } from "./context.js";
 import { displayName, requireActiveTask } from "./tasks.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { SPEC_FILE } from "./interview.js";
@@ -103,10 +103,10 @@ function orderedTickets(tickets: Ticket[]): Ticket[] {
   return waves(groups).flat().map((group) => byGroup.get(group.id)!);
 }
 
-/** Working-tree changes outside the workspace dir (`.pi-workflows/` state is not the user's code). */
+/** Working-tree changes outside the excluded paths (`.pi-workflows/` state and a worktree's copied `.pi/` are not the user's code). */
 export async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
-  const workspace = workspaceName(ctx);
-  return (await ctx.git.changedPaths()).filter((file) => file !== workspace && !file.startsWith(`${workspace}/`));
+  const skipped = excludedPaths(ctx);
+  return (await ctx.git.changedPaths()).filter((file) => !skipped.some((dir) => file === dir || file.startsWith(`${dir}/`)));
 }
 
 
@@ -193,8 +193,9 @@ export function startBuild(ctx: WorkflowContext, options: StartBuildOptions = {}
     if (state.build?.worktree) {
       const ensured = await ensureWorktree(ctx, state.build.worktree, state.build.branch);
       if (ensured.problem) return ensured.problem;
+      const copied = await copyPiProject(ctx, state.build.worktree, state.build.copied);
       // A recreated worktree is a bare checkout: the setup steps run again.
-      build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined, ...(ensured.recreated ? { setupDone: false } : {}) };
+      build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined, ...(copied.length ? { copied } : {}), ...(ensured.recreated ? { setupDone: false } : {}) };
     } else if (state.build) {
       const current = await ctx.git.currentBranch();
       if (current !== state.build.branch) {
@@ -220,7 +221,8 @@ export function startBuild(ctx: WorkflowContext, options: StartBuildOptions = {}
         mkdirSync(path.dirname(dir), { recursive: true });
         await ctx.git.addWorktree(dir, branch, baseSha);
         ctx.progress?.(`Created worktree ${dir} on ${branch} from ${base}.${(await dirtyPaths(ctx)).length > 0 ? ` Uncommitted changes in ${ctx.git.repoRoot} stay there.` : ""}`);
-        build = { branch, base, baseSha, worktree: dir };
+        const copied = await copyPiProject(ctx, dir);
+        build = { branch, base, baseSha, worktree: dir, ...(copied.length ? { copied } : {}) };
       } else {
         try {
           await ctx.git.switchCreate(branch, baseSha);
@@ -232,7 +234,7 @@ export function startBuild(ctx: WorkflowContext, options: StartBuildOptions = {}
       }
       if (commitFirst) {
         // After the switch, so the commit lands on the feature branch; the workspace dir stays out of it.
-        const sha = await ctx.git.commitAll(ctx.git.repoRoot, "Changes before /build", [workspaceName(ctx)]);
+        const sha = await ctx.git.commitAll(ctx.git.repoRoot, "Changes before /build", excludedPaths(ctx));
         ctx.progress?.(`Committed changes before /build: ${sha.slice(0, 7)}`);
       }
     }
@@ -244,6 +246,31 @@ export function startBuild(ctx: WorkflowContext, options: StartBuildOptions = {}
     });
     return done(`Building ${state.plan!.tickets!.length} ticket(s) on ${build.branch} (base ${build.base})${build.worktree ? ` in ${build.worktree}` : ""}.`, state);
   });
+}
+
+/** Pi's project folder: its settings name the project's packages (pi-chef among them), installed under it. */
+const PI_PROJECT_DIR = ".pi";
+
+/**
+ * Copies the main checkout's `.pi/` into the worktree when git does not track it, so Pi loads the same project
+ * packages and extensions there (Pi reads them from the session's own directory only). A worktree that already has one
+ * keeps it. Returns the paths copied now or before, which commits and diffs in the worktree leave out.
+ */
+async function copyPiProject(ctx: WorkflowContext, dir: string, before: string[] = []): Promise<string[]> {
+  const main = mainCheckoutOf(ctx.git.repoRoot);
+  const source = path.join(main, PI_PROJECT_DIR);
+  const target = path.join(dir, PI_PROJECT_DIR);
+  if (!existsSync(source) || existsSync(target)) return before;
+  const tracked = await ctx.git.git(["ls-files", "--", PI_PROJECT_DIR], main);
+  if (tracked.code !== 0 || tracked.stdout.trim() !== "") return before;
+  try {
+    cpSync(source, target, { recursive: true, verbatimSymlinks: true });
+  } catch (error) {
+    ctx.progress?.(`Could not copy ${source} into the worktree (${redact((error as Error).message)}); Pi there may not load this project's packages.`);
+    return before;
+  }
+  ctx.progress?.(`Copied ${source} into the worktree, so Pi loads this project's packages there; it stays out of the commits.`);
+  return [...new Set([...before, PI_PROJECT_DIR])];
 }
 
 /** Makes sure the build's worktree is there and on its branch, recreating it when its directory was removed. */
@@ -390,7 +417,7 @@ async function settle(ctx: WorkflowContext, state: TaskState, ticket: Ticket, la
     }
   }
   ctx.indicator?.stage("committing");
-  const sha = await ctx.git.commitAll(ctx.git.repoRoot, commitSubject(ticket), [workspaceName(ctx)]);
+  const sha = await ctx.git.commitAll(ctx.git.repoRoot, commitSubject(ticket), excludedPaths(ctx));
   const met = parseCriteriaMet(lastText, ticket.acceptanceCriteria);
   editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(tickCriteria(markdown, met), "done"));
   if (credit) {

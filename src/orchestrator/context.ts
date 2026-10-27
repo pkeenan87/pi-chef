@@ -1,6 +1,6 @@
 import { WorkflowError, type CommandResult, type Phase, type TaskState, type TokenUsage } from "../domain.js";
 import type { WorkflowConfig } from "../config.js";
-import type { GitWorkspace } from "../git/workspace.js";
+import { samePath, type GitWorkspace } from "../git/workspace.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import type { AzRunner } from "./status-foundry.js";
@@ -109,4 +109,14 @@ export function transition(ctx: WorkflowContext, taskId: string, reason: string,
 /** The workspace dir as a repo-relative path (`.pi-workflows`): workflow state, never the user's code. */
 export function workspaceName(ctx: WorkflowContext): string {
   return ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
+}
+
+/**
+ * Repo-relative paths that are never the user's code: the workspace dir, and in a build's worktree what /build copied
+ * there from the main checkout (Pi's untracked `.pi/` project folder). Commits, diffs and the dirty-tree test skip them.
+ */
+export function excludedPaths(ctx: WorkflowContext): string[] {
+  const build = active(ctx)?.build;
+  const copied = build?.worktree && build.copied?.length && samePath(build.worktree, ctx.git.repoRoot) ? build.copied : [];
+  return [workspaceName(ctx), ...copied];
 }

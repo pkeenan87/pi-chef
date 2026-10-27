@@ -491,6 +491,8 @@ export interface BuildRecord {
   branch: string;
   /** The linked worktree the tickets run in; absent when the build works in the main checkout. */
   worktree?: string;
+  /** Untracked paths /build copied from the main checkout into the worktree (Pi's `.pi/` project folder); never committed. */
+  copied?: string[];
   /** The branch /build started from; /review diffs against it. */
   base: string;
   /** Merge base of the branch and `base` when the build started. */
