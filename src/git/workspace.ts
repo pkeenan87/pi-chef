@@ -65,6 +65,12 @@ async function runGit(cwd: string, args: string[], identity: Identity): Promise<
 
 const NO_HOOKS = "/dev/null";
 
+/**
+ * The diff format the review and the static scan parse (`+++ b/<file>`, no colour), whatever the user's git config says
+ * (`diff.mnemonicPrefix`, `diff.noprefix`, `color.ui=always`, `diff.external`): command-line options beat config.
+ */
+const PLAIN_DIFF = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
+
 export class GitWorkspace {
   private identity?: Promise<Identity>;
 
@@ -210,14 +216,14 @@ export class GitWorkspace {
   async workingDiff(base: string, exclude: string[] = []): Promise<string> {
     const point = await this.mergeBase(base);
     const paths = ["--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)];
-    const tracked = await this.git(["diff", point, ...paths]);
+    const tracked = await this.git(["diff", ...PLAIN_DIFF, point, ...paths]);
     if (tracked.code !== 0) throw new WorkflowError("GIT", tracked.stderr || "git diff failed");
     const listed = await this.git(["ls-files", "--others", "--exclude-standard", "-z", ...paths]);
     if (listed.code !== 0) throw new WorkflowError("GIT", listed.stderr || "git ls-files failed");
     const parts = [tracked.stdout];
     for (const file of listed.stdout.split("\0").filter(Boolean)) {
       // Exit code 1 is how --no-index says "the files differ".
-      const added = await this.git(["diff", "--no-index", "--", "/dev/null", file]);
+      const added = await this.git(["diff", "--no-index", ...PLAIN_DIFF, "--", "/dev/null", file]);
       if (added.code > 1) throw new WorkflowError("GIT", added.stderr || `git diff failed for ${file}`);
       parts.push(added.stdout);
     }
