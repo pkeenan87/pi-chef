@@ -70,6 +70,19 @@ describe("git helpers for the main checkout", () => {
     expect(await git.statusPorcelain()).toContain("?? untracked.txt");
   });
 
+  it("workingDiff keeps the a/ b/ format whatever the user's diff config", async () => {
+    const cwd = await tempRepo();
+    for (const [key, value] of [["diff.mnemonicPrefix", "true"], ["color.ui", "always"], ["diff.noprefix", "true"]]) await sh(cwd, "config", key!, value!);
+    const git = new GitWorkspace(cwd);
+    const base = await git.defaultBranch();
+    writeFileSync(path.join(cwd, "README.md"), "base\nedited line\n");
+    writeFileSync(path.join(cwd, "new.txt"), "new line\n");
+    const diff = await git.workingDiff(base);
+    expect(diff).toContain("+++ b/README.md");
+    expect(diff).toContain("+++ b/new.txt");
+    expect(diff).not.toContain("\u001b[");
+  });
+
   it("workingDiff leaves out excluded paths, tracked or not", async () => {
     const cwd = await tempRepo();
     const git = new GitWorkspace(cwd);
