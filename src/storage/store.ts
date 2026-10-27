@@ -1,5 +1,5 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, readSync, writeFileSync, writeSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { redactUnknown } from "../redact.js";
 import { modelMetricKey, WorkflowError, type CostRecord, type Phase, type TaskState } from "../domain.js";
@@ -299,12 +299,40 @@ function sameSig(a: FileSig | undefined, b: FileSig | undefined): boolean {
   return !!a && !!b && a.mtimeMs === b.mtimeMs && a.size === b.size && a.ino === b.ino;
 }
 
+function readClaim(file: string): { pid: number; checkout: string } | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; checkout?: unknown };
+    return typeof parsed.pid === "number" ? { pid: parsed.pid, checkout: typeof parsed.checkout === "string" ? parsed.checkout : "" } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True while a process with this pid runs (EPERM: it runs as another user). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export class TaskStore {
   private ledgerCache?: { sig: FileSig; records: CostRecord[] };
   private metricsCache?: { sig: FileSig; metrics: Metrics };
   private seqCache = new Map<string, { size: number; seq: number }>();
 
-  constructor(readonly root: string) {}
+  /** `checkout`: the linked worktree this store is used from; it gets its own active-task pointer, so two Pi processes do not fight over one. */
+  constructor(
+    readonly root: string,
+    readonly checkout?: string,
+  ) {}
+
+  private activePath(): string {
+    if (!this.checkout) return path.join(this.root, "active-task.json");
+    return path.join(this.root, "active", `${createHash("sha256").update(path.resolve(this.checkout)).digest("hex").slice(0, 16)}.json`);
+  }
 
   taskDir(taskId: string): string {
     return path.join(this.root, "tasks", taskId);
@@ -322,7 +350,7 @@ export class TaskStore {
 
   /** The pointer file: the active task and the branch that was checked out when it was last resolved (absent in older files). */
   readActiveFile(): { taskId?: string; seenBranch?: string } {
-    const file = path.join(this.root, "active-task.json");
+    const file = this.activePath();
     if (!existsSync(file)) return {};
     try {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as { taskId?: unknown; seenBranch?: unknown };
@@ -342,13 +370,31 @@ export class TaskStore {
   /** Points at a task. `seenBranch` is the branch checked out now; left out, the recorded one is kept. */
   setActive(taskId: string, seenBranch?: string): void {
     const seen = seenBranch ?? this.readActiveFile().seenBranch;
-    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify({ taskId, ...(seen ? { seenBranch: seen } : {}) }, null, 2));
+    atomicWrite(this.activePath(), JSON.stringify({ taskId, ...(seen ? { seenBranch: seen } : {}) }, null, 2));
+  }
+
+  /**
+   * Claims the task's build for this process: refused (returns who holds it) while another live process holds it, so
+   * two Pi sessions never run /build on one task at once. A claim whose process is gone is taken over.
+   */
+  claimBuild(taskId: string, checkout: string, at: string): { pid: number; checkout: string } | undefined {
+    const file = path.join(this.taskDir(taskId), "build.claim");
+    const held = readClaim(file);
+    if (held && held.pid !== process.pid && processAlive(held.pid)) return held;
+    atomicWrite(file, JSON.stringify({ pid: process.pid, checkout, at }, null, 2));
+    return undefined;
+  }
+
+  /** Drops this process's build claim on the task; another process's claim stays. */
+  releaseBuild(taskId: string): void {
+    const file = path.join(this.taskDir(taskId), "build.claim");
+    if (readClaim(file)?.pid === process.pid) rmSync(file, { force: true });
   }
 
   /** No active task (the file stays, with no id). */
   clearActive(): void {
     const seen = this.readActiveFile().seenBranch;
-    atomicWrite(path.join(this.root, "active-task.json"), JSON.stringify(seen ? { seenBranch: seen } : {}, null, 2));
+    atomicWrite(this.activePath(), JSON.stringify(seen ? { seenBranch: seen } : {}, null, 2));
   }
 
   /** Number of corrupt (non-tail) lines in a task's event log. */

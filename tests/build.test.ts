@@ -578,16 +578,44 @@ describe("/build stops", () => {
 });
 
 describe("/build branch and approval", () => {
-  it("reuses the branch it is on and records the default branch as the base", async () => {
-    const t = await buildTask({ branch: "feature/mine" });
+  it("starts its own branch from the default branch, not the leftover branch it is on", async () => {
+    const t = await buildTask({ branch: "agent/leftover" });
+    writeFileSync(path.join(t.cwd, "leftover.txt"), "someone else's work\n");
+    await git(t.cwd, "add", "leftover.txt");
+    await git(t.cwd, "commit", "-q", "-m", "leftover work");
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    const result = await t.run(d.driver);
+    expect(result.ok, result.text).toBe(true);
+    const build = t.load().build!;
+    expect(build.branch).toBe(`chef/${t.load().name}`);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe(build.branch);
+    expect(build.base).toBe(await t.app.git.defaultBranch());
+    expect(build.baseSha).toBe(await git(t.cwd, "rev-parse", build.base));
+    expect(await git(t.cwd, "log", "--format=%s", build.branch)).not.toContain("leftover work");
+    expect(await git(t.cwd, "log", "-1", "--format=%s", "agent/leftover")).toBe("leftover work");
+  });
+
+  it("adds -2 when the task's branch name is taken", async () => {
+    const t = await buildTask();
+    const taken = `chef/${t.load().name}`;
+    await git(t.cwd, "branch", taken);
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(await git(t.cwd, "branch", "--show-current")).toBe("feature/mine");
-    expect(await git(t.cwd, "branch", "--list", "chef/*")).toBe("");
-    const build = t.load().build!;
-    expect(build.branch).toBe("feature/mine");
-    expect(build.base).toBe(await t.app.git.defaultBranch());
-    expect(build.baseSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(t.load().build!.branch).toBe(`${taken}-2`);
+    expect(await git(t.cwd, "log", "--format=%s", taken)).toBe("base");
+  });
+
+  it("starts no ticket once the checkout has moved to another branch", async () => {
+    const t = await buildTask();
+    t.passing.ok = false;
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    await t.run(d.driver);
+    await git(t.cwd, "add", "-A");
+    await git(t.cwd, "commit", "-q", "-m", "wip");
+    await git(t.cwd, "switch", "-c", "someone-else");
+    const chunk = await t.app.nextChunk();
+    expect(chunk).toMatchObject({ kind: "stopped", code: "WRONG_BRANCH" });
+    expect(chunk.kind === "stopped" && chunk.reason).toContain("someone-else");
   });
 
   it("refuses to resume on a different branch with uncommitted changes, naming the branch", async () => {

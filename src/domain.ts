@@ -482,9 +482,11 @@ export interface TicketReviewRecord {
   costUsd: { review: number | null; advisors: number | null };
 }
 
-/** Where /build works: one branch in the main checkout. */
+/** Where /build works: the task's own branch, in its own git worktree (`worktree`) or in the main checkout. */
 export interface BuildRecord {
   branch: string;
+  /** The linked worktree the tickets run in; absent when the build works in the main checkout. */
+  worktree?: string;
   /** The branch /build started from; /review diffs against it. */
   base: string;
   /** Merge base of the branch and `base` when the build started. */

@@ -63,7 +63,9 @@ Every key the loader reads.
 | Key | Type | Default | Project | What it does |
 |---|---|---|---|---|
 | `workspaceDir` | path | `.pi-workflows` | user only | Where task state, the cost ledger, metrics and reports live, relative to the project root |
-| `branchPrefix` | branch-name prefix | `chef` | project wins | `/build` creates `<branchPrefix>/<task name>` when it starts from the default branch |
+| `branchPrefix` | branch-name prefix | `chef` | project wins | `/build` creates `<branchPrefix>/<task name>` from the default branch for every new build, with `-2`, `-3` when taken |
+| `isolation.worktree` | bool | `true` | user only | `/build` works in a git worktree per task, and Pi moves into it for the tickets. `false` works in the main checkout (still on the task's own branch) |
+| `isolation.dir` | path | `""` | user only | Where the worktrees go, relative to the project (`~/` allowed). Empty: `../<repo>.worktrees`, next to the project |
 | `orgProviderAllowlist` | list of providers | `[]` (all) | restricts only | Providers any route or advisor may use. Empty means all. A project list can restrict an empty user list; once the user names providers, the user's list is final |
 | `proprietaryCode` | bool | `false` | on if either sets it | Marks the code proprietary: only allowlisted providers may see it. Requires `orgProviderAllowlist` |
 | `checks` | list of commands | `[]` | replaced | The commands that verify work: run by `/review`, and by `/build` for a ticket with no checks of its own. Each entry is `{ name, command, args }` |

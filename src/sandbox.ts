@@ -331,7 +331,13 @@ export function switchesBranch(command: string): boolean {
   return mayRunGit(command, /\b(switch|checkout|symbolic-ref)\b/, movesBranch);
 }
 
+/** True when the command line changes git's worktrees (`git worktree add|move|remove|prune|repair|lock|unlock`); `list` only reads. */
+export function changesWorktrees(command: string): boolean {
+  return mayRunGit(command, /\bworktree\b/, (call) => call.sub === "worktree" && call.rest.find((arg) => !arg.startsWith("-")) !== "list");
+}
+
 /** Why a bash command is refused while a /build ticket runs, or undefined. */
 export function buildBashBlock(command: string): string | undefined {
+  if (changesWorktrees(command)) return "/build runs each ticket in the task's checkout; do not add, move or remove git worktrees during a ticket.";
   return runsGitPush(command) || switchesBranch(command) ? "/build commits each ticket; do not push or switch branches during a ticket." : undefined;
 }
