@@ -53,6 +53,7 @@ export interface PlanReviewRequest {
 export type PlanReviewFn = (request: PlanReviewRequest) => Promise<{ value: string; text?: string } | undefined>;
 
 export interface WorkflowOptions {
+  /** The checkout commands work in: git, checks, project files. A linked worktree keeps its state in its main checkout. */
   cwd: string;
   config?: WorkflowConfig;
   store?: TaskStore;

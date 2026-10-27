@@ -8,7 +8,7 @@ import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
 import { builtWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 describe("pi extension surface", () => {
@@ -167,6 +167,33 @@ describe("pi extension surface", () => {
     });
     expect(notices.join("\n")).toContain("did not open a new session");
     expect(app.store.load(app.activeTaskId()!)!.build!.currentTicket).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("moves Pi into the build's worktree through switchSession, with a session file whose header names it", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+    const { commands } = fakePi();
+    bindWorkflow(app);
+    const notices: string[] = [];
+    const switched: { file: string; header: { type: string; cwd: string } }[] = [];
+    await commands.get("build")!.handler("", {
+      cwd,
+      hasUI: true,
+      model: { provider: "openai", id: "gpt-user" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      newSession: async () => ({ cancelled: true }),
+      async switchSession(file: string) {
+        switched.push({ file, header: JSON.parse(readFileSync(file, "utf8").trim()) });
+        return { cancelled: true };
+      },
+      compact() {},
+    });
+    const worktree = app.store.load(app.activeTaskId()!)!.build!.worktree!;
+    expect(worktree).toBeTruthy();
+    expect(switched).toHaveLength(1);
+    expect(switched[0]!.header).toMatchObject({ type: "session", cwd: worktree });
+    expect(notices.join("\n")).toContain(`Pi did not move into the worktree ${worktree} (cancelled), so /build stopped. The worktree ${worktree} is kept; /build resumes there.`);
     bindWorkflow(undefined);
   });
 

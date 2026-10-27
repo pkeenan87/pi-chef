@@ -1,14 +1,14 @@
 import path from "node:path";
 import { loadConfig, modelLabel, type WorkflowConfig } from "../config.js";
 import { type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
-import { GitWorkspace } from "../git/workspace.js";
+import { GitWorkspace, mainCheckoutOf, samePath } from "../git/workspace.js";
 import type { Availability } from "../router/select.js";
 import { TaskStore } from "../storage/store.js";
 import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
 import { runAz } from "../providers/runtime.js";
 import { advisor } from "./advisor.js";
-import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
+import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk, type StartBuildOptions } from "./build.js";
 import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordPiUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import { active, type WorkflowContext } from "./context.js";
@@ -42,8 +42,10 @@ export class Workflow {
 
   constructor(options: WorkflowOptions) {
     this.cwd = options.cwd;
-    const config = options.config ?? loadConfig(options.cwd);
-    this.store = options.store ?? new TaskStore(path.join(options.cwd, config.workspaceDir));
+    // A /build worktree shares the main checkout's tasks, ledger and config, so its tickets cannot change the policy.
+    const project = mainCheckoutOf(options.cwd);
+    const config = options.config ?? loadConfig(project);
+    this.store = options.store ?? new TaskStore(path.join(project, config.workspaceDir), project === options.cwd ? undefined : options.cwd);
     this.git = options.git ?? new GitWorkspace(options.cwd);
     const ctx: WorkflowContext = {
       cwd: this.cwd,
@@ -243,8 +245,23 @@ export class Workflow {
   }
 
   /** `/build`: starts or resumes the build (branch, budget, approval). The session loop is in extension.ts. */
-  startBuild(): Promise<CommandResult> {
-    return startBuild(this.ctx);
+  startBuild(options?: StartBuildOptions): Promise<CommandResult> {
+    return startBuild(this.ctx, options);
+  }
+
+  buildCheckout(): { dir: string; taskId: string } | undefined {
+    const state = active(this.ctx);
+    const dir = state?.build?.worktree;
+    return state && dir && !samePath(dir, this.cwd) ? { dir, taskId: state.taskId } : undefined;
+  }
+
+  followBuild(taskId: string): void {
+    this.store.setActive(taskId, this.store.load(taskId)?.build?.branch);
+  }
+
+  releaseBuild(): void {
+    const taskId = this.store.readActive();
+    if (taskId) this.store.releaseBuild(taskId);
   }
 
   /** The next ticket to build, routed and with its prompt, or `done`. */

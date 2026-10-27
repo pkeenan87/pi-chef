@@ -1,7 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
 import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type Tier } from "../domain.js";
+import { mainCheckoutOf } from "../git/workspace.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { LOCAL_LADDER, TICKET_LADDER, escalateImplementation } from "../router/policy.js";
@@ -111,8 +113,34 @@ export async function dirtyPaths(ctx: WorkflowContext): Promise<string[]> {
 // ---------------------------------------------------------------------------------------------------------------------
 // startBuild
 
-/** Starts or resumes a build: approval, git, budget, security confirm, the branch, and the build record. */
-export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
+export interface StartBuildOptions {
+  /** The session driver can move Pi into a worktree (`BuildDriver.enter`). Without it a new build works in this checkout. */
+  worktree?: boolean;
+}
+
+/** The directory the task worktrees go in: `isolation.dir` (relative to the main checkout), else `../<repo>.worktrees`. */
+export function worktreeParent(ctx: WorkflowContext): string {
+  const project = mainCheckoutOf(ctx.cwd);
+  const dir = ctx.config.isolation.dir.trim();
+  if (!dir) return path.join(path.dirname(project), `${path.basename(project)}.worktrees`);
+  return dir === "~" || dir.startsWith("~/") ? path.join(homedir(), dir.slice(1)) : path.resolve(project, dir);
+}
+
+/** The task's branch (`<branchPrefix>/<name>`, then -2, -3 …) and worktree directory: the first pair neither taken. */
+async function freshNames(ctx: WorkflowContext, state: TaskState, worktree: boolean): Promise<{ branch: string; dir?: string }> {
+  const stem = `${ctx.config.branchPrefix}/${state.name ?? state.taskId}`;
+  const parent = worktree ? worktreeParent(ctx) : undefined;
+  for (let n = 1; ; n += 1) {
+    const branch = n === 1 ? stem : `${stem}-${n}`;
+    if (await ctx.git.branchExists(branch)) continue;
+    if (!parent) return { branch };
+    const dir = path.join(parent, branch.split("/").pop()!);
+    if (!existsSync(dir)) return { branch, dir };
+  }
+}
+
+/** Starts or resumes a build: approval, git, budget, security confirm, the branch (and worktree), and the build record. */
+export function startBuild(ctx: WorkflowContext, options: StartBuildOptions = {}): Promise<CommandResult> {
   return guard(async () => {
     let state = await requireActiveTask(ctx);
     if (!state.plan || !state.approvedVersion || state.approvedVersion !== state.plan.version) {
@@ -135,11 +163,22 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       return fail("ILLEGAL_TRANSITION", `Cannot build from ${state.phase}${state.phase === "PAUSED" && resumeFrom ? ` (paused from ${resumeFrom})` : ""}.`);
     }
     if (!state.classification) return fail("NOT_READY", "The task has no classification. Run /plan again.");
+    // Released by runBuild when the build ends; a claim left by a process that died is taken over.
+    const holder = ctx.store.claimBuild(state.taskId, ctx.git.repoRoot, iso(ctx));
+    if (holder) {
+      return fail("BUILD_RUNNING", `Another Pi session (pid ${holder.pid}${holder.checkout ? `, in ${holder.checkout}` : ""}) is building ${displayName(state)}. Let it finish or stop it, then /build again.`);
+    }
 
-    // A fresh build commits the whole tree per ticket, so changes made before it would land in ticket 01's commit.
-    // Ask before touching the branch; the commit itself waits until the build is on its branch.
+    // A resumed build keeps the mode it started in; a new one uses a worktree when the config asks and Pi can move there.
+    const inWorktree = state.build ? !!state.build.worktree : ctx.config.isolation.worktree && options.worktree === true;
+    if (!state.build && ctx.config.isolation.worktree && options.worktree === false) {
+      ctx.progress?.("This Pi session cannot move into a worktree, so /build works in this checkout on a new branch.");
+    }
+
+    // A fresh build in this checkout commits the whole tree per ticket, so changes made before it would land in ticket
+    // 01's commit. Ask before touching the branch; the commit itself waits until the build is on its branch.
     let commitFirst = false;
-    if (!state.build) {
+    if (!state.build && !inWorktree) {
       const dirty = await dirtyPaths(ctx);
       if (dirty.length > 0) {
         const listed = dirty.slice(0, 8).map((file) => `  ${file}`);
@@ -150,9 +189,14 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
         }
       }
     }
-    const current = await ctx.git.currentBranch();
     let build: BuildRecord;
-    if (state.build) {
+    if (state.build?.worktree) {
+      const ensured = await ensureWorktree(ctx, state.build.worktree, state.build.branch);
+      if (ensured.problem) return ensured.problem;
+      // A recreated worktree is a bare checkout: the setup steps run again.
+      build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined, ...(ensured.recreated ? { setupDone: false } : {}) };
+    } else if (state.build) {
+      const current = await ctx.git.currentBranch();
       if (current !== state.build.branch) {
         const target = state.build.branch;
         if (!(await ctx.git.branchExists(target))) {
@@ -167,25 +211,30 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       }
       build = { ...state.build, currentTicket: undefined, chunkStartedAt: undefined };
     } else {
+      // Every task gets its own branch from the default branch, never the one checked out: a branch another agent left
+      // behind must not take this task's commits.
       const base = await ctx.git.defaultBranch();
-      let branch = current;
-      if (current === "HEAD") return fail("GIT_NOT_READY", "HEAD is detached. Switch to a branch, then run /build again.");
-      if (current === base) {
-        branch = `${ctx.config.branchPrefix}/${state.name ?? state.taskId}`;
-        await ctx.git.switchCreate(branch);
-      }
-      let baseSha: string;
-      try {
-        baseSha = await ctx.git.mergeBase(base);
-      } catch {
-        baseSha = await ctx.git.head();
+      const baseSha = await ctx.git.startPoint(base);
+      const { branch, dir } = await freshNames(ctx, state, inWorktree);
+      if (dir) {
+        mkdirSync(path.dirname(dir), { recursive: true });
+        await ctx.git.addWorktree(dir, branch, baseSha);
+        ctx.progress?.(`Created worktree ${dir} on ${branch} from ${base}.${(await dirtyPaths(ctx)).length > 0 ? ` Uncommitted changes in ${ctx.git.repoRoot} stay there.` : ""}`);
+        build = { branch, base, baseSha, worktree: dir };
+      } else {
+        try {
+          await ctx.git.switchCreate(branch, baseSha);
+        } catch (error) {
+          if (commitFirst) return fail("DIRTY_TREE", `Could not create ${branch} from ${base}: the uncommitted changes conflict with it. Commit or stash them, then /build again. ${(error as Error).message}`.trim());
+          throw error;
+        }
+        build = { branch, base, baseSha };
       }
       if (commitFirst) {
         // After the switch, so the commit lands on the feature branch; the workspace dir stays out of it.
         const sha = await ctx.git.commitAll(ctx.git.repoRoot, "Changes before /build", [workspaceName(ctx)]);
         ctx.progress?.(`Committed changes before /build: ${sha.slice(0, 7)}`);
       }
-      build = { branch, base, baseSha };
     }
     state = await ctx.store.update(state.taskId, "start build", (task) => {
       let next: TaskState = { ...task, build };
@@ -193,8 +242,30 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
       if (next.phase !== "IMPLEMENTING") next = move(next, "IMPLEMENTING", iso(ctx));
       return next;
     });
-    return done(`Building ${state.plan!.tickets!.length} ticket(s) on ${build.branch} (base ${build.base}).`, state);
+    return done(`Building ${state.plan!.tickets!.length} ticket(s) on ${build.branch} (base ${build.base})${build.worktree ? ` in ${build.worktree}` : ""}.`, state);
   });
+}
+
+/** Makes sure the build's worktree is there and on its branch, recreating it when its directory was removed. */
+async function ensureWorktree(ctx: WorkflowContext, dir: string, branch: string): Promise<{ problem?: CommandResult; recreated?: boolean }> {
+  const problem = (result: CommandResult) => ({ problem: result });
+  if (existsSync(dir)) {
+    const on = await ctx.git.git(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+    if (on.code !== 0) return problem(fail("WORKTREE_BROKEN", `${dir} is not a git checkout any more. Remove it (\`git worktree prune\` after deleting the folder), then /build again to recreate it on ${branch}.`));
+    const current = on.stdout.trim();
+    if (current !== branch) return problem(fail("WRONG_BRANCH", `The worktree ${dir} is on ${current}, not this build's branch ${branch}. Switch it back (\`git -C ${dir} switch ${branch}\`), then /build again.`));
+    return {};
+  }
+  if (!(await ctx.git.branchExists(branch))) {
+    return problem(fail("WRONG_BRANCH", `This build's worktree ${dir} and its branch ${branch} are both gone. Recreate the branch with \`git branch ${branch} <commit>\`, then /build again.`));
+  }
+  await ctx.git.git(["worktree", "prune"]);
+  const elsewhere = await ctx.git.worktreeOf(branch);
+  if (elsewhere) return problem(fail("WRONG_BRANCH", `${branch} is checked out in ${elsewhere}, so /build cannot recreate its worktree ${dir}. Switch that checkout to another branch, then /build again.`));
+  mkdirSync(path.dirname(dir), { recursive: true });
+  await ctx.git.addWorktree(dir, branch);
+  ctx.progress?.(`Recreated worktree ${dir} on ${branch}.`);
+  return { recreated: true };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -360,6 +431,11 @@ export async function nextChunk(ctx: WorkflowContext): Promise<NextChunk> {
       if (!state.build || !state.plan?.tickets) return { kind: "stopped", code: "NOT_STARTED", reason: "No build is running. Run /build." };
       const ticket = orderedTickets(state.plan.tickets).find((item) => state.ticketRuns?.[item.id]?.status !== "done");
       if (!ticket) return { kind: "done" };
+      // Another agent or person may have switched this checkout since the last ticket: never build on their branch.
+      const on = await ctx.git.currentBranch();
+      if (on !== state.build.branch) {
+        return { kind: "stopped", code: "WRONG_BRANCH", reason: `${ctx.git.repoRoot} is on ${on}, not this build's branch ${state.build.branch}, so ticket ${ticket.id} was not started. Switch back, then /build again.` };
+      }
       const run = state.ticketRuns?.[ticket.id];
       // The ticket was committed, then /build stopped before saving that: record it as done instead of building it again.
       const committed = run?.status === "in-progress" && run.attemptStart ? await ctx.git.commitWithSubject(run.attemptStart.head, commitSubject(ticket)) : undefined;
@@ -736,11 +812,22 @@ export interface BuildDriver {
   fresh(model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string): Promise<void | { stopped: string }>;
   /** Puts back the model the user had before /build. Always called. */
   finish(): Promise<void>;
+  /**
+   * Moves Pi into the checkout at `dir` (the build's worktree) before the first ticket, so the tickets' sessions, tools,
+   * git and checks run there. Left out when Pi cannot do that; a new build then works in the main checkout.
+   */
+  enter?(dir: string): Promise<void | { stopped: string }>;
 }
 
 /** The slice of Workflow the loop needs. It is re-resolved through `getWorkflow` because Pi may replace the Workflow with the session. */
 export interface BuildWorkflow {
-  startBuild(): Promise<CommandResult>;
+  startBuild(options?: StartBuildOptions): Promise<CommandResult>;
+  /** The build's worktree when Pi is not in it yet, else undefined. */
+  buildCheckout(): { dir: string; taskId: string } | undefined;
+  /** Makes the task active in this workflow's checkout (each checkout has its own pointer). */
+  followBuild(taskId: string): void;
+  /** Drops this process's claim on the active task's build. */
+  releaseBuild(): void;
   nextChunk(): Promise<NextChunk>;
   finishChunk(ticketId: string, result: { lastText: string; aborted: boolean }, options?: { final?: boolean }): Promise<ChunkFinish>;
   /** Rolls a ticket back to not started when its session never took a turn. */
@@ -753,8 +840,30 @@ export interface BuildWorkflow {
 
 /** Runs the approved tickets one chunk at a time, each in a fresh session on its routed model. Pure over its two arguments. */
 export async function runBuild(getWorkflow: () => BuildWorkflow, driver: BuildDriver): Promise<CommandResult> {
-  const started = await getWorkflow().startBuild();
+  // Taken by startBuild; released here however the build ends, from the workflow of the session the build ended in.
+  try {
+    return await buildLoop(getWorkflow, driver);
+  } finally {
+    try {
+      getWorkflow().releaseBuild();
+    } catch {
+      /* a claim whose process has ended is taken over by the next /build */
+    }
+  }
+}
+
+async function buildLoop(getWorkflow: () => BuildWorkflow, driver: BuildDriver): Promise<CommandResult> {
+  const started = await getWorkflow().startBuild({ worktree: typeof driver.enter === "function" });
   if (!started.ok) return started;
+  // A worktree build runs its tickets with Pi in the worktree, so every git call and check after this one happens there.
+  const into = getWorkflow().buildCheckout();
+  if (into) {
+    if (!driver.enter) return fail("WORKTREE", `This build works in the worktree ${into.dir}, and this Pi session cannot move there. Start pi in ${into.dir} and run /build.`);
+    const entered = await Promise.resolve(driver.enter(into.dir)).catch((error: unknown) => ({ stopped: redact((error as Error)?.message || "Pi could not move into the worktree.") }));
+    if (entered && entered.stopped) return fail("WORKTREE", `${entered.stopped} The worktree ${into.dir} is kept; /build resumes there.`);
+    getWorkflow().followBuild(into.taskId);
+    getWorkflow().progress(`Pi is now in ${into.dir}; the tickets, /review and git run there.`);
+  }
   let stopped: string | undefined;
   let code = "BUILD_STOPPED";
   let built = 0;

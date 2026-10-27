@@ -1,12 +1,14 @@
 import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, isToolCallEventType, serializeConversation } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, isToolCallEventType, serializeConversation, SessionManager } from "@earendil-works/pi-coding-agent";
 import { COMMANDS, helpText } from "./commands.js";
-import { statSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { homedir } from "node:os";
 import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
+import { mainCheckoutOf, samePath } from "./git/workspace.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { registryProblem, type UsableRegistry } from "./providers/usable.js";
@@ -59,10 +61,12 @@ function stamp(file: string): string {
  * files are invalid; the previous good config is kept so a later fix applies without a restart.
  */
 function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
+  // A /build worktree reads the main checkout's project config, never the copy a ticket could edit.
+  const project = mainCheckoutOf(root);
   // Every candidate (.yaml and .yml) is stamped, so adding, removing, or editing whichever file is used reloads.
-  const key = configPaths(root).watch.map(stamp).join("|");
+  const key = configPaths(project).watch.map(stamp).join("|");
   if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
-  const config = loadConfig(root);
+  const config = loadConfig(project);
   const changed = !!loaded && loaded.root === root;
   loaded = { root, key, config };
   return { config, changed };
@@ -162,6 +166,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
 
 type CommandContext = ExtensionContext & {
     newSession: (options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>;
+    switchSession?: (sessionPath: string, options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>;
     compact?: (options?: { customInstructions?: string }) => void;
     sendUserMessage?: (text: string) => Promise<void> | void;
     waitForIdle?: () => Promise<void>;
@@ -475,7 +480,55 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
       if (!ok && live.hasUI) live.ui.notify(`Run /model ${target.provider}/${target.id} to switch back to your model.`, "warning");
     },
   };
+  // Pi gives a new session the current session's directory, so moving into a worktree is a switch to a session file
+  // whose header names it. Without switchSession a new build works in this checkout.
+  if (typeof ctx.switchSession === "function") {
+    driver.enter = async (dir) => {
+      let failure: string | undefined;
+      const stash = (error: unknown) => {
+        failure ??= redact(error instanceof Error && error.message ? error.message : String(error));
+      };
+      let opened = false;
+      try {
+        if (typeof live.switchSession !== "function") throw new Error("This Pi session cannot switch sessions, so it cannot move into the worktree.");
+        const file = worktreeSessionFile(dir);
+        const result = await live.switchSession(file, {
+          withSession: async (next) => {
+            try {
+              opened = true;
+              replacementCtx = next;
+              live = next;
+              try {
+                workflowFor(next.cwd, next);
+              } catch {
+                /* a config problem is reported by the next command */
+              }
+              await restoreSlot[RESTORE_DONE];
+              delete restoreSlot[RESTORE_DONE];
+              if (!samePath(next.cwd, dir)) throw new Error(`Pi opened the session in ${next.cwd}, not in the worktree ${dir}, so no ticket was started.`);
+            } catch (error) {
+              stash(error);
+            }
+          },
+        });
+        if (!failure && (result.cancelled || !opened)) stash(`Pi did not move into the worktree ${dir} (cancelled), so /build stopped.`);
+      } catch (error) {
+        stash(error);
+      }
+      return failure ? { stopped: failure } : undefined;
+    };
+  }
   return { getWorkflow, driver };
+}
+
+/** Writes a session file whose header puts Pi in `dir`, with Pi's own header and file name. Pi writes a new session only once it has a turn, so the header goes first. */
+function worktreeSessionFile(dir: string): string {
+  const manager = SessionManager.create(dir);
+  const file = manager.getSessionFile();
+  const header = manager.getHeader();
+  if (!file || !header) throw new Error(`Pi could not name a session for ${dir}.`);
+  writeFileSync(file, `${JSON.stringify(header)}\n`, { flag: "wx" });
+  return file;
 }
 
 /** Since when this extension has watched each session: Pi's own calls from before then are not this run's to ledger. */

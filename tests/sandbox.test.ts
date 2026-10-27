@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCommandSafe, buildBashBlock, isDeniedCommand, runsGitPush, switchesBranch } from "../src/sandbox.js";
+import { assertCommandSafe, buildBashBlock, changesWorktrees, isDeniedCommand, runsGitPush, switchesBranch } from "../src/sandbox.js";
 
 const safe = (cmd: string, args: string[]) => expect(() => assertCommandSafe(cmd, args)).not.toThrow();
 const refused = (cmd: string, args: string[]) => expect(() => assertCommandSafe(cmd, args)).toThrow(/Blocked/);
@@ -110,7 +110,22 @@ describe("branch switch detection", () => {
   });
 });
 
+describe("worktree change detection", () => {
+  it.each(["git worktree add ../x", "git worktree remove .", "git worktree prune", "git -C .. worktree move a b", "sh -c 'git worktree remove --force .'", "git worktree --quiet add ../y"])("sees %s", (command) => {
+    expect(changesWorktrees(command), command).toBe(true);
+  });
+
+  it.each(["git worktree list", "git worktree list --porcelain", "git status", "echo git worktree add x"])("lets %s through", (command) => {
+    expect(changesWorktrees(command), command).toBe(false);
+  });
+});
+
 describe("buildBashBlock", () => {
+  it("refuses a worktree change during a ticket", () => {
+    expect(buildBashBlock("git worktree remove .")).toContain("do not add, move or remove git worktrees");
+    expect(buildBashBlock("git worktree list")).toBeUndefined();
+  });
+
   it("explains itself for a push or a branch move, and is silent otherwise", () => {
     const reason = "/build commits each ticket; do not push or switch branches during a ticket.";
     expect(buildBashBlock("git push origin HEAD")).toBe(reason);

@@ -140,4 +140,7 @@
 ## Everything else.
 
 # branchPrefix: chef            # /build names its branch <branchPrefix>/<task name>
+# isolation:
+#   worktree: true              # /build works in a git worktree per task; false works in the main checkout
+#   dir: ""                     # where the worktrees go, relative to the project; empty for ../<repo>.worktrees
 # workspaceDir: .pi-workflows   # where task state, the ledger and metrics live, in each project

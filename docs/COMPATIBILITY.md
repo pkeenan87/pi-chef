@@ -85,6 +85,7 @@ From `dist/core/extensions/types.d.ts` and `docs/extensions.md` in coding-agent 
 | Help text | `description` on the command, shown in Pi's `/` menu | Plus an in-command `help` argument |
 | Session start / stop | `pi.on("session_start")`, `pi.on("session_shutdown")` | Bind cwd; read the model slot that sets the chunk model on a `/build` session, else pin the session to `session.model` with `setModel`. `session_shutdown` disposes the workflow. The factory starts no timer (docs forbid that) |
 | Fresh context | `ExtensionCommandContext.newSession({ withSession })` | `/build` opens one per ticket, from the command ctx. `docs/extensions.md`: session replacement invalidates the old context; keep only plain data and continue in `withSession`. **Unverified live**, including a second `newSession` from the replacement ctx |
+| Move into a worktree | `ExtensionCommandContext.switchSession(file, { withSession })`, `SessionManager.create(dir).getHeader()` | A worktree `/build` writes a header-only session file whose `cwd` is the task's worktree and switches to it once, before the first ticket; later tickets use `newSession` from there. A Pi without `switchSession` builds in the main checkout. **Unverified live** |
 | Send a turn | `sendUserMessage(text)` on the replacement ctx | `/build` sends the ticket prompt, then the one retry message. Assumed to resolve when the run ends. **Unverified live** |
 | Wait for the run | `waitForIdle()` on the replacement ctx | After each `sendUserMessage`. The order against `agent_settled`, and Esc while a command awaits, are **unverified live** |
 | Run finished | `pi.on("agent_settled")` | Records `aborted` so Esc stops the build after that turn. `message_end` keeps the last assistant text for the criteria checklist |
@@ -127,12 +128,13 @@ Isolated registry calls exist for the nested calls (advisors, the compaction sum
 These are labeled assumptions. Unit tests cover the code around them; they do not boot the TUI.
 
 1. `newSession()` from a command handler (and again from inside `withSession`) leaves the new session empty of the previous transcript. The type says "Start a new session". `/build` depends on it: if it no-ops, a ticket would start with the previous ticket's transcript, and the model check in the driver would not notice.
-2. `getArgumentCompletions` is what Tab calls. The field exists on `RegisteredCommand`. A live TUI check is still the way to see the menu.
-3. `isUsingOAuth(model)` matches the credential Pi will actually send. We also read `auth.json` `type` ourselves when outside a session.
-4. `message_end` usage objects are the provider's counts. Missing fields stay unknown in our ledger. Pi's own `Usage.cost` type requires numbers, so a Pi transcript is not our ledger. Our ledger uses `null` for unknown charge.
-5. `az account get-access-token` output shape (`accessToken`, `expiresOn`) matches current Azure CLI. The parser accepts that JSON and fails closed otherwise.
-6. Pushing and opening the pull request are yours: `git push`, then the `origin` CLI or `gh`. The extension has no forge client.
-7. Anthropic extra-usage billing and ChatGPT token-sharing entitlement can change without a Pi release. Re-read Pi's provider docs before relying on a subscription.
+2. `switchSession(file)` into a session file pi-chef wrote (one header line, its `cwd` the task's worktree) rebuilds the session in that directory, so the tools, `ctx.cwd` and every later `newSession` work in the worktree. `agent-session-runtime.js` reads the cwd from the header (`SessionManager.open`); a live run has not confirmed it. If it does not move, the driver sees `ctx.cwd` is not the worktree and stops before any ticket.
+3. `getArgumentCompletions` is what Tab calls. The field exists on `RegisteredCommand`. A live TUI check is still the way to see the menu.
+4. `isUsingOAuth(model)` matches the credential Pi will actually send. We also read `auth.json` `type` ourselves when outside a session.
+5. `message_end` usage objects are the provider's counts. Missing fields stay unknown in our ledger. Pi's own `Usage.cost` type requires numbers, so a Pi transcript is not our ledger. Our ledger uses `null` for unknown charge.
+6. `az account get-access-token` output shape (`accessToken`, `expiresOn`) matches current Azure CLI. The parser accepts that JSON and fails closed otherwise.
+7. Pushing and opening the pull request are yours: `git push`, then the `origin` CLI or `gh`. The extension has no forge client.
+8. Anthropic extra-usage billing and ChatGPT token-sharing entitlement can change without a Pi release. Re-read Pi's provider docs before relying on a subscription.
 
 ## Implementation plan
 

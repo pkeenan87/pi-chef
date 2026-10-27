@@ -56,3 +56,16 @@ describe("budgets against the defaults", () => {
     expect(budgets({ budgets: { taskUsd: 100 } }, { taskUsd: 500 }).taskUsd).toBe(100);
   });
 });
+
+describe("isolation layering", () => {
+  it("is read from the user config only: a project can neither move the worktrees nor turn them off", () => {
+    const off = layer(undefined, { isolation: { worktree: false } });
+    expect(off.merged.isolation).toBeUndefined();
+    expect(off.warnings.join("\n")).toContain("Ignored project isolation");
+    const moved = layer({ isolation: { dir: "../trees" } }, { isolation: { dir: "/tmp/x" } });
+    expect(moved.merged.isolation).toEqual({ dir: "../trees" });
+    expect(moved.warnings.join("\n")).toContain("Ignored project isolation");
+    // A project value that matches the user's is no change, so no warning.
+    expect(layer(undefined, { isolation: { worktree: true } }).warnings).toEqual([]);
+  });
+});

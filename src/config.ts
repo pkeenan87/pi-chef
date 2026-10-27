@@ -162,8 +162,10 @@ export interface WorkflowConfig {
     /** Soft context-window target for one ticket, in tokens. Planning rejects a ticket estimated above it. */
     ticketContextTokens: number;
   };
-  /** /build names the branch `<branchPrefix>/<taskId>` when they start from the default branch. */
+  /** /build names each task's branch `<branchPrefix>/<task name>` (with -2, -3 when taken), always from the default branch. */
   branchPrefix: string;
+  /** Where /build works: a git worktree per task (`dir`: their parent, relative to the project; empty for `../<repo>.worktrees`), or the main checkout. User-only. */
+  isolation: { worktree: boolean; dir: string };
   budgets: {
     taskUsd: number;
     dailyUsd: number;
@@ -264,6 +266,7 @@ const DEFAULTS: WorkflowConfig = {
     ticketContextTokens: 150000,
   },
   branchPrefix: "chef",
+  isolation: { worktree: true, dir: "" },
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual" },
   checks: [],
@@ -678,6 +681,11 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   if (raw.branchPrefix !== undefined && (typeof raw.branchPrefix !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw.branchPrefix) || raw.branchPrefix.endsWith("/") || raw.branchPrefix.includes(".."))) {
     invalid(where, "branchPrefix", "must be a plain branch-name prefix such as chef");
   }
+  const isolation = section(raw, "isolation", where);
+  if (isolation) {
+    if (isolation.worktree !== undefined && typeof isolation.worktree !== "boolean") invalid(where, "isolation.worktree", "must be a boolean");
+    if (isolation.dir !== undefined && typeof isolation.dir !== "string") invalid(where, "isolation.dir", "must be a directory path");
+  }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
     for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
@@ -797,6 +805,7 @@ function build(norm: Record<string, unknown>): WorkflowConfig {
     localMode: { ...DEFAULTS.localMode, ...obj("localMode") } as WorkflowConfig["localMode"],
     workers: { ...DEFAULTS.workers, ...obj("workers") } as WorkflowConfig["workers"],
     branchPrefix: typeof norm.branchPrefix === "string" ? norm.branchPrefix : DEFAULTS.branchPrefix,
+    isolation: { ...DEFAULTS.isolation, ...obj("isolation") } as WorkflowConfig["isolation"],
     budgets: { ...DEFAULTS.budgets, ...obj("budgets") } as WorkflowConfig["budgets"],
     // Fixed: plan approval stays required and merge manual. An old approvals.securitySensitiveFix is ignored.
     approvals: { plan: "required", merge: "manual" },
@@ -997,6 +1006,13 @@ export function layerConfigs(
     if (project.workspaceDir !== (user.workspaceDir ?? DEFAULTS.workspaceDir)) warnings.push("Ignored project workspaceDir: it is read from the user config (~/.pi/agent/chef.yaml) only.");
     if (user.workspaceDir !== undefined) merged.workspaceDir = user.workspaceDir;
     else delete merged.workspaceDir;
+  }
+  // So is where /build works: a project could move the worktrees outside the repo or put its tickets back in the checkout.
+  if (project.isolation !== undefined) {
+    const effective = (value: unknown) => JSON.stringify({ ...DEFAULTS.isolation, ...(isRecord(value) ? value : {}) });
+    if (effective(project.isolation) !== effective(user.isolation)) warnings.push("Ignored project isolation: it is read from the user config (~/.pi/agent/chef.yaml) only.");
+    if (user.isolation !== undefined) merged.isolation = user.isolation;
+    else delete merged.isolation;
   }
 
   for (const key of ["models", "tiers", "routing", "session", "workers", "advisors", "localMode"]) {

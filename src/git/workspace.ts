@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import { WorkflowError } from "../domain.js";
 
@@ -64,6 +66,37 @@ async function runGit(cwd: string, args: string[], identity: Identity): Promise<
 }
 
 const NO_HOOKS = "/dev/null";
+
+/** True when both name the same directory, through symlinks (macOS `/tmp` is `/private/tmp`). */
+export function samePath(a: string, b: string): boolean {
+  const real = (dir: string) => {
+    try {
+      return realpathSync(dir);
+    } catch {
+      return path.resolve(dir);
+    }
+  };
+  return real(a) === real(b);
+}
+
+/**
+ * The main checkout of the repository `dir` belongs to, when `dir` is the top of a linked git worktree; else `dir`.
+ * Reads only files (the worktree's `.git` file, then `commondir`), never git, so hot paths can call it.
+ */
+export function mainCheckoutOf(dir: string): string {
+  try {
+    const dotGit = path.join(dir, ".git");
+    if (!statSync(dotGit).isFile()) return dir;
+    const gitdir = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+?)\s*$/m)?.[1];
+    if (!gitdir) return dir;
+    const own = path.resolve(dir, gitdir);
+    const common = path.resolve(own, readFileSync(path.join(own, "commondir"), "utf8").trim());
+    // Only a plain `<main>/.git` directory has a checkout beside it (a bare repository has none).
+    return path.basename(common) === ".git" && statSync(common).isDirectory() ? path.dirname(common) : dir;
+  } catch {
+    return dir;
+  }
+}
 
 /**
  * The diff format the review and the static scan parse (`+++ b/<file>`, no colour), whatever the user's git config says
@@ -137,13 +170,58 @@ export class GitWorkspace {
     return this.currentBranch();
   }
 
-  /** Creates and switches to a new branch; uncommitted changes come along. The name is validated first (`switch -c` takes no `--`). */
-  async switchCreate(branch: string): Promise<void> {
+  /**
+   * Creates and switches to a new branch at `startPoint` (a commit sha; HEAD when left out); uncommitted changes come
+   * along when they do not conflict. The name is validated first (`switch -c` takes no `--`).
+   */
+  async switchCreate(branch: string, startPoint?: string): Promise<void> {
+    await this.assertBranchName(branch);
+    if (startPoint !== undefined) this.assertSha(startPoint);
+    const result = await this.git(["switch", "-c", branch, ...(startPoint ? [startPoint] : [])]);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not create ${branch}`);
+  }
+
+  /** The commit /build branches from for `base`: the local branch, else `origin/<base>`, else HEAD. */
+  async startPoint(base: string): Promise<string> {
+    for (const ref of [`refs/heads/${base}`, `refs/remotes/origin/${base}`]) {
+      const result = await this.git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+      if (result.code === 0 && result.stdout.trim()) return result.stdout.trim();
+    }
+    return this.head();
+  }
+
+  /**
+   * Adds a worktree at `dir`: on a new branch at `startPoint` when one is given, else on the existing `branch`. The
+   * worktree gets its own index and working tree, so the checkout this runs in is not touched.
+   */
+  async addWorktree(dir: string, branch: string, startPoint?: string): Promise<void> {
+    await this.assertBranchName(branch);
+    if (startPoint !== undefined) this.assertSha(startPoint);
+    const args = startPoint ? ["worktree", "add", "-b", branch, "--", dir, startPoint] : ["worktree", "add", "--", dir, branch];
+    const result = await this.git(args);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not add a worktree at ${dir}`);
+  }
+
+  /** The worktree that has `branch` checked out, or undefined (`git worktree list --porcelain`). */
+  async worktreeOf(branch: string): Promise<string | undefined> {
+    const result = await this.git(["worktree", "list", "--porcelain"]);
+    if (result.code !== 0) return undefined;
+    let dir: string | undefined;
+    for (const line of result.stdout.split("\n")) {
+      if (line.startsWith("worktree ")) dir = line.slice("worktree ".length);
+      else if (line === `branch refs/heads/${branch}` && dir) return dir;
+    }
+    return undefined;
+  }
+
+  private async assertBranchName(branch: string): Promise<void> {
     if (branch.startsWith("-") || (await this.git(["check-ref-format", "--branch", branch])).code !== 0) {
       throw new WorkflowError("GIT", `Not a valid branch name: ${branch}`);
     }
-    const result = await this.git(["switch", "-c", branch]);
-    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not create ${branch}`);
+  }
+
+  private assertSha(sha: string): void {
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new WorkflowError("GIT", `Not a commit id: ${sha}`);
   }
 
   /** True when a local branch of this name exists. */
@@ -153,9 +231,7 @@ export class GitWorkspace {
 
   /** Switches to an existing local branch. Fails (git refuses) rather than carrying conflicting changes along. */
   async switchTo(branch: string): Promise<void> {
-    if (branch.startsWith("-") || (await this.git(["check-ref-format", "--branch", branch])).code !== 0) {
-      throw new WorkflowError("GIT", `Not a valid branch name: ${branch}`);
-    }
+    await this.assertBranchName(branch);
     const result = await this.git(["switch", "--", branch]);
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not switch to ${branch}`);
   }

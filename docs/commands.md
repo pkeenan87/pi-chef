@@ -87,7 +87,7 @@ Prints the active task's full plan (spec and tickets) under its name and state l
 | Form | Effect |
 |---|---|
 | `/plans`, `/plans --all` | A table of tasks: name, state, tickets done/total, branch, last update. Changes nothing |
-| `/plans <name>` | Makes the task active and posts its plan; a draft gets the approve picker. If the working tree is clean, it also checks out the task's build branch. If not, it says the branch was not changed |
+| `/plans <name>` | Makes the task active and posts its plan; a draft gets the approve picker. If the working tree is clean, it also checks out the task's build branch. If not, it says the branch was not changed. A worktree task's branch stays in its worktree, and it says where |
 | `/plans close <name>` | Moves the task to `COMPLETE` (`closedReason: closed by user`). It asks first when tickets are unbuilt or the review has not passed. Files, branches and git are never touched. If it was the active task, the most recently updated open task becomes active |
 
 **Which task is active.** It follows the branch you check out: the build branch of an open task makes that task active. Otherwise the last task you created or switched to stays active.
@@ -98,26 +98,29 @@ Prints the active task's full plan (spec and tickets) under its name and state l
 /build
 ```
 
-Builds the active task's approved tickets one at a time, in dependency order, on one branch. Run it again at any time to resume. It holds the Pi command until it finishes or stops; Esc stops it after the current turn.
+Builds the active task's approved tickets one at a time, in dependency order, on the task's own branch (in its own git worktree by default). Run it again at any time to resume. It holds the Pi command until it finishes or stops; Esc stops it after the current turn.
 
 It refuses:
 
 - a plan that is not approved, or one with no tickets;
 - an exhausted budget;
-- a dirty tree it cannot switch branches with.
+- a dirty tree it cannot switch branches with (in the main checkout);
+- a task another Pi process is building (`BUILD_RUNNING`).
 
 For a security-sensitive plan it asks you to confirm first.
 
 **Branch.**
 
-- **On the default branch** it creates and switches to `<branchPrefix>/<task name>`. On any other branch it builds there.
-- **Uncommitted changes** at the start of a fresh build are listed, and it offers to commit them first as a separate "Changes before /build" commit.
+- **Always its own branch.** A fresh build creates `<branchPrefix>/<task name>` from the default branch, adding `-2`, `-3` when the name is taken. It never builds on the branch that happens to be checked out, so a branch another agent left behind gets none of this task's commits.
+- **Its own worktree** (`isolation.worktree`, on by default). The branch is checked out in a new git worktree, `../<repo>.worktrees/<task name>` (or under `isolation.dir`), and Pi moves into it before the first ticket: the tickets, checks, commits and `/review` run there, and your main checkout and its uncommitted changes are not touched. Each task has its own worktree, so you can run another task's `/build` from another `pi` at the same time. Task state, the ledger and the budget stay in the main checkout's `.pi-workflows/`. When this Pi cannot move into a worktree, a new build works in the main checkout on its new branch and says so. A removed worktree is recreated on its branch when the build resumes. A new worktree is a bare checkout: no `node_modules`, ignored `.env` files or build caches, so put what the checks need (for example `npm ci`) in `setup:`. `/plans close` keeps the worktree; `git worktree remove <dir>` deletes it.
+- **In the main checkout** (`isolation.worktree: false`), uncommitted changes at the start of a fresh build are listed, and it offers to commit them first as a separate "Changes before /build" commit.
+- **The branch is checked before every ticket.** If the checkout has moved to another branch, no ticket starts (`WRONG_BRANCH`).
 - **Commits use your git identity.** `pi-chef <pi-chef@localhost>` is used only when git has none configured.
 
 **Per ticket:**
 
 1. **Route.** The ticket goes to the tier of its difficulty: `ticketLow`, `ticketMedium` or `ticketHigh`, or `tiers.local` for a local ticket (every ticket in local mode, or those of `localMode.difficulties`). Within the tier the model is picked by `routing.selection`.
-2. **Session.** It opens a fresh Pi session on that model and sends the ticket. While the ticket runs, `git push` and branch switches are blocked.
+2. **Session.** It opens a fresh Pi session on that model and sends the ticket. While the ticket runs, `git push`, branch switches and `git worktree` changes are blocked.
 3. **Checks.** It runs `setup` (once per build), then the ticket's `checks`, else the config's `checks`. A failure gets one retry turn in the same session.
 4. **Review.** The review tier (`routing.reviewTier`) reviews the ticket's diff; high tickets also get advisors. A first fail sends the findings back for a fix; a second fail fails the ticket at that tier.
 5. **Commit.** It commits the tree as `<id>: <title>`, then moves on.
@@ -141,7 +144,8 @@ For a security-sensitive plan it asks you to confirm first.
 | `MAX_ESCALATIONS` | No tier left to try |
 | `NO_CANDIDATE` | No usable model for the tier |
 | `BUDGET` | The task or daily budget is spent |
-| `DIRTY_TREE`, `WRONG_BRANCH` | Branch or working-tree problems |
+| `DIRTY_TREE`, `WRONG_BRANCH`, `WORKTREE`, `WORKTREE_BROKEN` | Branch, worktree or working-tree problems |
+| `BUILD_RUNNING` | Another live Pi process is building this task |
 | `BUILD_STOPPED` | Esc, or Pi could not open the session |
 
 ## /review

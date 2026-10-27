@@ -9,6 +9,7 @@ dist/
 .pi-workflows/worktrees/
 .pi-workflows/notifications.jsonl
 .pi-workflows/active-task.json
+.pi-workflows/active/
 .pi-workflows/*.local.yaml
 *.local.yaml
 .DS_Store

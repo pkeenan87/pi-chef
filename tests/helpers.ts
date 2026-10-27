@@ -21,7 +21,7 @@ const exec = promisify(execFile);
 
 export async function tempRepo(): Promise<string> {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-chef-"));
-  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/notifications.jsonl\n");
+  writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows/tasks/\n.pi-workflows/cost/\n.pi-workflows/metrics/\n.pi-workflows/reports/\n.pi-workflows/active-task.json\n.pi-workflows/active/\n.pi-workflows/notifications.jsonl\n");
   writeFileSync(path.join(cwd, "README.md"), "base\n");
   await exec("git", ["init"], { cwd });
   await exec("git", ["config", "user.email", "test@example.com"], { cwd });

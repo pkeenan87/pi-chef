@@ -1,4 +1,5 @@
 import type { CommandResult, TaskState } from "../domain.js";
+import { samePath } from "../git/workspace.js";
 import { dirtyPaths } from "./build.js";
 import { done, fail, guard, type WorkflowContext } from "./context.js";
 import { cell, mdTable } from "./format.js";
@@ -65,6 +66,9 @@ async function listPlans(ctx: WorkflowContext, all: boolean): Promise<CommandRes
 async function followBranch(ctx: WorkflowContext, task: TaskState): Promise<string | undefined> {
   const branch = task.build?.branch;
   if (!branch) return undefined;
+  // A worktree build's branch is checked out in its worktree, where git will not let this checkout take it too.
+  const worktree = task.build?.worktree;
+  if (worktree && !samePath(worktree, ctx.git.repoRoot)) return `Its branch ${branch} is checked out in ${worktree}; /build moves Pi there, or run pi in that folder.`;
   let current: string;
   try {
     current = await ctx.git.currentBranch();
@@ -132,5 +136,6 @@ async function closePlan(ctx: WorkflowContext, ref: string): Promise<CommandResu
       moved = " No active task.";
     }
   }
-  return done(`Closed ${name}. Its files${task.build ? ` and branch ${task.build.branch}` : ""} are kept.${moved}`, { taskId: task.taskId });
+  const tree = task.build?.worktree ? ` Its worktree ${task.build.worktree} is kept too; \`git worktree remove ${task.build.worktree}\` deletes it.` : "";
+  return done(`Closed ${name}. Its files${task.build ? ` and branch ${task.build.branch}` : ""} are kept.${tree}${moved}`, { taskId: task.taskId });
 }
