@@ -6,7 +6,7 @@ import { bracketSpans, omitLockfiles } from "../review/model-review.js";
 import { shortModel } from "../review/review-resolution.js";
 import { reviewMetricType } from "../router/stats.js";
 import { budgetState, record } from "./budget.js";
-import { workspaceName, type WorkflowContext } from "./context.js";
+import { excludedPaths, type WorkflowContext } from "./context.js";
 import { clipDiffSummarized } from "./cut-summary.js";
 import { reviewCandidates } from "./review.js";
 import { decide } from "./routing.js";
@@ -32,7 +32,7 @@ const SEVERITIES = new Set(["high", "medium", "low"]);
 
 /** The ticket's own change: the working tree against HEAD with untracked files, minus `.pi-workflows/`, lockfiles omitted, redacted. */
 export async function ticketDiff(ctx: WorkflowContext): Promise<string> {
-  const raw = await ctx.git.workingDiff("HEAD", [workspaceName(ctx)]);
+  const raw = await ctx.git.workingDiff("HEAD", excludedPaths(ctx));
   return redact(omitLockfiles(raw));
 }
 

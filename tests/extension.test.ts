@@ -270,7 +270,7 @@ describe("pi extension surface", () => {
 
   it("never throws inside withSession: a model mismatch becomes a failed result after newSession returns", async () => {
     const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
-    const { commands } = fakePi();
+    const { commands, handlers } = fakePi();
     bindWorkflow(app);
     const notices: string[] = [];
     let threwInside = false;
@@ -284,8 +284,10 @@ describe("pi extension surface", () => {
       async sendMessage() {},
       async sendUserMessage() {},
       async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
+        const next = make();
+        handlers.get("session_start")!({}, next);
         try {
-          await options?.withSession?.(make());
+          await options?.withSession?.(next);
         } catch {
           threwInside = true;
           throw new Error("Failed to create session");
@@ -319,7 +321,9 @@ describe("pi extension surface", () => {
         handlers.get("agent_settled")!({ type: "agent_settled", aborted: true }, {});
       },
       async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
-        await options?.withSession?.(make());
+        const next = make();
+        handlers.get("session_start")!({}, next);
+        await options?.withSession?.(next);
         return { cancelled: false };
       },
       compact() {},
@@ -328,6 +332,71 @@ describe("pi extension surface", () => {
     const state = app.store.load(app.activeTaskId()!)!;
     expect(state.ticketRuns!["01"]!.status).toBe("in-progress");
     expect(state.ticketRuns!["02"]).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("says pi-chef is not loaded when a new ticket session never runs its session_start, and leaves the ticket unstarted", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+    const { commands } = fakePi();
+    bindWorkflow(app);
+    const notices: string[] = [];
+    const make = (): Record<string, unknown> => ({
+      cwd,
+      hasUI: true,
+      model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      async sendMessage() {},
+      async sendUserMessage() {},
+      // Like a Pi that did not load the extension in the new session: no session_start.
+      async newSession(options?: { withSession?: (next: unknown) => Promise<void> }) {
+        await options?.withSession?.(make());
+        return { cancelled: false };
+      },
+      compact() {},
+    });
+    await commands.get("build")!.handler("", { ...make(), model: undefined });
+    expect(notices.join("\n")).toContain(`pi-chef is not loaded in ${cwd}`);
+    expect(notices.join("\n")).not.toContain("not the routed");
+    expect(app.store.load(app.activeTaskId()!)!.ticketRuns?.["01"]).toBeUndefined();
+    bindWorkflow(undefined);
+  });
+
+  it("goes back to the session /build started from when pi-chef does not load in the worktree", async () => {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01")]);
+    const { commands, handlers } = fakePi();
+    bindWorkflow(app);
+    const notices: string[] = [];
+    const switches: string[] = [];
+    const start = path.join(cwd, "start-session.jsonl");
+    const make = (at: string): Record<string, unknown> => ({
+      cwd: at,
+      hasUI: true,
+      model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      sessionManager: { getSessionFile: () => start, getSessionId: () => "s", getEntries: () => [] },
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      async sendMessage() {},
+      async sendUserMessage() {},
+      newSession: async () => ({ cancelled: true }),
+      async switchSession(file: string, options?: { withSession?: (next: unknown) => Promise<void> }) {
+        switches.push(file);
+        // The worktree has no pi-chef (no session_start); the starting checkout has it.
+        const back = file === start;
+        const next = make(back ? cwd : JSON.parse(readFileSync(file, "utf8").trim()).cwd);
+        if (back) handlers.get("session_start")!({}, next);
+        await options?.withSession?.(next);
+        return { cancelled: false };
+      },
+      compact() {},
+    });
+    await commands.get("build")!.handler("", make(cwd));
+    const worktree = app.store.load(app.activeTaskId()!)!.build!.worktree!;
+    expect(switches).toHaveLength(2);
+    expect(switches[1]).toBe(start);
+    const text = notices.join("\n");
+    expect(text).toContain(`pi-chef is not loaded in ${worktree}`);
+    expect(text).toContain(`Pi is back in ${cwd}.`);
     bindWorkflow(undefined);
   });
 

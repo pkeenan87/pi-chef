@@ -223,7 +223,17 @@ const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
 const SET_MODEL = Symbol.for("pi-chef.set-model");
 /** The last assistant text and abort flag of the run /build is waiting on, filled by the message_end and agent_settled handlers. */
 const TURN = Symbol.for("pi-chef.turn");
-const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [TURN]?: { lastText: string; aborted: boolean } };
+/**
+ * The cwd of the last session this extension's `session_start` saw. The driver clears it before opening or switching a
+ * session: still unset in `withSession` means Pi did not load pi-chef there, so nothing switched the model either.
+ */
+const STARTED = Symbol.for("pi-chef.session-started");
+const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [TURN]?: { lastText: string; aborted: boolean }; [STARTED]?: string };
+
+/** Why a new session in `dir` has no pi-chef, and how to give it one. */
+function notLoadedIn(dir: string): string {
+  return `pi-chef is not loaded in ${dir}, so /build cannot run tickets there. Pi loads project packages from ${path.join(dir, ".pi", "settings.json")}; install pi-chef for every project (\`pi install git:github.com/pkeenan87/pi-chef\`), or check that the folder is trusted, then /build again.`;
+}
 
 /** Re-selects the model the replaced session was using, when the new session started on a different one. */
 function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): Promise<void> | undefined {
@@ -389,8 +399,14 @@ function restoreToolsBeforePlan(ctx: ExtensionContext): void {
  */
 function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: BuildDriver } {
   let live: CommandContext = ctx;
-  // Plain data captured before the first replacement: the model the user was on.
+  // Plain data captured before the first replacement: the model the user was on, and the session to go back to.
   const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+  let startFile: string | undefined;
+  try {
+    startFile = ctx.sessionManager.getSessionFile();
+  } catch {
+    /* an in-memory session: nothing to switch back to */
+  }
   const getWorkflow = () => workflowFor(live.cwd, live);
   const driver: BuildDriver = {
     async fresh(model, run, ticketId) {
@@ -409,6 +425,7 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
         return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the tier config or sign in, then /build again.` };
       }
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
+      delete restoreSlot[STARTED];
       let opened = false;
       // Pi's newSession rethrows an error from withSession and the app dies with "Failed to create session", so nothing
       // is thrown in there: the error is kept and turned into a stop once newSession has returned.
@@ -428,6 +445,8 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
               } catch {
                 /* a config problem is reported by the next command */
               }
+              // Without pi-chef in the new session nothing set the model; say that, not "wrong model".
+              if (restoreSlot[STARTED] === undefined) throw new Error(notLoadedIn(next.cwd));
               // session_start starts the model switch without awaiting it; wait here so the ticket never runs on the wrong model.
               await restoreSlot[RESTORE_DONE];
               delete restoreSlot[RESTORE_DONE];
@@ -492,6 +511,7 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
       try {
         if (typeof live.switchSession !== "function") throw new Error("This Pi session cannot switch sessions, so it cannot move into the worktree.");
         const file = worktreeSessionFile(dir);
+        delete restoreSlot[STARTED];
         const result = await live.switchSession(file, {
           withSession: async (next) => {
             try {
@@ -503,6 +523,7 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
               } catch {
                 /* a config problem is reported by the next command */
               }
+              if (restoreSlot[STARTED] === undefined) throw new Error(notLoadedIn(dir));
               await restoreSlot[RESTORE_DONE];
               delete restoreSlot[RESTORE_DONE];
               if (!samePath(next.cwd, dir)) throw new Error(`Pi opened the session in ${next.cwd}, not in the worktree ${dir}, so no ticket was started.`);
@@ -514,6 +535,20 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
         if (!failure && (result.cancelled || !opened)) stash(`Pi did not move into the worktree ${dir} (cancelled), so /build stopped.`);
       } catch (error) {
         stash(error);
+      }
+      // A session in the worktree that /build cannot use (no pi-chef, wrong folder) goes back to where /build started.
+      if (failure && opened && startFile && typeof live.switchSession === "function") {
+        try {
+          await live.switchSession(startFile, {
+            withSession: async (next) => {
+              replacementCtx = next;
+              live = next;
+            },
+          });
+          failure = `${failure} Pi is back in ${live.cwd}.`;
+        } catch {
+          /* stays in the worktree; the message says why */
+        }
       }
       return failure ? { stopped: failure } : undefined;
     };
@@ -601,6 +636,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   piRef = pi;
   pi.on("session_start", (_event, ctx) => {
+    restoreSlot[STARTED] = ctx.cwd;
     // A new session may start with an empty provider registry, so register again.
     registeredSignature = undefined;
     try {
