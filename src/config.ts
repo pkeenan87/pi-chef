@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
+import { withKnownModel } from "./providers/local-models.js";
 import { containsSecret, redact } from "./redact.js";
 import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
@@ -627,6 +628,8 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
         }
         if (item.label !== undefined && typeof item.label !== "string") invalid(where, `${field}.label`, "must be a string");
         if (item.contextWindow !== undefined && (typeof item.contextWindow !== "number" || !Number.isInteger(item.contextWindow) || item.contextWindow < 4096)) invalid(where, `${field}.contextWindow`, "must be an integer of at least 4096");
+        if (item.maxTokens !== undefined && (typeof item.maxTokens !== "number" || !Number.isInteger(item.maxTokens) || item.maxTokens < 1024)) invalid(where, `${field}.maxTokens`, "must be an integer of at least 1024");
+        if (item.reasoning !== undefined && typeof item.reasoning !== "boolean") invalid(where, `${field}.reasoning`, "must be true or false");
       });
     }
   }
@@ -842,6 +845,8 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
       if (typeof entry.label === "string") candidate.label = entry.label;
       if (typeof entry.api === "string" && (CHAT_APIS as readonly string[]).includes(entry.api)) candidate.api = entry.api as ChatApi;
       if (typeof entry.contextWindow === "number") candidate.contextWindow = entry.contextWindow;
+      if (typeof entry.maxTokens === "number") candidate.maxTokens = entry.maxTokens;
+      if (typeof entry.reasoning === "boolean") candidate.reasoning = entry.reasoning;
       return candidate;
     });
   }
@@ -1390,8 +1395,8 @@ export function localDifficultiesFor(config: WorkflowConfig): ("low" | "medium")
  */
 export function tierCandidates(config: WorkflowConfig, tier: TierKey): TierCandidate[] {
   const explicit = config.tiers[tier];
-  if (explicit) return explicit.filter((candidate) => candidate.model !== "");
-  return DEFAULT_TIERS[tier];
+  if (explicit) return explicit.filter((candidate) => candidate.model !== "").map(withKnownModel);
+  return DEFAULT_TIERS[tier].map(withKnownModel);
 }
 
 /** The Azure deployment a Foundry model is called through: its `deployments` entry, else the model name itself. */

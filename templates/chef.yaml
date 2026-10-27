@@ -118,6 +118,7 @@
 # tiers:
 #   local:                    # local mode: the one model that builds every ticket. Its size ("9b") sizes the tickets.
 #     - { provider: local, model: "qwen3.5:9b", contextWindow: 65536 }   # match OLLAMA_CONTEXT_LENGTH
+#     # llama.cpp: - { provider: local, model: "Qwen3.8-27B", contextWindow: 131072 }   # --alias and --ctx-size of llama-server
 #   ticketLow:
 #     - { provider: xai, model: "grok-4.7" }
 #   ticketMedium:

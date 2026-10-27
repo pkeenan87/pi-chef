@@ -95,6 +95,10 @@ export interface TierCandidate {
   api?: ChatApi;
   /** The context window Pi is told for this model (default 128000). Set it to what the server runs, for example Ollama's context length. */
   contextWindow?: number;
+  /** The output-token limit Pi is told for this model (default 8192). Raise it for a thinking model, whose reasoning counts against it. */
+  maxTokens?: number;
+  /** A thinking model: Pi sends it reasoning levels (default false). */
+  reasoning?: boolean;
 }
 
 /** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */

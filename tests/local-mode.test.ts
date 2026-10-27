@@ -40,7 +40,7 @@ describe("local-mode ticket rules", () => {
 
 describe("the local model's size decides the ticket rules (no switch)", () => {
   it("reads the size from the model tag", () => {
-    expect(["qwen3.5:9b", "gemma3:27b", "llama3.1:8b-instruct-q4_K_M", "phi-4-14B", "deepseek-coder-v2:16b", "qwen3.5:0.6b", "mistral:latest", "qwen3.5"].map(modelSizeB)).toEqual([9, 27, 8, 14, 16, 0.6, undefined, undefined]);
+    expect(["qwen3.5:9b", "gemma3:27b", "llama3.1:8b-instruct-q4_K_M", "phi-4-14B", "deepseek-coder-v2:16b", "qwen3.5:0.6b", "mistral:latest", "qwen3.5", "Qwen3.8-27B"].map(modelSizeB)).toEqual([9, 27, 8, 14, 16, 0.6, undefined, undefined, 27]);
   });
 
   it("holds a 9B model (or an unknown size) to low tickets in 2 files, and lets 14B and up take medium ones in 3", () => {
@@ -53,6 +53,7 @@ describe("the local model's size decides the ticket rules (no switch)", () => {
     };
     const big = localProfile(withLocal("gemma3:27b", 131_072));
     expect(big).toMatchObject({ sizeB: 27, label: "27B model", small: false, difficulties: ["low", "medium"], maxFiles: 3, targetTokens: 65_536 });
+    expect(localProfile(withLocal("Qwen3.8-27B"))).toMatchObject({ model: "local/Qwen3.8-27B", sizeB: 27, small: false, difficulties: ["low", "medium"], maxFiles: 3, targetTokens: 65_536 });
     expect(localProfile(withLocal("my-coder"))).toMatchObject({ label: "small model", small: true, targetTokens: 16_384 });
   });
 });
