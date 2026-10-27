@@ -8,7 +8,7 @@ import { COMMANDS } from "../src/commands.js";
 import extension, { bindWorkflow, currentWorkflow, registerExtensionTools, registerWorkflow } from "../src/extension.js";
 import { isDeniedCommand } from "../src/sandbox.js";
 import { builtWorkflow, sampleTicket, tempRepo, ticketWorkflow } from "./helpers.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 describe("pi extension surface", () => {
@@ -397,6 +397,44 @@ describe("pi extension surface", () => {
     const text = notices.join("\n");
     expect(text).toContain(`pi-chef is not loaded in ${worktree}`);
     expect(text).toContain(`Pi is back in ${cwd}.`);
+    bindWorkflow(undefined);
+  });
+
+  it("registers a config change with the live session's pi, not the replaced one the /build module holds", async () => {
+    const cwd = await tempRepo();
+    const configFile = path.join(cwd, ".pi-workflows", "config.yaml");
+    mkdirSync(path.dirname(configFile), { recursive: true });
+    const write = (model: string) =>
+      writeFileSync(configFile, `providers:\n  local:\n    type: openai-compatible\n    baseUrl: http://127.0.0.1:11434/v1\ntiers:\n  local:\n    - { provider: local, model: "${model}", contextWindow: 65536 }\n`);
+    write("qwen3.5:9b");
+    const registered: { pi: string; models: string[] }[] = [];
+    const piFor = (name: string) => {
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+      const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+      return {
+        handlers,
+        commands,
+        pi: {
+          registerCommand: (command: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) => void commands.set(command, options),
+          on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => (handlers.set(event, handler), () => undefined),
+          appendEntry() {},
+          setModel: async () => true,
+          registerProvider: (provider: string, config: { models?: { id: string }[] }) => void registered.push({ pi: name, models: (config.models ?? []).map((model) => `${provider}/${model.id}`) }),
+        },
+      };
+    };
+    const ctx = { cwd, hasUI: false, sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined, getEntries: () => [] }, ui: { notify() {}, setStatus() {} } };
+    bindWorkflow(undefined);
+    const first = piFor("first");
+    registerWorkflow(first.pi as unknown as ExtensionAPI);
+    first.handlers.get("session_start")!({}, ctx);
+    expect(registered.at(-1)).toEqual({ pi: "first", models: ["local/qwen3.5:9b"] });
+    // A ticket session loads its own copy of the module, whose session_start points registration at its pi.
+    const second = piFor("second");
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-chef.providers")] = { register: second.pi.registerProvider };
+    write("Qwen3.8-27B");
+    await first.commands.get("status")!.handler("", ctx);
+    expect(registered.at(-1)).toEqual({ pi: "second", models: ["local/Qwen3.8-27B"] });
     bindWorkflow(undefined);
   });
 

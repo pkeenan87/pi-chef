@@ -31,15 +31,26 @@ let loaded: { root: string; key: string; config: WorkflowConfig } | undefined;
 let toolsBeforePlan: string[] | undefined;
 const TOOLS_ENTRY = "chef-tools";
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
-/** Signature of the provider and tier settings last registered with Pi. */
-let registeredSignature: string | undefined;
+/**
+ * Where provider registration goes: the live session's `pi.registerProvider`, and the signature of the provider and tier
+ * settings last registered there. On globalThis because Pi may load a fresh copy of this module for each session, and
+ * the copy running /build would otherwise register with a replaced session's pi, whose registry nothing reads.
+ */
+const PROVIDERS_SLOT = Symbol.for("pi-chef.providers");
+const providerSlot = globalThis as { [PROVIDERS_SLOT]?: { register: (name: string, config: unknown) => void; signature?: string } };
+
+/** Points registration at `pi` (a new session's registry starts empty, so nothing counts as registered yet). */
+function registerWith(pi: Partial<Pick<ExtensionAPI, "registerProvider">>): void {
+  if (typeof pi.registerProvider === "function") providerSlot[PROVIDERS_SLOT] = { register: pi.registerProvider.bind(pi) as (name: string, config: unknown) => void };
+}
 
 export function bindWorkflow(workflow: Workflow | undefined): void {
   // A workflow bound from outside brings its own auth probe; prices fall back to subscription billing.
   setBillingResolver(undefined);
   active = workflow;
   loaded = undefined;
-  registeredSignature = undefined;
+  const slot = providerSlot[PROVIDERS_SLOT];
+  if (slot) slot.signature = undefined;
   if (workflow) cwd = workflow.cwd;
 }
 
@@ -74,12 +85,13 @@ function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean
 
 /** Registers Foundry, Vercel, and local chat models with Pi, once per distinct provider/tier configuration. */
 function syncProviders(config: WorkflowConfig): void {
-  if (!piRef || typeof piRef.registerProvider !== "function") return;
+  const slot = providerSlot[PROVIDERS_SLOT];
+  if (!slot) return;
   const signature = JSON.stringify([config.providers, config.tiers]);
-  if (signature === registeredSignature) return;
-  registeredSignature = signature;
+  if (signature === slot.signature) return;
+  slot.signature = signature;
   const errors: string[] = [];
-  registerChatProviders(piRef as ExtensionAPI, config, { vercel: runtime?.vercel }, process.env, errors);
+  registerChatProviders({ registerProvider: slot.register }, config, { vercel: runtime?.vercel }, process.env, errors);
   // Each provider is tried on its own; what Pi refused is reported, never swallowed.
   if (errors.length > 0) throw new Error(errors.join("; "));
 }
@@ -635,10 +647,11 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     },
   });
   piRef = pi;
+  registerWith(pi);
   pi.on("session_start", (_event, ctx) => {
     restoreSlot[STARTED] = ctx.cwd;
-    // A new session may start with an empty provider registry, so register again.
-    registeredSignature = undefined;
+    // A new session may start with an empty provider registry, so register again, with this session's pi.
+    registerWith(pi);
     try {
       const sessionId = ctx.sessionManager.getSessionId();
       if (!watchedSince.has(sessionId)) watchedSince.set(sessionId, new Date());
