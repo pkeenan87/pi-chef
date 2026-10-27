@@ -69,3 +69,22 @@ describe("isolation layering", () => {
     expect(layer(undefined, { isolation: { worktree: true } }).warnings).toEqual([]);
   });
 });
+
+describe("tiers.local layering", () => {
+  const qwen = [{ provider: "local", model: "Qwen3.8-27B", contextWindow: 131072 }];
+  const small = [{ provider: "local", model: "qwen3.5:9b", contextWindow: 65536 }];
+
+  it("keeps the user's local model over a project's, and says so", () => {
+    const { merged, warnings } = layer({ tiers: { local: qwen } }, { tiers: { local: small, ticketLow: [{ provider: "openai", model: "gpt-6-luna" }] } });
+    const tiers = merged.tiers as Record<string, unknown>;
+    expect(tiers.local).toEqual(qwen);
+    // The project's other tiers still apply.
+    expect(tiers.ticketLow).toEqual([{ provider: "openai", model: "gpt-6-luna" }]);
+    expect(warnings.join("\n")).toContain("Ignored project tiers.local (qwen3.5:9b): the local model comes from the user config (~/.pi/agent/chef.yaml), which names Qwen3.8-27B.");
+  });
+
+  it("uses a project's local model when the user names none, and is quiet when they agree", () => {
+    expect((layer({}, { tiers: { local: small } }).merged.tiers as Record<string, unknown>).local).toEqual(small);
+    expect(layer({ tiers: { local: qwen } }, { tiers: { local: qwen } }).warnings).toEqual([]);
+  });
+});

@@ -995,6 +995,20 @@ function cheaperThan(row: PricingRow, floor: PricingRow): boolean {
 }
 
 /**
+ * The local model is a fact about this machine (what the local server runs), so the user's `tiers.local` wins over a
+ * project's; a project's is used only when the user config names none. A different project value warns.
+ */
+function restrictTiers(userTiers: unknown, projectTiers: unknown, warnings: string[]): unknown {
+  if (!isRecord(projectTiers) || projectTiers.local === undefined || !isRecord(userTiers) || userTiers.local === undefined) return projectTiers;
+  const { local, ...rest } = projectTiers;
+  if (JSON.stringify(local) !== JSON.stringify(userTiers.local)) {
+    const named = (value: unknown) => (Array.isArray(value) && isRecord(value[0]) && typeof value[0].model === "string" ? value[0].model : "another model");
+    warnings.push(`Ignored project tiers.local (${named(local)}): the local model comes from the user config (~/.pi/agent/chef.yaml), which names ${named(userTiers.local)}.`);
+  }
+  return rest;
+}
+
+/**
  * Layers a project document over a user document. Policy fields follow "user wins / most
  * restrictive"; everything else is merged field-wise with the project overriding.
  */
@@ -1028,7 +1042,9 @@ export function layerConfigs(
           ? restrictSession(project.session, warnings)
           : key === "routing"
             ? restrictRouting(user.routing, project.routing, warnings)
-            : project[key];
+            : key === "tiers"
+              ? restrictTiers(user.tiers, project.tiers, warnings)
+              : project[key];
     const value = mergeSection(user[key], projectSection);
     if (value) merged[key] = value;
     else delete merged[key];
