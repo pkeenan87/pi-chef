@@ -146,8 +146,8 @@ describe("pi extension surface", () => {
     expect(notices.some((text) => text.includes("Built 2 ticket(s)"))).toBe(true);
     // One status line: each ticket's session shows the ticket and its model, and the end shows the next step.
     expect(new Set(statuses.map((item) => item.split("=")[0]))).toEqual(new Set(["chef"]));
-    expect(statuses.some((item) => /^chef=chef · .+ · Building · ticket 02 of 2 · anthropic\/claude-sonnet-5-5 · \$\d+\.\d{2}/.test(item))).toBe(true);
-    expect(statuses.at(-1)).toMatch(/^chef=chef · .+ · Built · 2 of 2 tickets done · run \/review · \$/);
+    expect(statuses.some((item) => /^chef=chef · .+ · Building · ticket 02 of 2 · anthropic\/claude-sonnet-5-5 · ≈?\$\d+\.\d{2}/.test(item))).toBe(true);
+    expect(statuses.at(-1)).toMatch(/^chef=chef · .+ · Built · 2 of 2 tickets done · run \/review · ≈?\$/);
     bindWorkflow(undefined);
   });
 

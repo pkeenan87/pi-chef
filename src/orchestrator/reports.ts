@@ -33,10 +33,16 @@ export function cost(ctx: WorkflowContext, format = ""): Promise<CommandResult> 
   return guard(() => costReport(ctx, format.trim()));
 }
 
-/** The job a ledger row paid for: its reason without the ticket tag and the detail in parentheses. */
+/**
+ * The job a ledger row paid for: its reason without the ticket tag (` · ticket 01`, or ` ticket 01` as the ticket
+ * review and its advisors write it) and the detail in parentheses. The main session's turns split into the turns of a
+ * /build ticket, the planning conversation, and the rest.
+ */
 function jobOf(entry: CostRecord): string {
-  const job = entry.reason.replace(/ · ticket \S+$/, "").replace(/\s*[(:].*$/, "").trim();
-  return job.startsWith("observed assistant usage") ? "chat turns (session and tickets)" : job || "other";
+  const ticket = / ticket \S+$/.test(entry.reason);
+  const job = entry.reason.replace(/(?: ·)? ticket \S+$/, "").replace(/\s*[(:].*$/, "").trim();
+  if (!job.startsWith("observed assistant usage")) return job || "other";
+  return ticket ? "ticket turns" : entry.phase === "PLANNING" ? "planning turns" : "session turns";
 }
 
 /**

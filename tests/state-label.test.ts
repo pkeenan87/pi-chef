@@ -111,4 +111,18 @@ describe("statusLine", () => {
     expect(statusLine(undefined, facts)).toBeUndefined();
     expect(statusLine(task({ phase: "COMPLETE" }), facts)).toBeUndefined();
   });
+  it("shows unknown spend at the estimate budgets count, and today's spend after the task's", () => {
+    const daily = { spentUsd: 3.1, unknownSpend: false, budgetUsd: 20 };
+    expect(statusLine(task({ phase: "PLANNING" }), { ...facts, planning: "plan · writing tickets", unknownSpend: true, estimatedUnknownUsd: 0.05, daily })).toBe(
+      "chef · retry · plan · writing tickets · ≈$1.29 of $10 · today $3.10 of $20",
+    );
+    expect(statusLine(task({ phase: "PLANNING" }), { ...facts, planning: "plan · writing tickets", daily: { ...daily, unknownSpend: true, estimatedUnknownUsd: 0.4 } })).toBe(
+      "chef · retry · plan · writing tickets · $1.24 of $10 · today ≈$3.50 of $20",
+    );
+  });
+  it("shows today's spend alone with no open task, and is cleared when nothing was spent today", () => {
+    expect(statusLine(undefined, { ...facts, daily: { spentUsd: 0.42, unknownSpend: false, budgetUsd: 20 } })).toBe("chef · today $0.42 of $20");
+    expect(statusLine(task({ phase: "COMPLETE" }), { ...facts, daily: { spentUsd: 0, unknownSpend: true, estimatedUnknownUsd: 0.05, budgetUsd: 20 } })).toBe("chef · today ≈$0.05 of $20");
+    expect(statusLine(undefined, { ...facts, daily: { spentUsd: 0, unknownSpend: false, budgetUsd: 20 } })).toBeUndefined();
+  });
 });

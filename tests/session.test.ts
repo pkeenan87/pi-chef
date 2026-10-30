@@ -385,6 +385,26 @@ describe("input budget gate", () => {
   });
 });
 
+describe("the chef footer keeps up with spend", () => {
+  it("redraws after each model turn, settled run and compaction, not only after a command", async () => {
+    const cwd = await tempRepo();
+    writeProject(cwd, tieredYaml());
+    const { handlers } = fakePi();
+    const statuses: string[] = [];
+    const ctx = { cwd, hasUI: true, model: OPUS, modelRegistry: { find: () => undefined }, ui: { notify() {}, setStatus: (key: string, text?: string) => void statuses.push(`${key}=${text ?? ""}`) }, sessionManager: { getSessionId: () => "sess", getEntries: () => [] } };
+    handlers.get("session_start")!({}, ctx);
+    statuses.length = 0;
+    handlers.get("message_end")!({ message: { role: "assistant", content: [], provider: "anthropic", model: "claude-opus-5-5", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, stopReason: "stop" } }, ctx);
+    // No task is open: the line shows what the turn added to today's spend.
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatch(/^chef=chef · today (≈)?\$\d+\.\d{2} of \$\d+$/);
+    await handlers.get("agent_settled")!({ aborted: false }, ctx);
+    handlers.get("session_compact")!({}, ctx);
+    expect(statuses).toHaveLength(3);
+    expect(new Set(statuses.map((item) => item.split("=")[0]))).toEqual(new Set(["chef"]));
+  });
+});
+
 describe("Pi's own calls and prices reach the ledger through the extension", () => {
   it("sweeps cache warming and Pi's compaction from the session file, and keeps Pi's price on each message", async () => {
     const cwd = await tempRepo();

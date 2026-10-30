@@ -193,8 +193,9 @@ let replacementCtx: CommandContext | undefined;
 
 /** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
 /**
- * Redraws the one persistent `chef` status line (task · state and next step · running model · spend), or clears it
- * with no open task. Uses the stored active task, never git; a failure leaves the line as it was.
+ * Redraws the one persistent `chef` status line (task · state and next step · running model · task spend · today's
+ * spend), with today's spend alone when no task is open. Runs after commands, routes and planning stages, and after
+ * each model turn and compaction so the spend keeps up. Uses the stored active task, never git; a failure leaves the line as it was.
  */
 function refreshStatus(ctx: ExtensionContext): void {
   if (!ctx.hasUI || !ctx.ui.setStatus) return;
@@ -698,7 +699,10 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   pi.on("session_before_compact", (event, ctx) => compactWithCheapTier(event, ctx));
   pi.on("input", (event, ctx) => gateInput(event, ctx));
-  pi.on("session_compact", (_event, ctx) => sweepPiUsage(ctx));
+  pi.on("session_compact", (_event, ctx) => {
+    sweepPiUsage(ctx);
+    refreshStatus(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => sweepPiUsage(ctx));
   pi.on("session_shutdown", (_event, ctx) => {
     sweepPiUsage(ctx);
@@ -738,6 +742,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   pi.on("agent_settled", async (event, ctx) => {
     sweepPiUsage(ctx);
+    refreshStatus(ctx);
     if (event.aborted && restoreSlot[TURN]) restoreSlot[TURN].aborted = true;
     // plan_tickets saved a draft during this turn: post it as markdown now that Pi is idle, then ask. An aborted turn keeps
     // the flag, and /show-plan still offers the draft. Only this handler's live ctx is used; any failure is shown, never thrown.
@@ -749,7 +754,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       tell(ctx as CommandContext, problemNotice(error));
     }
   });
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     const message = event.message;
     const turn = restoreSlot[TURN];
     if (turn && message.role === "assistant") {
@@ -773,6 +778,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
     // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
     (active ?? tryWorkflowFor(cwd))?.observeUsage({ provider: message.provider, model: message.model, usage });
+    // The footer's spend follows each turn, not just the next command.
+    refreshStatus(ctx);
   });
 }
 

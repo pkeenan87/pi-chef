@@ -16,23 +16,34 @@ describe("/cost", () => {
     app.store.appendLedger(row(taskId, "anthropic", "claude-sonnet-5-5", "observed assistant usage · ticket 01", 0.25));
     app.store.appendLedger(row(taskId, "anthropic", "claude-opus-5-5", "ticket review (round 1) · ticket 01", 0.5));
     app.store.appendLedger(row(taskId, "openai", "gpt-6-luna", "batch summary", null));
+    // The ticket review and its advisors tag the ticket without the dot; each job is still one row.
+    app.store.appendLedger(row(taskId, "anthropic", "claude-opus-5-5", "ticket review ticket 02", 0.5));
+    app.store.appendLedger(row(taskId, "openai", "gpt-6-luna", "advisor ticket review ticket 01", 0.1));
+    app.store.appendLedger(row(taskId, "openai", "gpt-6-luna", "advisor ticket review ticket 02", 0.1));
+    // The main session's turns: planning, and chat outside planning and tickets.
+    app.store.appendLedger({ ...row(taskId, "anthropic", "claude-opus-5-5", "observed assistant usage", 0.2), id: "plan-turn", phase: "PLANNING" });
+    app.store.appendLedger({ ...row(taskId, "anthropic", "claude-opus-5-5", "observed assistant usage", 0.05), id: "chat-turn", phase: "REVIEWING" });
     const result = await app.cost();
     expect(result.ok, result.text).toBe(true);
     // The command result is one line; the tables go to the chat block.
-    expect(result.text).toMatch(/^Known spend \$0\.7500 across 3 record\(s\) · 1 with unknown cost, estimated at \$\d+\.\d{4} · total ≈ \$0\.75\d\d$/);
+    expect(result.text).toMatch(/^Known spend \$1\.7000 across 8 record\(s\) · 1 with unknown cost, estimated at \$\d+\.\d{4} · total ≈ \$1\.70\d\d$/);
     const markdown = reports.at(-1)!;
     expect(markdown).toContain("| Model | Calls | Known | Unknown rows | Total | Success / failure |");
-    expect(markdown).toContain("| anthropic/claude-opus-5-5 | 1 | $0.5000 | - | $0.5000 | - |");
-    expect(markdown).toContain("| chat turns (session and tickets) | 1 | $0.2500 | - | $0.2500 |");
-    expect(markdown).toContain("| ticket review | 1 | $0.5000 | - | $0.5000 |");
+    expect(markdown).toContain("| anthropic/claude-opus-5-5 | 4 | $1.2500 | - | $1.2500 | - |");
+    expect(markdown).toContain("| ticket turns | 1 | $0.2500 | - | $0.2500 |");
+    expect(markdown).toContain("| planning turns | 1 | $0.2000 | - | $0.2000 |");
+    expect(markdown).toContain("| session turns | 1 | $0.0500 | - | $0.0500 |");
+    expect(markdown).toContain("| ticket review | 2 | $1.0000 | - | $1.0000 |");
+    expect(markdown).toContain("| advisor ticket review | 2 | $0.2000 | - | $0.2000 |");
+    expect(markdown).not.toMatch(/ticket review ticket|chat turns/);
     // The unknown row is counted at an estimate, shown apart from known spend.
     expect(markdown).toMatch(/\| batch summary \| 1 \| \$0\.0000 \| 1 \| ≈ \$\d+\.\d{4} \|/);
-    expect(markdown).toMatch(new RegExp(`\\| ${app.store.load(taskId)!.name} \\| 3 \\| \\$0\\.7500 \\| 1 \\| ≈ \\$0\\.75\\d\\d \\|`));
+    expect(markdown).toMatch(new RegExp(`\\| ${app.store.load(taskId)!.name} \\| 8 \\| \\$1\\.7000 \\| 1 \\| ≈ \\$1\\.70\\d\\d \\|`));
     expect(markdown).not.toMatch(/By phase|Last route|\{"/);
 
     const csv = await app.cost("csv");
     const file = (csv.data as { file: string }).file;
-    expect(csv.text).toBe(`Wrote 3 ledger record(s) to ${file}.`);
+    expect(csv.text).toBe(`Wrote 8 ledger record(s) to ${file}.`);
     expect(readFileSync(file, "utf8").split("\n")[0]).toBe("id,at,taskId,phase,provider,model,tier,requests,inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,actualUsd,usageKnown,outcome,retries,reason");
     expect((await app.cost("pdf")).code).toBe("USAGE");
   });
