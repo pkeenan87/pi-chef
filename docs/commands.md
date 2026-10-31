@@ -219,7 +219,7 @@ Reads `.pi-workflows/cost/` and posts:
 - known spend, the number of records whose cost is unknown, the estimate budgets count them at, and the total (`≈` when it includes an estimate);
 - the task and daily budgets, with their status;
 - **By model:** calls, known spend, unknown-cost rows, total, and the successes and failures the router recorded;
-- **By job:** chat turns (the session and tickets), reviews, advisors, compaction, web search, summaries of cut files, and the calls Pi makes on its own (cache warming, its own compaction, branch summaries);
+- **By job:** the main session's turns (`ticket turns` while `/build` runs a ticket, `planning turns` during `/plan`, `session turns` for the rest, including Fix all after `/review`), reviews (the per-ticket `ticket review` and `/review`'s `model review`, one row each over all tickets), advisors, compaction, web search, summaries of cut files, and the calls Pi makes on its own (cache warming, its own compaction, branch summaries);
 - **By task:** everything the task spent, each with its total;
 - subscription quota use, when quota is configured (it ranks models; it is never billed or budgeted).
 
@@ -264,13 +264,13 @@ Lists every command with its description.
 The one-line `chef` footer looks like:
 
 ```text
-chef · <task> · [local ·] <state and next step> · [<model of the running ticket> ·] $<spent> of $<task budget>
+chef · <task> · [local ·] <state and next step> · [<model of the running ticket> ·] $<spent> of $<task budget> · today $<spent> of $<daily budget>
 ```
 
-- **Spend:** `+?` after the amount means some spend is unknown.
+- **Spend:** `≈` before an amount means it includes calls whose cost is unknown, counted at the estimate budgets use (as in `/cost`).
 - **While `/plan` runs**, the planning stage replaces the state, for example `plan · interview round 2 (3/7 questions)`.
-- **When it updates:** after every command, planning stage and route, and at each ticket's new session.
-- **Cleared** when no task is open.
+- **When it updates:** after every command, planning stage and route, at each ticket's new session, and after every model turn and compaction.
+- **With no open task** it shows only today's spend (`chef · today $0.42 of $75`), and is cleared when nothing was spent today.
 
 ## The init command (pi-chef-init)
 

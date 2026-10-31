@@ -1,3 +1,4 @@
+import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { ReviewReport, TaskState } from "../domain.js";
 import { flat } from "./format.js";
 import { reviewItems } from "./review-report.js";
@@ -103,16 +104,28 @@ export interface StatusFacts {
   spentUsd: number;
   /** True when some of the task's spend is unknown: shown as "+?", never as zero. */
   unknownSpend: boolean;
+  /** What budgets count the unknown spend at; with it, the amount is shown as the estimated total ("≈$1.30"). */
+  estimatedUnknownUsd?: number;
   budgetUsd: number;
+  /** Spend today over every task and the session, against the daily budget. */
+  daily?: { spentUsd: number; unknownSpend: boolean; estimatedUnknownUsd?: number; budgetUsd: number };
+}
+
+/** "$1.24", "≈$1.30" with an estimate for unknown spend, "$1.24+?" without one. */
+function spendText(spent: { spentUsd: number; unknownSpend: boolean; estimatedUnknownUsd?: number }): string {
+  if (!spent.unknownSpend) return `$${spent.spentUsd.toFixed(2)}`;
+  return spent.estimatedUnknownUsd === undefined ? `$${spent.spentUsd.toFixed(2)}+?` : `≈$${fromMicroUsd(toMicroUsd(spent.spentUsd) + toMicroUsd(spent.estimatedUnknownUsd)).toFixed(2)}`;
 }
 
 /**
- * The one persistent status line: task, where it stands and the next step, the model of a running ticket, and spend
- * against the task budget. Undefined (the line is cleared) with no open task. Pure; no git.
+ * The one persistent status line: task, where it stands and the next step, the model of a running ticket, spend
+ * against the task budget, and today's spend against the daily budget. With no open task it shows today's spend alone,
+ * and is undefined (the line is cleared) when nothing was spent today either. Pure; no git.
  */
 export function statusLine(state: TaskState | undefined, facts: StatusFacts): string | undefined {
-  if (!state || state.phase === "IDLE" || state.phase === "COMPLETE") return undefined;
+  const today = facts.daily ? `today ${spendText(facts.daily)} of $${facts.daily.budgetUsd}` : "";
+  if (!state || state.phase === "IDLE" || state.phase === "COMPLETE") return facts.daily && (facts.daily.spentUsd > 0 || facts.daily.unknownSpend) ? `chef · ${today}` : undefined;
   const where = facts.planning ?? taskState(state, state.review).line;
-  const spend = `$${facts.spentUsd.toFixed(2)}${facts.unknownSpend ? "+?" : ""} of $${facts.budgetUsd}`;
-  return ["chef", facts.name, facts.local ? "local" : "", where, facts.model, spend].filter(Boolean).join(" · ");
+  const spend = `${spendText(facts)} of $${facts.budgetUsd}`;
+  return ["chef", facts.name, facts.local ? "local" : "", where, facts.model, spend, today].filter(Boolean).join(" · ");
 }

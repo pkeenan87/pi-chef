@@ -156,17 +156,19 @@ export class Workflow {
   /** The persistent status line for the stored active task (no git call), or undefined to clear it. */
   statusLine(): string | undefined {
     const state = active(this.ctx);
-    if (!state) return undefined;
-    const running = state.build?.currentTicket ? state.ticketRuns?.[state.build.currentTicket] : undefined;
-    const spend = budgetState(this.ctx, state.taskId).task;
+    const running = state?.build?.currentTicket ? state.ticketRuns?.[state.build.currentTicket] : undefined;
+    const { task, daily } = budgetState(this.ctx, state?.taskId);
+    const { taskUsd, dailyUsd } = this.ctx.config.budgets;
     return statusLine(state, {
-      name: displayName(state),
-      local: state.localMode === true,
+      name: state ? displayName(state) : "",
+      local: state?.localMode === true,
       planning: planningStatusText(this.ctx),
       model: running?.provider && running.model ? modelLabel(this.ctx.config, running.provider, running.model) : undefined,
-      spentUsd: spend.knownUsd,
-      unknownSpend: spend.unknownRecords > 0,
-      budgetUsd: this.ctx.config.budgets.taskUsd,
+      spentUsd: task.knownUsd,
+      unknownSpend: task.unknownRecords > 0,
+      estimatedUnknownUsd: task.estimatedUnknownUsd,
+      budgetUsd: taskUsd,
+      daily: { spentUsd: daily.knownUsd, unknownSpend: daily.unknownRecords > 0, estimatedUnknownUsd: daily.estimatedUnknownUsd, budgetUsd: dailyUsd },
     });
   }
 
