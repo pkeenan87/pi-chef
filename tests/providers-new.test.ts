@@ -185,10 +185,12 @@ describe("Foundry api setting and per-model override", () => {
     return registered.foundry!;
   };
 
-  it("defaults the provider to openai-completions with no per-model api", () => {
+  it("defaults the provider to openai-completions, with a per-model api only for models that need Responses", () => {
     const foundry = register(tieredConfig());
     expect(foundry.api).toBe("openai-completions");
-    expect(foundry.models.every((model) => model.api === undefined)).toBe(true);
+    // Astra, Sol and Luna refuse tools with reasoning_effort on chat completions (known-models.ts).
+    for (const model of foundry.models) expect(model.api, model.id).toBe(/^gpt-6/.test(model.id) ? "openai-responses" : undefined);
+    expect(foundry.models.find((model) => model.id === "grok-4-7")?.api).toBeUndefined();
   });
 
   it("honors providers.foundry.api", () => {
@@ -210,13 +212,13 @@ describe("Foundry api setting and per-model override", () => {
 
   it("the first tier wins when one deployment has different apis, and a warning says so", () => {
     const config = tieredConfig();
-    config.tiers.ticketHigh = [{ provider: "foundry", model: "gpt-6.1-sol", api: "openai-responses" }];
-    config.tiers.standard = [{ provider: "foundry", model: "gpt-6.1-sol" }];
+    config.tiers.ticketHigh = [{ provider: "foundry", model: "my-model", api: "openai-responses" }];
+    config.tiers.standard = [{ provider: "foundry", model: "my-model" }];
     const { apis, conflicts } = foundryDeploymentApis(config);
     expect(conflicts.length).toBeGreaterThan(0);
-    expect(foundryApiConflicts(config)[0]).toMatch(/foundry\/gpt-6\.1-sol/);
-    expect(apis.get("gpt-6.1-sol")).toBe("openai-completions");
-    expect(register(config).models.find((model) => model.id === "gpt-6.1-sol")?.api).toBeUndefined();
+    expect(foundryApiConflicts(config)[0]).toMatch(/foundry\/my-model/);
+    expect(apis.get("my-model")).toBe("openai-completions");
+    expect(register(config).models.find((model) => model.id === "my-model")?.api).toBeUndefined();
   });
 
   it("validates tier api values, and only for foundry candidates", () => {

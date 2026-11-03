@@ -94,7 +94,7 @@ The built-in tiers and the sample config list a Foundry deployment after each Op
 
 Foundry is billed per token, not by subscription, so its pricing rows are real list prices (the sample config has Azure list prices; verify them against your Azure rate card) and it has no `quota.models` rows. The medium-ticket advisor rule compares vendors by model name, so a Foundry Astra counts as OpenAI's model and a Foundry Grok as xAI's.
 
-`providers.foundry.api` sets the wire API for every Foundry deployment (default `openai-completions`). A Foundry tier entry may override it for one deployment with `api`. `gpt-6.1-sol` supports tool calling only through the Responses API, so give it `openai-responses`:
+`providers.foundry.api` sets the wire API for every Foundry deployment (default `openai-completions`). A Foundry tier entry may override it for one deployment with `api`:
 
 ```yaml
 tiers:
@@ -102,6 +102,8 @@ tiers:
     - { provider: openai, model: gpt-6.1-sol }
     - { provider: foundry, model: gpt-6.1-sol, api: openai-responses }
 ```
+
+pi-chef knows the OpenAI models on Foundry by their tier `model` name (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`; the name before any `deployments` mapping). Azure refuses function tools together with a reasoning effort on chat completions for them ("Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions"), so an entry for one of them that sets no `api` is registered on `openai-responses` while the provider default is `openai-completions`. They also get Pi's own Azure catalog values for the fields the entry leaves out (`reasoning: true`, `maxTokens` 128000, `contextWindow` 272000) and its reasoning levels, so Pi never sends a level the model refuses (Astra and Sol cannot turn reasoning off and have no `minimal`; Pi offers low to max). An entry's own `api`, `reasoning`, `maxTokens` or `contextWindow` wins. A deployment whose tier `model` is your own name (say `my-astra` with no `deployments` entry) is not recognized; key it on the model name and map it with `deployments` instead.
 
 If the same deployment appears in several tiers with different `api` values, the first one wins and `/status` shows a warning. `api` is accepted only on `provider: foundry` entries. Pi's Responses client posts to `<baseUrl>/responses`, and the Foundry base is `<endpoint>/openai/v1`, so a Sol request goes to `<endpoint>/openai/v1/responses` with no `api-version`.
 

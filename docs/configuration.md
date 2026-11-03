@@ -164,7 +164,7 @@ Each candidate:
 | `maxTokens` | int ≥ 1024 | no | The output-token limit Pi is told (default 8192). A thinking model needs more, since its reasoning counts against it |
 | `reasoning` | bool | no | A thinking model: Pi sends it reasoning levels (default `false`) |
 
-A known local model (today Qwen 3.8 27B, ids `Qwen3.8-27B`, its GGUF names, `qwen3.8:27b`) gets `label`, `contextWindow` 131072, `maxTokens` 32768 and `reasoning: true` for the fields its entry leaves out, plus the Pi compat settings it needs (no developer role) that config cannot set.
+A known local model (today Qwen 3.8 27B, ids `Qwen3.8-27B`, its GGUF names, `qwen3.8:27b`) gets `label`, `contextWindow` 131072, `maxTokens` 32768 and `reasoning: true` for the fields its entry leaves out, plus the Pi compat settings it needs (no developer role) that config cannot set. A known Foundry model (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`, matched by the tier model name) gets `reasoning: true`, `maxTokens` 128000 and `contextWindow` 272000 the same way, the reasoning levels it accepts, and `openai-responses` when its entry sets no `api` and `providers.foundry.api` is `openai-completions` (see [providers](providers.md)).
 
 ### providers
 

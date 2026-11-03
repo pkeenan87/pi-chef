@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_TIERS, loadConfig, parseConfig, tierCandidates, validateResolvedConfig } from "../src/config.js";
 import { TIER_KEYS } from "../src/domain.js";
 import { registerChatProviders } from "../src/providers/runtime.js";
+import { withKnownModel } from "../src/providers/known-models.js";
 
 const FOUNDRY = `providers:
   foundry:
@@ -35,7 +36,7 @@ describe("built-in defaults never fail validation", () => {
     const config = loadConfig(project);
     expect(() => validateResolvedConfig(config)).not.toThrow();
     expect(config.tiers).toEqual({});
-    for (const tier of TIER_KEYS) expect(tierCandidates(config, tier)).toEqual(DEFAULT_TIERS[tier]);
+    for (const tier of TIER_KEYS) expect(tierCandidates(config, tier)).toEqual(DEFAULT_TIERS[tier].map(withKnownModel));
     expect("models" in config).toBe(false);
   });
 

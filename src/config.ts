@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
-import { withKnownModel } from "./providers/local-models.js";
+import { foundryApiFor, withKnownModel } from "./providers/known-models.js";
 import { containsSecret, redact } from "./redact.js";
 import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
@@ -1478,7 +1478,8 @@ function applyDeploymentPricing(config: WorkflowConfig, warnings: string[]): voi
 
 /**
  * The wire API each Foundry deployment is registered with: the first tier candidate that names the deployment decides,
- * and its own `api` (else the provider's) is used. A later candidate for the same deployment that resolves to a
+ * and its own `api` is used, else the provider's (`foundryApiFor`: a known model that needs Responses, such as Astra,
+ * moves off openai-completions). A later candidate for the same deployment that resolves to a
  * different api is ignored, and `conflicts` says so.
  */
 export function foundryDeploymentApis(config: WorkflowConfig): { apis: Map<string, ChatApi>; conflicts: string[] } {
@@ -1488,7 +1489,7 @@ export function foundryDeploymentApis(config: WorkflowConfig): { apis: Map<strin
   for (const tier of TIER_KEYS) {
     for (const candidate of tierCandidates(config, tier)) {
       if (candidate.provider !== "foundry" || !candidate.model) continue;
-      const api = candidate.api ?? base;
+      const api = foundryApiFor(candidate, base);
       const first = apis.get(candidate.model);
       if (first === undefined) apis.set(candidate.model, api);
       else if (first !== api) conflicts.push(`tiers.${tier}: foundry/${candidate.model} asks for api ${api} but ${first} was set by an earlier tier; ${first} is used.`);
