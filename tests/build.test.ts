@@ -4,9 +4,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { Ticket } from "../src/domain.js";
-import { BUILD_CHUNK_RULES, runBuild, type BuildDriver, type ModelRef } from "../src/orchestrator/build.js";
+import { BUILD_CHUNK_RULES, runBuild, TURN_GRACE, type BuildDriver, type ChunkLimits, type ModelRef } from "../src/orchestrator/build.js";
+import { turnBudget } from "../src/extension.js";
 import { checkRunner, contextOf, readyAuth, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
 import type { WorkflowOptions } from "../src/orchestrator/types.js";
+import { layerConfigs, parseConfig } from "../src/config.js";
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd })).stdout.trim();
@@ -24,15 +26,17 @@ interface Send {
 interface Reply {
   lastText?: string;
   aborted?: boolean;
+  turnLimit?: boolean;
 }
 
 /** A driver whose "sessions" run a script: it may write files into the checkout, like a model would. */
 function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<Reply | void>) {
   const sends: Send[] = [];
-  const state = { fresh: 0, finished: 0 };
+  const state: { fresh: number; finished: number; limits?: ChunkLimits } = { fresh: 0, finished: 0 };
   const driver: BuildDriver = {
-    async fresh(model, run) {
+    async fresh(model, run, _ticketId, limits) {
       state.fresh += 1;
+      state.limits = limits;
       let current = "";
       let turn = 0;
       await run({
@@ -41,7 +45,7 @@ function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<
           const send: Send = { ticket: current, model, text, turn: turn++ };
           sends.push(send);
           const reply = (await script(send)) ?? {};
-          return { lastText: reply.lastText ?? "Done.\n- [x] retry works\nFiles changed: x", aborted: reply.aborted ?? false };
+          return { lastText: reply.lastText ?? "Done.\n- [x] retry works\nFiles changed: x", aborted: reply.aborted ?? false, ...(reply.turnLimit ? { turnLimit: true } : {}) };
         },
       });
     },
@@ -102,6 +106,84 @@ describe("/build order and routing", () => {
     expect(d.sends[1]!.text).toContain("### 01: Ticket 01");
     expect(d.sends[1]!.text).toContain("Added the retry loop in ticket 01.");
     expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "ticketMedium", provider: "anthropic", model: "claude-sonnet-5-5", attempts: 1 });
+  });
+});
+
+describe("/build turn budget", () => {
+  it("passes routing.maxTicketTurns to the driver", async () => {
+    const t = await buildTask({ tickets: [ticket("01")], mutate: (config) => void (config.routing.maxTicketTurns = 12) });
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.state.limits).toEqual({ maxTurns: 12 });
+  });
+
+  it("fails a ticket that ran out of turns without running its checks, and escalates it on the next /build", async () => {
+    const runs: string[] = [];
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], runner: checkRunner(async () => (runs.push("check"), { code: 0, stdout: "ok", stderr: "" })) });
+    const stuck = fakeDriver(t.cwd, () => ({ turnLimit: true, aborted: true }));
+    const first = await t.run(stuck.driver);
+    expect(first.code).toBe("TURN_LIMIT");
+    expect(first.text).toContain("Ran out of turns");
+    expect(runs).toEqual([]);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed", failedBy: "turns", tier: "ticketLow" });
+    expect(t.load().ticketRuns!["01"]!.attemptLog?.at(-1)).toMatchObject({ outcome: "failure", failedBy: "turns" });
+    const next = fakeDriver(t.cwd, (send) => next.write(`f${send.ticket}.txt`));
+    expect((await t.run(next.driver)).ok).toBe(true);
+    expect(next.sends[0]!.model.id).toBe("claude-sonnet-5-5");
+  });
+
+  it("steers once at the limit and stops the run TURN_GRACE turns later", () => {
+    const steers: string[] = [];
+    let aborts = 0;
+    const budget = turnBudget({ maxTurns: 3 }, (text) => void steers.push(text), () => void (aborts += 1));
+    for (let turn = 1; turn <= 3 + TURN_GRACE + 4; turn++) {
+      budget.count();
+      if (turn < 3) expect(steers).toEqual([]);
+      if (turn < 3 + TURN_GRACE) expect(budget.stopped()).toBe(false);
+    }
+    expect(steers).toHaveLength(1);
+    expect(steers[0]).toContain("budget of 3 turns");
+    expect(aborts).toBe(1);
+    expect(budget.stopped()).toBe(true);
+  });
+
+  it("never throws when steering or aborting fails, and does nothing without limits", () => {
+    const budget = turnBudget({ maxTurns: 1 }, () => Promise.reject(new Error("closed")), () => { throw new Error("gone"); });
+    for (let turn = 0; turn < 1 + TURN_GRACE; turn++) expect(() => budget.count()).not.toThrow();
+    expect(budget.stopped()).toBe(true);
+    const none = turnBudget(undefined, () => undefined, () => undefined);
+    for (let turn = 0; turn < 500; turn++) none.count();
+    expect(none.stopped()).toBe(false);
+  });
+
+  it("validates routing.maxTicketTurns, and a project can only lower it", () => {
+    expect(() => parseConfig("routing: { maxTicketTurns: 2 }\n")).toThrow(/maxTicketTurns/);
+    expect(parseConfig("{}\n").routing.maxTicketTurns).toBe(100);
+    const routing = (user: Record<string, unknown> | undefined, project: Record<string, unknown>) => (layerConfigs(user, { routing: project }, []) as { routing: { maxTicketTurns: number } }).routing.maxTicketTurns;
+    expect(routing(undefined, { maxTicketTurns: 40 })).toBe(40);
+    expect(routing(undefined, { maxTicketTurns: 400 })).toBe(100);
+    expect(routing({ routing: { maxTicketTurns: 30 } }, { maxTicketTurns: 60 })).toBe(30);
+  });
+});
+
+describe("/build thinking levels", () => {
+  it("hands the driver the tier entry's thinking level, and none when the entry sets none", async () => {
+    const t = await buildTask({
+      tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })],
+      mutate: (config) => {
+        config.tiers.ticketLow = [{ provider: "xai", model: "grok-4.7", thinking: "low" }];
+      },
+    });
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
+    expect((await t.run(d.driver)).ok).toBe(true);
+    expect(d.sends[0]!.model).toEqual({ provider: "xai", id: "grok-4.7", thinking: "low" });
+    expect("thinking" in d.sends[1]!.model).toBe(false);
+  });
+
+  it("validates tiers.*[].thinking", () => {
+    const yaml = (value: string) => `tiers:\n  ticketLow:\n    - { provider: xai, model: grok-4.7, thinking: ${value} }\n`;
+    expect(parseConfig(yaml("high")).tiers.ticketLow?.[0]?.thinking).toBe("high");
+    expect(() => parseConfig(yaml("extreme"))).toThrow(/thinking/);
   });
 });
 

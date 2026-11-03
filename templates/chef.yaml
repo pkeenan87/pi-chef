@@ -44,6 +44,7 @@
 #   maxTier: premium          # the highest tier any route may use
 #   maxEscalations: 3         # tier steps a failed ticket may climb
 #   circuitBreakerFailures: 3 # failures with no success that make routing skip a tier
+#   maxTicketTurns: 100       # assistant turns a /build ticket attempt may take before it is told to wrap up
 #   attemptOverheadUsd: 0.02  # adaptive selection only: ranking weight, never billed
 #   requirePremiumReviewFor:  # reviewed on premium, and you confirm before /build
 #     - auth

@@ -136,6 +136,7 @@ Unknown cost is never counted as $0: a call with token counts but no price is es
 | `routing.reviewTier` | `cheap` \| `standard` \| `premium` | `premium` | user only | Tier of the per-ticket review that gates each commit, and of `/review`'s model pass |
 | `routing.requirePremiumReviewFor` | list of strings | `auth`, `permissions`, `secrets`, `security-sensitive` | adds to the user's list | Task types and capabilities whose review always runs on premium and that need your confirmation before `/build` |
 | `routing.circuitBreakerFailures` | int ≥ 1 | `3` | lower wins | Failures with no success, per task type and tier, that open the tier's circuit: it is skipped and routing moves up |
+| `routing.maxTicketTurns` | int ≥ 5 | `100` | lower wins | Assistant turns one `/build` ticket attempt may take, its check and review retries included. At the limit the model is told once to finish; 5 turns later the run is stopped and the ticket fails (`TURN_LIMIT`, counted against the model), so the next `/build` escalates it, and a local ticket goes straight on to Opus |
 | `routing.attemptOverheadUsd` | USD ≥ 0 | `0.02` | merged | Ranking only, in `adaptive` selection: added to each model's price before dividing by its success rate. Never billed |
 
 ### tiers
@@ -163,6 +164,7 @@ Each candidate:
 | `contextWindow` | int ≥ 4096 | no | The context window Pi is told (default 128000). Set it for local models to what the server runs, for example Ollama's `OLLAMA_CONTEXT_LENGTH` |
 | `maxTokens` | int ≥ 1024 | no | The output-token limit Pi is told (default 8192). A thinking model needs more, since its reasoning counts against it |
 | `reasoning` | bool | no | A thinking model: Pi sends it reasoning levels (default `false`) |
+| `thinking` | `off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` \| `max` | no | The thinking level a `/build` ticket on this model runs at, set when its session starts (Pi clamps it to the levels the model accepts). Unset keeps Pi's level. The user's level comes back when the build ends |
 
 A known local model (today Qwen 3.8 27B, ids `Qwen3.8-27B`, its GGUF names, `qwen3.8:27b`) gets `label`, `contextWindow` 131072, `maxTokens` 32768 and `reasoning: true` for the fields its entry leaves out, plus the Pi compat settings it needs (no developer role) that config cannot set. A known Foundry model (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`, matched by the tier model name) gets `reasoning: true`, `maxTokens` 128000 and `contextWindow` 272000 the same way, the reasoning levels it accepts, and `openai-responses` when its entry sets no `api` and `providers.foundry.api` is `openai-completions` (see [providers](providers.md)).
 
