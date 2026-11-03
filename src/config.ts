@@ -171,7 +171,12 @@ export interface WorkflowConfig {
   /** /build names each task's branch `<branchPrefix>/<task name>` (with -2, -3 when taken), always from the default branch. */
   branchPrefix: string;
   /** Where /build works: a git worktree per task (`dir`: their parent, relative to the project; empty for `../<repo>.worktrees`), or the main checkout. User-only. */
-  isolation: { worktree: boolean; dir: string };
+  /**
+   * `runner`: how /build runs a ticket. `subagent` (default): in a session pi-chef opens with Pi's SDK beside yours,
+   * which stays where it is. `session`: Pi replaces your session with a new one per ticket (the older path). A Pi
+   * whose model runtime cannot be reached uses `session` either way.
+   */
+  isolation: { worktree: boolean; dir: string; runner: "subagent" | "session" };
   budgets: {
     taskUsd: number;
     dailyUsd: number;
@@ -273,7 +278,7 @@ const DEFAULTS: WorkflowConfig = {
     ticketContextTokens: 150000,
   },
   branchPrefix: "chef",
-  isolation: { worktree: true, dir: "" },
+  isolation: { worktree: true, dir: "", runner: "subagent" },
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual" },
   checks: [],
@@ -696,6 +701,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   if (isolation) {
     if (isolation.worktree !== undefined && typeof isolation.worktree !== "boolean") invalid(where, "isolation.worktree", "must be a boolean");
     if (isolation.dir !== undefined && typeof isolation.dir !== "string") invalid(where, "isolation.dir", "must be a directory path");
+    if (isolation.runner !== undefined && isolation.runner !== "subagent" && isolation.runner !== "session") invalid(where, "isolation.runner", "must be subagent or session");
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
