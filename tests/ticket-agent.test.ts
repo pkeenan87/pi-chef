@@ -82,6 +82,19 @@ describe("ticket subagent on Pi's SDK", () => {
     expect(activity).toContain("turn 2 · write a.txt");
   });
 
+  it("tells the model when its write broke a file, in the tool result it reads next", async () => {
+    const { runtime, provider, model } = await faux();
+    const seen: string[] = [];
+    provider.setResponses([
+      fauxAssistantMessage(fauxToolCall("write", { path: "config.json", content: '{"a": 1,' }), { stopReason: "toolUse" }),
+      (context) => (seen.push(JSON.stringify(context.messages.at(-1))), fauxAssistantMessage(fauxText("Fixed it."))),
+    ]);
+    const agent = await openTicketAgent({ sdk: piChildSdk(runtime), cwd, model });
+    await agent.send("Build it.");
+    agent.dispose();
+    expect(seen[0]).toContain("config.json no longer parses");
+  });
+
   it("keeps working across sends of one attempt, like a check retry turn", async () => {
     const { runtime, provider, model } = await faux();
     provider.setResponses([fauxAssistantMessage(fauxText("First.")), fauxAssistantMessage(fauxToolCall("write", { path: "b.txt", content: "b\n" }), { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("Fixed."))]);

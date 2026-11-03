@@ -9,7 +9,10 @@
  *
  * Everything Pi-specific comes in through `ChildSdk`, so tests drive this with fakes.
  */
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { buildBashBlock, isDeniedCommand } from "../sandbox.js";
+import { checkSyntax, syntaxNote, type SyntaxCheck } from "./syntax.js";
 import { redact } from "../redact.js";
 import { turnBudget, type ChunkLimits, type ChunkReply } from "../orchestrator/build.js";
 import type { ThinkingLevel } from "../domain.js";
@@ -66,12 +69,39 @@ export function ticketBashProblem(command: string): string | undefined {
   return buildBashBlock(command);
 }
 
-/** The tools of a ticket session: Pi's own, with bash refusing what a ticket may not run. Unknown names are dropped. */
-export function ticketTools(all: ChildTool[]): ChildTool[] {
+/**
+ * A tool whose changes are checked for syntax (`syntax.ts`): a file that parsed before the change (or did not exist)
+ * and does not parse after it gets the parser's message appended to the tool result. Never fails the tool.
+ */
+function syntaxChecked(tool: ChildTool, cwd: string, check: SyntaxCheck): ChildTool {
+  return {
+    ...tool,
+    async execute(toolCallId: string, params: Record<string, unknown>, ...rest: unknown[]) {
+      const relative = typeof params?.path === "string" ? params.path : undefined;
+      const file = relative ? path.resolve(cwd, relative) : undefined;
+      const before = file && existsSync(file) ? await check(file, cwd).catch(() => "unknown") : undefined;
+      const result = await tool.execute(toolCallId, params, ...rest);
+      if (!file || before !== undefined) return result;
+      const after = await check(file, cwd).catch(() => undefined);
+      if (!after) return result;
+      const shaped = result as { content?: unknown };
+      if (!shaped || typeof shaped !== "object" || !Array.isArray(shaped.content)) return result;
+      return { ...shaped, content: [...shaped.content, { type: "text", text: syntaxNote(relative!, redact(after)) }] };
+    },
+  };
+}
+
+/**
+ * The tools of a ticket session: Pi's own, with bash refusing what a ticket may not run and edit/write reporting a
+ * file they broke. Unknown names are dropped.
+ */
+export function ticketTools(all: ChildTool[], options: { cwd?: string; syntax?: SyntaxCheck | false } = {}): ChildTool[] {
   const byName = new Map(all.map((tool) => [tool.name, tool]));
+  const syntax = options.syntax === false ? undefined : (options.syntax ?? checkSyntax);
   return TICKET_TOOLS.flatMap((name) => {
     const tool = byName.get(name);
     if (!tool) return [];
+    if ((name === "edit" || name === "write") && syntax && options.cwd) return [syntaxChecked(tool, options.cwd, syntax)];
     if (name !== "bash") return [tool];
     return [
       {
@@ -114,6 +144,8 @@ export interface TicketAgentOptions {
   onMessage?: (message: ChildMessage) => void;
   /** One line per tool call and turn, for the progress line. */
   onActivity?: (text: string) => void;
+  /** The syntax check of edit and write (default `checkSyntax`); false turns it off. */
+  syntax?: SyntaxCheck | false;
 }
 
 export interface TicketAgent {
@@ -128,7 +160,7 @@ export interface TicketAgent {
  * to finish, and TURN_GRACE turns later the run is aborted and the reply says `turnLimit`. Callbacks never throw into Pi.
  */
 export async function openTicketAgent(options: TicketAgentOptions): Promise<TicketAgent> {
-  const session = await options.sdk.open({ cwd: options.cwd, model: options.model, thinking: options.thinking, tools: ticketTools(options.sdk.tools(options.cwd)) });
+  const session = await options.sdk.open({ cwd: options.cwd, model: options.model, thinking: options.thinking, tools: ticketTools(options.sdk.tools(options.cwd), { cwd: options.cwd, syntax: options.syntax }) });
   let lastText = "";
   let aborted = false;
   let turns = 0;
