@@ -292,6 +292,16 @@ export class Workflow {
     return id ? this.store.load(id)?.build?.currentTicket : undefined;
   }
 
+  /**
+   * The live progress line while a ticket runs out of sight (the /build subagent): `start` names it, `stage` updates
+   * the detail after it, `stop` clears it. A no-op without a UI.
+   */
+  activity(action: "start" | "stage" | "stop", text = ""): void {
+    if (action === "start") this.ctx.indicator?.start(text);
+    else if (action === "stage") this.ctx.indicator?.stage(text);
+    else this.ctx.indicator?.stop();
+  }
+
   /** One-line chat event, when a Pi session is bound. */
   progress(text: string): void {
     this.ctx.progress?.(text);

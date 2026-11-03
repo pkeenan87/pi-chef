@@ -8,7 +8,9 @@ import { contextMismatch, probeLocalContext } from "./providers/local-context.js
 import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, tierCandidates, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
-import { TURN_GRACE, turnLimitNotice, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
+import { turnBudget, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
+import { openTicketAgent, type TicketAgent } from "./subagent/ticket-agent.js";
+import { piChildSdk, runtimeOf } from "./subagent/pi-sdk.js";
 import { mainCheckoutOf, samePath } from "./git/workspace.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
@@ -249,35 +251,6 @@ const STARTED = Symbol.for("pi-chef.session-started");
 const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [SET_THINKING]?: (level: ThinkingLevel) => void; [TURN]?: TurnSlot; [STARTED]?: string };
 
 /**
- * Counts a ticket attempt's assistant turns. At `maxTurns` it steers the model to wrap up, once; TURN_GRACE turns later
- * it aborts the run, and `stopped()` says so. Steering and aborting never throw out of a message_end handler.
- */
-export function turnBudget(limits: ChunkLimits | undefined, steer: (text: string) => unknown, abort: () => void): { count: () => void; stopped: () => boolean } {
-  let turns = 0;
-  let stopped = false;
-  const safely = (action: () => unknown) => {
-    try {
-      const result = action();
-      if (result && typeof (result as Promise<unknown>).catch === "function") (result as Promise<unknown>).catch(() => undefined);
-    } catch {
-      /* the next turn tries again: the limit check is >= */
-    }
-  };
-  return {
-    count() {
-      if (!limits || stopped) return;
-      turns += 1;
-      if (turns === limits.maxTurns) safely(() => steer(turnLimitNotice(limits.maxTurns)));
-      if (turns >= limits.maxTurns + TURN_GRACE) {
-        stopped = true;
-        safely(abort);
-      }
-    },
-    stopped: () => stopped,
-  };
-}
-
-/**
  * Warns when the local server runs `model` with a different context window than its tiers.local entry tells Pi
  * (`probeLocalContext`). Never blocks or throws: the server may not say, and the ticket starts either way.
  */
@@ -490,6 +463,64 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
     /* an in-memory session: nothing to switch back to */
   }
   const getWorkflow = () => workflowFor(live.cwd, live);
+  /** The model runtime for ticket subagents, or undefined to replace the session per ticket (`isolation.runner`). */
+  const subagentRuntime = (): unknown => {
+    try {
+      if (getWorkflow().config.isolation.runner === "session") return undefined;
+    } catch {
+      return undefined;
+    }
+    return runtimeOf(live.modelRegistry);
+  };
+  /**
+   * Runs one ticket attempt in a ticket subagent (`subagent/ticket-agent.ts`) in the build's checkout. Its messages are
+   * ledgered like the session's own turns; Pi's own calls in it (compaction) are swept from its entries at the end.
+   * Never throws: any failure is a `stopped`, which `runBuild` handles as before.
+   */
+  const runInSubagent = async (runtime: unknown, model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string, limits: ChunkLimits | undefined): Promise<void | { stopped: string }> => {
+    const since = getWorkflow().now();
+    let agent: TicketAgent | undefined;
+    const label = `Build · ticket ${ticketId} · ${model.provider}/${model.id}`;
+    try {
+      const piModel = live.modelRegistry?.find(model.provider, model.id);
+      if (!piModel) return { stopped: `Ticket ${ticketId} cannot start: Pi does not know ${model.provider}/${model.id}. Check the tier config, then /build again.` };
+      agent = await openTicketAgent({
+        sdk: piChildSdk(runtime),
+        cwd: live.cwd,
+        model: piModel,
+        thinking: model.thinking,
+        limits,
+        onMessage: (message) => {
+          const call = usageOfMessage(message);
+          if (call) getWorkflow().observeUsage(call);
+          refreshStatus(live);
+        },
+        onActivity: (text) => getWorkflow().activity("stage", text),
+      });
+      const opened = agent;
+      await run({
+        async send(text) {
+          getWorkflow().activity("start", label);
+          try {
+            return await opened.send(text);
+          } finally {
+            getWorkflow().activity("stop");
+          }
+        },
+      });
+      return undefined;
+    } catch (error) {
+      return { stopped: `Ticket ${ticketId} stopped: ${redact(error instanceof Error && error.message ? error.message : String(error))}. /build resumes it.` };
+    } finally {
+      try {
+        const swept = agent?.entries();
+        if (swept) getWorkflow().recordPiUsage({ sessionId: swept.sessionId, entries: swept.entries as never, since, model: { provider: model.provider, id: model.id } });
+      } catch {
+        /* nothing more to ledger */
+      }
+      agent?.dispose();
+    }
+  };
   const driver: BuildDriver = {
     async fresh(model, run, ticketId, limits) {
       // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
@@ -510,6 +541,9 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
         contextChecked.add(model.id);
         await warnLocalContext(getWorkflow().config, model.id, live);
       }
+      // The ticket subagent: a session beside this one, so nothing below (session replacement and its slots) applies.
+      const childRuntime = subagentRuntime();
+      if (childRuntime) return runInSubagent(childRuntime, model, run, ticketId, limits);
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id, ...(model.thinking ? { thinking: model.thinking } : {}) };
       if (model.thinking) thinkingChanged = true;
       delete restoreSlot[STARTED];
@@ -848,25 +882,36 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       if (text.trim()) turn.lastText = text;
       if ("stopReason" in message && message.stopReason === "aborted") turn.aborted = true;
     }
-    if (message.role !== "assistant" || !("usage" in message) || !message.usage) return;
-    // A failed attempt that Pi retries (possibly on another model) bills nothing: the retry ledgers its own message.
-    const stop = "stopReason" in message ? message.stopReason : undefined;
-    if ((stop === "error" || stop === "aborted") && !message.usage.input && !message.usage.output && !message.usage.cacheRead && !message.usage.cacheWrite) return;
-    const usage: TokenUsage = {
-      input: typeof message.usage.input === "number" ? message.usage.input : null,
-      output: typeof message.usage.output === "number" ? message.usage.output : null,
-      cacheRead: typeof message.usage.cacheRead === "number" ? message.usage.cacheRead : null,
-      cacheWrite: typeof message.usage.cacheWrite === "number" ? message.usage.cacheWrite : null,
-      requests: 1,
-    };
-    // Pi's own price for the call: stored beside ours, and the estimate when no pricing row prices it.
-    const listed = (message.usage as { cost?: { total?: unknown } }).cost?.total;
-    if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
+    const call = usageOfMessage(message);
+    if (!call) return;
     // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
-    (active ?? tryWorkflowFor(cwd))?.observeUsage({ provider: message.provider, model: message.model, usage });
+    (active ?? tryWorkflowFor(cwd))?.observeUsage(call);
     // The footer's spend follows each turn, not just the next command.
     refreshStatus(ctx);
   });
+}
+
+/**
+ * The ledger entry of one finished assistant message (the session's own turn or a /build ticket subagent's), or
+ * undefined for a message that bills nothing: not an assistant turn, no usage, or a failed attempt with no tokens
+ * (Pi retries it, possibly on another model, and the retry ledgers its own message).
+ */
+export function usageOfMessage(message: { role: string; usage?: unknown; stopReason?: unknown; provider?: unknown; model?: unknown }): { provider: string; model: string; usage: TokenUsage } | undefined {
+  if (message.role !== "assistant" || !message.usage || typeof message.usage !== "object") return undefined;
+  const raw = message.usage as { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; cost?: { total?: unknown } };
+  const stop = message.stopReason;
+  if ((stop === "error" || stop === "aborted") && !raw.input && !raw.output && !raw.cacheRead && !raw.cacheWrite) return undefined;
+  const usage: TokenUsage = {
+    input: typeof raw.input === "number" ? raw.input : null,
+    output: typeof raw.output === "number" ? raw.output : null,
+    cacheRead: typeof raw.cacheRead === "number" ? raw.cacheRead : null,
+    cacheWrite: typeof raw.cacheWrite === "number" ? raw.cacheWrite : null,
+    requests: 1,
+  };
+  // Pi's own price for the call: stored beside ours, and the estimate when no pricing row prices it.
+  const listed = raw.cost?.total;
+  if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
+  return { provider: String(message.provider ?? ""), model: String(message.model ?? ""), usage };
 }
 
 /** The workflow for a project root, or undefined when its config is invalid. */

@@ -1,5 +1,7 @@
 import type { TaskState } from "../src/domain.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -197,6 +199,59 @@ describe("/build with pinning", () => {
     const { setModelCalls, current } = await build(false);
     expect(setModelCalls.map((model) => model.id)).toEqual(["claude-sonnet-5-5", "gpt-user"]);
     expect(current.model).toEqual({ provider: "openai", id: "gpt-user" });
+  });
+});
+
+describe("/build in a ticket subagent", () => {
+  // A real Pi ModelRegistry over a runtime with pi-ai's faux provider standing in for Anthropic: the ticket runs in a
+  // session pi-chef opens with Pi's SDK, and the user's session is never replaced.
+  async function build(runner: "subagent" | "session" = "subagent") {
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01", { suggestedTier: "standard" })]);
+    app.reconfigure({ ...app.config, isolation: { ...app.config.isolation, worktree: false, runner } });
+    const { commands, handlers, setModelCalls } = fakePi();
+    bindWorkflow(app);
+    const runtime = await ModelRuntime.create({ authPath: path.join(process.env.HOME!, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    const faux = fauxProvider({ provider: "anthropic", models: [{ id: "claude-sonnet-5-5" }, { id: "claude-opus-5-5" }] });
+    runtime.registerNativeProvider(faux.provider);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("write", { path: "f1.txt", content: "x\n" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxText("Done.\n- [x] retry works")),
+    ]);
+    const registry = new ModelRegistry(runtime);
+    let replaced = 0;
+    const ctx: Record<string, unknown> = {
+      cwd,
+      hasUI: true,
+      model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: registry,
+      ui: { notify() {}, setStatus() {}, setWidget() {}, confirm: async () => true },
+      sessionManager: { getSessionFile: () => undefined, getSessionId: () => "main", getEntries: () => [] },
+      async sendMessage() {},
+      async newSession() {
+        replaced += 1;
+        return { cancelled: true };
+      },
+    };
+    handlers.get("session_start")!({}, ctx);
+    await commands.get("build")!.handler("", ctx);
+    return { app, faux, replaced: () => replaced, setModelCalls, cwd };
+  }
+
+  it("builds and commits the ticket without replacing the session, and ledgers its turns", async () => {
+    const { app, faux, replaced, cwd } = await build();
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(state.ticketRuns!["01"]).toMatchObject({ status: "done", provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(replaced()).toBe(0);
+    expect(faux.state.callCount).toBe(2);
+    expect(readFileSync(path.join(cwd, "f1.txt"), "utf8")).toBe("x\n");
+    const ticketRows = app.store.readLedger().filter((row) => row.reason.includes("ticket 01") && row.model === "claude-sonnet-5-5");
+    expect(ticketRows).toHaveLength(2);
+  });
+
+  it("replaces the session per ticket with isolation.runner: session", async () => {
+    const { replaced, faux } = await build("session");
+    expect(replaced()).toBe(1);
+    expect(faux.state.callCount).toBe(0);
   });
 });
 

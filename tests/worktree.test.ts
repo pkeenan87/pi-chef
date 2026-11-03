@@ -19,7 +19,7 @@ const git = async (cwd: string, ...args: string[]) => (await exec("git", args, {
 async function worktreeTask(options: { enter?: boolean; tickets?: number; isolation?: { worktree: boolean; dir: string }; setup?: boolean } = {}) {
   const progress: string[] = [];
   const config = tieredConfig();
-  if (options.isolation) config.isolation = options.isolation;
+  if (options.isolation) config.isolation = { ...config.isolation, ...options.isolation };
   if (options.setup) config.setup = [{ name: "install", command: "npm", args: ["ci"] }];
   const ran: string[] = [];
   const runner = checkRunner(async (command, args, cwd) => (ran.push(`${[command, ...args].join(" ")} in ${cwd}`), { code: 0, stdout: "ok", stderr: "" }));
