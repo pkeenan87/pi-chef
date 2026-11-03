@@ -66,6 +66,7 @@ export class Workflow {
       progress: options.progress,
       report: options.report,
       chat: options.chat,
+      advisorChat: options.advisorChat,
       status: options.status,
       planStatus: options.planStatus,
       startTurn: options.startTurn,
@@ -93,6 +94,7 @@ export class Workflow {
   bind(binding: WorkflowBinding): void {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
+    ctx.advisorChat = binding.advisorChat ?? ctx.advisorChat;
     ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;

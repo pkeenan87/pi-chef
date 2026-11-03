@@ -42,6 +42,8 @@ export interface WorkflowContext {
   /** Live one-line progress while work runs and no model streams (/review, /build between turns). A no-op without a UI. */
   indicator?: Indicator;
   chat?: ChatFn;
+  /** Advisor calls as read-only Pi sessions in the repository (`advisors.tools`); absent when Pi cannot open them. */
+  advisorChat?: ChatFn;
   /** Pi's model registry for the live session. When bound, routing skips candidates it does not know or holds no credentials for. */
   registry?: UsableRegistry;
   status?: (text: string | undefined) => void;

@@ -11,6 +11,8 @@ import type { TaskStore } from "../storage/store.js";
 export interface WorkflowBinding {
   /** Chat access to the selected model (/advisor and the model review). */
   chat?: ChatFn;
+  /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
+  advisorChat?: ChatFn;
   /** Pi's model registry for the live session (see WorkflowContext.registry). Set on every bind. */
   registry?: UsableRegistry;
   /** Persistent routing status line (for example ctx.ui.setStatus("chef", text)). */
@@ -69,6 +71,8 @@ export interface WorkflowOptions {
   report?: (markdown: string) => void;
   runner?: CheckRunner;
   chat?: ChatFn;
+  /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
+  advisorChat?: ChatFn;
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   startTurn?: (text: string) => void;

@@ -34,6 +34,27 @@ function usageOf(usage: { input: number; output: number; cacheRead: number; cach
 export type ChatFn = (candidate: { provider: ProviderId; model: string }, request: Omit<ChatRequest, "model">) => Promise<ChatResponse>;
 
 /**
+ * The Pi model for a candidate, refusing what pi-chef may not call: a model Pi does not know, and an OpenAI, Anthropic
+ * or xAI model without an account login unless the user allowed that provider's API key. Every chat path uses it.
+ */
+export function chatModel(
+  registry: Pick<PiRegistryLike, "find" | "isUsingOAuth">,
+  candidate: { provider: ProviderId; model: string },
+  apiKeyFallback: (provider: string) => boolean = () => false,
+  piModelId: (provider: string, model: string) => string = (_provider, model) => model,
+): unknown {
+  const piId = piModelId(candidate.provider, candidate.model);
+  const model = registry.find(candidate.provider, piId);
+  if (!model) {
+    throw new ProviderCallError("config", `Model ${candidate.provider}/${piId}${piId === candidate.model ? "" : ` (mapped from ${candidate.model})`} is not registered in this Pi session.`);
+  }
+  if (isAccountProvider(candidate.provider) && !registry.isUsingOAuth?.(model as never) && !apiKeyFallback(candidate.provider)) {
+    throw new WorkflowError("API_KEY_REJECTED", `No ${candidate.provider} account login is available. Run /login ${candidate.provider}, or allow its API key with providers.${candidate.provider}.apiKeyFallback in the user config.`);
+  }
+  return model;
+}
+
+/**
  * Chat through Pi's model registry, which owns authentication. OpenAI, Anthropic, and xAI calls are refused
  * unless the registry is using an account login for that model, or the user allowed that provider's API key.
  */
@@ -44,14 +65,7 @@ export function createRegistryChat(
   piModelId: (provider: string, model: string) => string = (_provider, model) => model,
 ): ChatFn {
   return async (candidate, request) => {
-    const piId = piModelId(candidate.provider, candidate.model);
-    const model = registry.find(candidate.provider, piId);
-    if (!model) {
-      throw new ProviderCallError("config", `Model ${candidate.provider}/${piId}${piId === candidate.model ? "" : ` (mapped from ${candidate.model})`} is not registered in this Pi session.`);
-    }
-    if (isAccountProvider(candidate.provider) && !registry.isUsingOAuth?.(model as never) && !apiKeyFallback(candidate.provider)) {
-      throw new WorkflowError("API_KEY_REJECTED", `No ${candidate.provider} account login is available. Run /login ${candidate.provider}, or allow its API key with providers.${candidate.provider}.apiKeyFallback in the user config.`);
-    }
+    const model = chatModel(registry, candidate, apiKeyFallback, piModelId);
     const system = request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
     const result = await registry.complete(
       model as never,

@@ -205,7 +205,7 @@ export interface WorkflowConfig {
    * lowest ticket difficulty that gets advisors in the per-ticket review and /review (`high` by default; `medium`
    * also gives medium tickets and large ad-hoc branches one advisor from another vendor).
    */
-  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number; fromDifficulty: "medium" | "high"; watchdogEvery: number };
+  advisors: { timeoutMs: number; maxDiffChars: number; maxOutputTokens: number; tickets: boolean; plan: boolean; adHocMinLines: number; summarizeCut: boolean; maxPlanConsults: number; fromDifficulty: "medium" | "high"; watchdogEvery: number; tools: boolean };
   orgProviderAllowlist: ProviderId[];
   proprietaryCode: boolean;
   pricing: PricingRow[];
@@ -284,7 +284,7 @@ const DEFAULTS: WorkflowConfig = {
   checks: [],
   setup: [],
   review: { model: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
-  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2, fromDifficulty: "high", watchdogEvery: 0 },
+  advisors: { timeoutMs: 180_000, maxDiffChars: 40_000, maxOutputTokens: 1500, tickets: true, plan: true, adHocMinLines: 400, summarizeCut: true, maxPlanConsults: 2, fromDifficulty: "high", watchdogEvery: 0, tools: false },
   orgProviderAllowlist: [],
   proprietaryCode: false,
   pricing: [],
@@ -740,6 +740,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
     checkNumber(raw.advisors, "adHocMinLines", where, { min: 0, integer: true }, "advisors");
     checkNumber(raw.advisors, "maxPlanConsults", where, { min: 1, integer: true }, "advisors");
     checkNumber(raw.advisors, "watchdogEvery", where, { min: 0, integer: true }, "advisors");
+    if (raw.advisors.tools !== undefined && typeof raw.advisors.tools !== "boolean") invalid(where, "advisors.tools", "must be true or false");
     if (raw.advisors.fromDifficulty !== undefined && raw.advisors.fromDifficulty !== "medium" && raw.advisors.fromDifficulty !== "high") invalid(where, "advisors.fromDifficulty", "must be medium or high");
   }
   if (raw.orgProviderAllowlist !== undefined) {
@@ -950,7 +951,7 @@ function restrictAdvisors(user: unknown, project: unknown, warnings: string[]): 
     warnings.push(`Ignored project advisors.${key}: ${why}.`);
     delete out[key];
   };
-  for (const key of ["tickets", "plan", "summarizeCut"] as const) {
+  for (const key of ["tickets", "plan", "summarizeCut", "tools"] as const) {
     if (!(key in out)) continue;
     if (out[key] === true) drop(key, "a project can only turn advisors off");
   }

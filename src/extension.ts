@@ -11,9 +11,10 @@ import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import { turnBudget, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
 import { openTicketAgent, type TicketAgent } from "./subagent/ticket-agent.js";
 import { piChildSdk, runtimeOf } from "./subagent/pi-sdk.js";
+import { createAgentChat } from "./subagent/advisor-agent.js";
 import { mainCheckoutOf, samePath } from "./git/workspace.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
-import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
+import { createRegistryChat, type ChatFn, type PiRegistryLike } from "./providers/pi-chat.js";
 import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
 import { presentForDecision } from "./tools/plan-review.js";
@@ -160,6 +161,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     active.bind({
       registry: registry as unknown as UsableRegistry | undefined,
       chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
+      advisorChat: advisorChatFor(registry, apiKeyFallback, ctx.cwd),
       // Routes and planning stages redraw the one status line; its text is derived from the task, not passed in.
       status: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
@@ -913,6 +915,13 @@ export function usageOfMessage(message: { role: string; usage?: unknown; stopRea
   const listed = raw.cost?.total;
   if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
   return { provider: String(message.provider ?? ""), model: String(message.model ?? ""), usage };
+}
+
+/** Advisors as read-only Pi sessions in `cwd` (`advisors.tools`), when this Pi's model runtime can be reached. */
+function advisorChatFor(registry: PiRegistryLike | undefined, apiKeyFallback: (provider: string) => boolean, cwd: string): ChatFn | undefined {
+  const runtime = runtimeOf(registry);
+  if (!registry || !runtime) return undefined;
+  return createAgentChat({ sdk: piChildSdk(runtime), registry, cwd: () => cwd, apiKeyFallback, piModelId: (provider, model) => piModelId(active!.config, provider, model) });
 }
 
 /** The workflow for a project root, or undefined when its config is invalid. */

@@ -58,7 +58,7 @@ export interface ChildTool {
 /** What pi-chef needs from Pi's SDK to open a ticket session. */
 export interface ChildSdk {
   /** Opens the session. `tools` are the definitions to register; built-in tools are off (`noTools: "builtin"`). */
-  open(options: { cwd: string; model: unknown; thinking?: ThinkingLevel; tools: ChildTool[] }): Promise<ChildSession>;
+  open(options: { cwd: string; model: unknown; thinking?: ThinkingLevel; tools: ChildTool[]; systemPrompt?: string }): Promise<ChildSession>;
   /** Pi's tool definitions for `cwd`, by name. */
   tools(cwd: string): ChildTool[];
 }
