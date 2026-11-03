@@ -496,6 +496,7 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
           refreshStatus(live);
         },
         onActivity: (text) => getWorkflow().activity("stage", text),
+        watchdog: { every: getWorkflow().config.advisors.watchdogEvery, look: (turn) => getWorkflow().watchTicket(ticketId, turn) },
       });
       const opened = agent;
       await run({

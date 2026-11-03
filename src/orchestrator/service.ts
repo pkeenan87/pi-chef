@@ -13,6 +13,7 @@ import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordPiUsa
 import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
 import { active, type WorkflowContext } from "./context.js";
 import { statusLine } from "./state-label.js";
+import { watchTicket } from "./watchdog.js";
 import { displayName } from "./tasks.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
@@ -300,6 +301,14 @@ export class Workflow {
     if (action === "start") this.ctx.indicator?.start(text);
     else if (action === "stage") this.ctx.indicator?.stage(text);
     else this.ctx.indicator?.stop();
+  }
+
+  /** The watchdog's look at the running ticket (`watchdog.ts`): a note to steer in, or undefined. Never throws. */
+  async watchTicket(ticketId: string, turn: number): Promise<string | undefined> {
+    const state = active(this.ctx);
+    const ticket = state?.plan?.tickets?.find((item) => item.id === ticketId);
+    if (!state || !ticket) return undefined;
+    return watchTicket(this.ctx, { taskId: state.taskId, ticket, turn });
   }
 
   /** One-line chat event, when a Pi session is bound. */

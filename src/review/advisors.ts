@@ -113,7 +113,7 @@ export function reviewAdvisorsFor(input: { maxDifficulty?: Difficulty; changedLi
  * The advisor tier's chat candidates that can be called now, plus a note for each one skipped: not connected, or
  * excluded by the same hard rules as model selection (org allowlist, proprietary-code policy, an open circuit, the budget).
  */
-export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, taskType = "general"): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
+export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, taskType = "general", tier: "advisor" | "cheap" = "advisor"): Promise<{ candidates: AdvisorCandidate[]; notes: string[] }> {
   const seen = await availability(ctx);
   const check = candidateCheck(ctx);
   const table = ctx.store.readMetrics();
@@ -121,9 +121,9 @@ export async function availableAdvisors(ctx: WorkflowContext, taskId?: string, t
   const at = ctx.now();
   const candidates: AdvisorCandidate[] = [];
   const notes: string[] = [];
-  for (const candidate of tierCandidates(ctx.config, "advisor")) {
+  for (const candidate of tierCandidates(ctx.config, tier)) {
     const price = tierCost(ctx.config.pricing, candidate.provider, candidate.model, at, ctx.config.workers.tokenBudget);
-    const excluded = hardExclusion({ config: ctx.config, table, taskType, tier: "advisor", candidate, price, at, budgetRemainingUsd: left });
+    const excluded = hardExclusion({ config: ctx.config, table, taskType, tier, candidate, price, at, budgetRemainingUsd: left });
     const view = seen[candidate.provider];
     if (excluded) notes.push(`${candidate.provider}/${candidate.model} skipped: ${excluded}`);
     else if (view && !view.ok) notes.push(`${candidate.provider}/${candidate.model} skipped: ${view.detail ?? "unavailable"}`);

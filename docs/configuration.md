@@ -241,6 +241,7 @@ The model pass of `/review`. Replaced as a whole by a project's `review`: keys i
 | `advisors.adHocMinLines` | int ≥ 0 | `400` | higher wins | With `fromDifficulty: medium`, a branch with no plan gets an advisor in `/review` above this many changed lines |
 | `advisors.summarizeCut` | bool | `true` | off only | When a diff is clipped for an advisor, the batch tier writes a one-line summary of each cut file |
 | `advisors.maxPlanConsults` | int ≥ 1 | `2` | lower wins | Plan consults per draft version |
+| `advisors.watchdogEvery` | int ≥ 0 | `0` (off) | a project can turn it off or raise it, never turn it on or lower it | The mid-ticket watchdog of `/build` (`isolation.runner: subagent`): after every N assistant turns of a ticket, the first usable `cheap` model reads the ticket and its diff so far (never the transcript) and, when the work drifts (out of scope, tests edited to pass, a criterion ignored, no progress), its one- or two-sentence note is steered into the running ticket as advice. It never gates, stops or fails a ticket; it is skipped unless the budget is ok, obeys the allowlist and proprietary-code rules, and every call is ledgered (`watchdog ticket <id>`) |
 | `advisors.maxDiffChars` | int ≥ 1000 | `40000` | lower wins | The diff sent to the reviewer and advisors; the rest is listed as cut |
 | `advisors.maxOutputTokens` | int ≥ 100 | `1500` | lower wins | The answer length an advisor is asked to stay within |
 | `advisors.timeoutMs` | ms ≥ 1000 | `180000` | lower wins | Per advisor or review call |

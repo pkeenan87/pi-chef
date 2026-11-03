@@ -146,6 +146,11 @@ export interface TicketAgentOptions {
   onActivity?: (text: string) => void;
   /** The syntax check of edit and write (default `checkSyntax`); false turns it off. */
   syntax?: SyntaxCheck | false;
+  /**
+   * The watchdog: after every `every` assistant turns, `look(turn)` runs in the background (one at a time, never
+   * blocking the ticket); a text it returns is steered into the ticket while it is still running.
+   */
+  watchdog?: { every: number; look: (turn: number) => Promise<string | undefined> };
 }
 
 export interface TicketAgent {
@@ -164,6 +169,9 @@ export async function openTicketAgent(options: TicketAgentOptions): Promise<Tick
   let lastText = "";
   let aborted = false;
   let turns = 0;
+  // A watchdog look in flight, and whether a send is running (a note that arrives after the run is dropped).
+  let watching = false;
+  let running = false;
   const budget = turnBudget(options.limits, (text) => session.steer(text), () => session.abort());
   const quietly = (action: () => unknown) => {
     try {
@@ -184,6 +192,20 @@ export async function openTicketAgent(options: TicketAgentOptions): Promise<Tick
       turns += 1;
       quietly(() => options.onActivity?.(`turn ${turns}`));
       budget.count();
+      const watchdog = options.watchdog;
+      if (watchdog && watchdog.every > 0 && turns % watchdog.every === 0 && !watching && running && !budget.stopped()) {
+        watching = true;
+        const turn = turns;
+        void watchdog
+          .look(turn)
+          .then((note) => {
+            if (note && running && !budget.stopped()) quietly(() => session.steer(note));
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            watching = false;
+          });
+      }
     } else if (event.type === "tool_execution_start") {
       const call = event as { toolName: string; args?: unknown };
       // The tool belongs to the turn that asked for it, which has just been counted.
@@ -196,8 +218,13 @@ export async function openTicketAgent(options: TicketAgentOptions): Promise<Tick
     async send(text) {
       lastText = "";
       aborted = false;
-      await session.prompt(text);
-      await session.waitForIdle();
+      running = true;
+      try {
+        await session.prompt(text);
+        await session.waitForIdle();
+      } finally {
+        running = false;
+      }
       return { lastText, aborted: aborted || budget.stopped(), ...(budget.stopped() ? { turnLimit: true } : {}) };
     },
     entries() {

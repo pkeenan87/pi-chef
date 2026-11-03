@@ -95,6 +95,27 @@ describe("ticket subagent on Pi's SDK", () => {
     expect(seen[0]).toContain("config.json no longer parses");
   });
 
+  it("runs the watchdog every N turns without blocking, and steers its note into the running ticket", async () => {
+    const { runtime, provider, model } = await faux();
+    const seen: string[] = [];
+    provider.setResponses([
+      fauxAssistantMessage(fauxToolCall("ls", { path: "." }, { id: "a" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("ls", { path: "." }, { id: "b" }), { stopReason: "toolUse" }),
+      (context) => (seen.push(JSON.stringify(context.messages)), fauxAssistantMessage(fauxText("Done."))),
+    ]);
+    const looks: number[] = [];
+    const agent = await openTicketAgent({
+      sdk: piChildSdk(runtime),
+      cwd,
+      model,
+      watchdog: { every: 1, look: async (turn) => (looks.push(turn), turn === 1 ? "[pi-chef watchdog, m] Stay in scope." : undefined) },
+    });
+    expect((await agent.send("Build it.")).lastText).toBe("Done.");
+    agent.dispose();
+    expect(looks[0]).toBe(1);
+    expect(seen[0]).toContain("Stay in scope.");
+  });
+
   it("keeps working across sends of one attempt, like a check retry turn", async () => {
     const { runtime, provider, model } = await faux();
     provider.setResponses([fauxAssistantMessage(fauxText("First.")), fauxAssistantMessage(fauxToolCall("write", { path: "b.txt", content: "b\n" }), { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("Fixed."))]);
