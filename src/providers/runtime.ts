@@ -8,7 +8,7 @@ import { TIER_KEYS, WorkflowError, type ProviderId, type TierCandidate } from ".
 import { FileAuthProbe, type AuthProbe } from "./auth.js";
 import { foundryV1Base, type FoundryConfig } from "./clients.js";
 import { createVercelTokenSource, type VercelTokenSource } from "./vercel.js";
-import { knownModel } from "./local-models.js";
+import { knownModel } from "./known-models.js";
 
 const exec = promisify(execFile);
 
@@ -111,7 +111,8 @@ interface RegisterApi {
 }
 
 function modelEntry(provider: string, id: string, item: TierCandidate, api?: string) {
-  const known = knownModel(provider, id);
+  // The preset is keyed on the tier's model name: for Foundry `id` is the deployment that name maps to.
+  const known = knownModel(provider, item.model);
   return {
     ...(api ? { api } : {}),
     id,
@@ -122,8 +123,9 @@ function modelEntry(provider: string, id: string, item: TierCandidate, api?: str
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: item.contextWindow ?? 128_000,
     maxTokens: item.maxTokens ?? 8_192,
-    // What the server needs from Pi (no developer role, reasoning levels) comes only from a preset, never from config.
-    ...(known ? { compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : {}),
+    // What the server needs from Pi (no developer role, the reasoning levels it accepts) comes only from a preset, never from config.
+    ...(known?.compat ? { compat: known.compat } : {}),
+    ...(known ? { thinkingLevelMap: known.thinkingLevelMap } : {}),
   };
 }
 
