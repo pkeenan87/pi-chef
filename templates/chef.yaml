@@ -62,6 +62,8 @@
 #   summarizeCut: true      # summarize files cut from a long diff, on the batch tier
 #   adHocMinLines: 400      # with fromDifficulty: medium, a branch with no plan gets an advisor above this
 #   maxPlanConsults: 2      # consults per plan version
+#   watchdogEvery: 0        # every N turns of a /build ticket (subagent runner), a cheap model checks its diff so far; 0 is off
+#   tools: false            # true: advisors may read the repository (read, grep, find, ls) to check a concern first
 #   maxDiffChars: 40000     # the diff sent to the reviewer and advisors
 #   maxOutputTokens: 1500   # answer length an advisor is asked to keep to
 #   timeoutMs: 180000       # per call

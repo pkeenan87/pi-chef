@@ -43,9 +43,10 @@ export function piChildSdk(runtime: unknown): ChildSdk {
         createBashToolDefinition(cwd),
       ] as unknown as ChildTool[];
     },
-    async open({ cwd, model, thinking, tools }) {
+    async open({ cwd, model, thinking, tools, systemPrompt }) {
       const agentDir = getAgentDir();
-      const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, noExtensions: true });
+      // A session with its own system prompt (an advisor) gets that prompt alone: no context files or skills.
+      const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, noExtensions: true, ...(systemPrompt ? { systemPrompt, noContextFiles: true, noSkills: true, noPromptTemplates: true } : {}) });
       await resourceLoader.reload();
       const { session } = await createAgentSession({
         cwd,
