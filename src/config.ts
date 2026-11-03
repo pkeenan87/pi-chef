@@ -4,7 +4,7 @@ import path from "node:path";
 import { parse } from "yaml";
 import { foundryApiFor, withKnownModel } from "./providers/known-models.js";
 import { containsSecret, redact } from "./redact.js";
-import { WorkflowError, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
+import { WorkflowError, THINKING_LEVELS, CHAT_APIS, PROVIDERS, TIERS, TIER_KEYS, isAccountProvider, isProviderId, isTier, type ProviderId, type Tier, type TierCandidate, type TierKey, type ChatApi } from "./domain.js";
 
 export interface ProviderConfig {
   type: string;
@@ -137,6 +137,11 @@ export interface WorkflowConfig {
     requirePremiumReviewFor: string[];
     circuitBreakerFailures: number;
     /**
+     * Assistant turns a /build ticket attempt may take (its retries included). At the limit the model is told to wrap
+     * up; a few turns later the run is stopped and the ticket fails like a failed check, so it escalates.
+     */
+    maxTicketTurns: number;
+    /**
      * Ranking-only USD added to every candidate's price before dividing by its success rate: the time and retry
      * cost of a failed attempt, so a $0 subscription model with a poor record does not always win. Like the quota
      * shadow price it never reaches the ledger, budgets, the over-budget filter, or expectedUsd.
@@ -257,6 +262,7 @@ const DEFAULTS: WorkflowConfig = {
     reviewTier: "premium",
     requirePremiumReviewFor: ["auth", "permissions", "secrets", "security-sensitive"],
     circuitBreakerFailures: 3,
+    maxTicketTurns: 100,
     attemptOverheadUsd: 0.02,
     selection: "ordered",
   },
@@ -630,6 +636,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
         if (item.contextWindow !== undefined && (typeof item.contextWindow !== "number" || !Number.isInteger(item.contextWindow) || item.contextWindow < 4096)) invalid(where, `${field}.contextWindow`, "must be an integer of at least 4096");
         if (item.maxTokens !== undefined && (typeof item.maxTokens !== "number" || !Number.isInteger(item.maxTokens) || item.maxTokens < 1024)) invalid(where, `${field}.maxTokens`, "must be an integer of at least 1024");
         if (item.reasoning !== undefined && typeof item.reasoning !== "boolean") invalid(where, `${field}.reasoning`, "must be true or false");
+        if (item.thinking !== undefined && (typeof item.thinking !== "string" || !(THINKING_LEVELS as readonly string[]).includes(item.thinking))) invalid(where, `${field}.thinking`, `must be one of ${THINKING_LEVELS.join(", ")}`);
       });
     }
   }
@@ -638,6 +645,7 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   if (routing) {
     checkNumber(routing, "maxEscalations", where, { min: 0, integer: true }, "routing");
     checkNumber(routing, "circuitBreakerFailures", where, { min: 1, integer: true }, "routing");
+    checkNumber(routing, "maxTicketTurns", where, { min: 5, integer: true }, "routing");
     checkNumber(routing, "attemptOverheadUsd", where, { min: 0 }, "routing");
     if (routing.maxTier !== undefined && (typeof routing.maxTier !== "string" || !isTier(routing.maxTier) || routing.maxTier === "batch")) {
       invalid(where, "routing.maxTier", `must be one of ${TIERS.filter((tier) => tier !== "batch").join(", ")}`);
@@ -847,6 +855,7 @@ function normalizeTiers(raw: Record<string, unknown>): WorkflowConfig["tiers"] {
       if (typeof entry.contextWindow === "number") candidate.contextWindow = entry.contextWindow;
       if (typeof entry.maxTokens === "number") candidate.maxTokens = entry.maxTokens;
       if (typeof entry.reasoning === "boolean") candidate.reasoning = entry.reasoning;
+      if (typeof entry.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(entry.thinking)) candidate.thinking = entry.thinking as TierCandidate["thinking"];
       return candidate;
     });
   }
@@ -966,7 +975,7 @@ function restrictSession(project: unknown, warnings: string[]): unknown {
 
 /**
  * The routing fields that guard the gating review can only tighten: `reviewTier` is user-only, a project's
- * `requirePremiumReviewFor` adds to the user's list, and `circuitBreakerFailures` takes the lower value.
+ * `requirePremiumReviewFor` adds to the user's list, and `circuitBreakerFailures` and `maxTicketTurns` take the lower value.
  */
 function restrictRouting(user: unknown, project: unknown, warnings: string[]): unknown {
   if (!isRecord(project)) return project;
@@ -982,6 +991,9 @@ function restrictRouting(user: unknown, project: unknown, warnings: string[]): u
   }
   if (typeof out.circuitBreakerFailures === "number") {
     out.circuitBreakerFailures = Math.min(typeof u.circuitBreakerFailures === "number" ? u.circuitBreakerFailures : DEFAULTS.routing.circuitBreakerFailures, out.circuitBreakerFailures);
+  }
+  if (typeof out.maxTicketTurns === "number") {
+    out.maxTicketTurns = Math.min(typeof u.maxTicketTurns === "number" ? u.maxTicketTurns : DEFAULTS.routing.maxTicketTurns, out.maxTicketTurns);
   }
   return out;
 }

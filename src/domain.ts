@@ -99,7 +99,16 @@ export interface TierCandidate {
   maxTokens?: number;
   /** A thinking model: Pi sends it reasoning levels (default false). */
   reasoning?: boolean;
+  /**
+   * The reasoning level a /build ticket on this model runs at (Pi's thinking level). Unset keeps Pi's level. Pi clamps
+   * it to what the model accepts, so `high` on a model without `high` gets the nearest level it has.
+   */
+  thinking?: ThinkingLevel;
 }
+
+/** Pi's thinking levels, lowest first. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 /** Why a candidate was or was not picked. Exactly one of score and excludedReason is set. */
 export interface ConsideredCandidate {
@@ -417,7 +426,8 @@ export interface TicketRun {
   attemptStart?: { at: string; head: string };
   difficulty?: Difficulty;
   /** Why the ticket last failed, for /build: a review failure is not settled by running the checks again. */
-  failedBy?: "checks" | "unrunnable" | "setup" | "review";
+  /** What failed the attempt. `turns`: the model used up `routing.maxTicketTurns` without finishing (model-attributable, escalates). */
+  failedBy?: "checks" | "unrunnable" | "setup" | "review" | "turns";
   /** Every per-ticket review, oldest first. */
   reviews?: TicketReviewRecord[];
   /** Known cost across attempts by who incurred it; null when any entry was unknown. `costUsd` is their sum. */

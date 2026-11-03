@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fromMicroUsd, piModelId, toMicroUsd } from "../config.js";
-import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type Tier } from "../domain.js";
+import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Phase, type RoutingDecision, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type Tier, type ThinkingLevel } from "../domain.js";
 import { mainCheckoutOf } from "../git/workspace.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
@@ -48,13 +48,37 @@ You are implementing one small ticket in this checkout.
 - End with one line per acceptance criterion, "- [x] <criterion>" or "- [ ] <criterion>", then "Files changed:" and the files.`;
 
 /** A model the driver can open a session on. */
+/** Limits on one ticket attempt, its retry turns included. */
+export interface ChunkLimits {
+  /** Assistant turns before the model is told to wrap up (`routing.maxTicketTurns`); the run stops TURN_GRACE turns later. */
+  maxTurns: number;
+}
+
+/** Turns a model gets to finish after it is told the turn budget is spent. */
+export const TURN_GRACE = 5;
+
+/** The steer sent when a ticket reaches its turn budget. */
+export function turnLimitNotice(maxTurns: number): string {
+  return `You have used this ticket's budget of ${maxTurns} turns. Stop exploring and finish now: complete the change you are making, then reply with the closing checklist. After ${TURN_GRACE} more turns the run is stopped and the ticket fails.`;
+}
+
+/** What a ticket's turn returned: the last assistant text, whether it was aborted, and whether the turn budget stopped it. */
+export interface ChunkReply {
+  lastText: string;
+  aborted: boolean;
+  /** The run was stopped because it went TURN_GRACE turns past `limits.maxTurns`. */
+  turnLimit?: boolean;
+}
+
 export interface ModelRef {
   provider: string;
   id: string;
+  /** The tier entry's `thinking`: the reasoning level the ticket runs at. Unset keeps Pi's level. */
+  thinking?: ThinkingLevel;
 }
 
 export type NextChunk =
-  | { kind: "chunk"; ticket: Ticket; prompt: string; model: ModelRef; tier: Tier; candidate?: { provider: string; model: string }; previous?: TicketRun }
+  | { kind: "chunk"; ticket: Ticket; prompt: string; model: ModelRef; tier: Tier; candidate?: { provider: string; model: string }; previous?: TicketRun; limits: ChunkLimits }
   | { kind: "done" }
   | { kind: "stopped"; code: string; reason: string };
 
@@ -550,7 +574,7 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
   const attempted = run && run.attempts > 0 ? (run.tier ?? run.attemptLog?.at(-1)?.tier) : undefined;
   // Only a model-attributable failure (checks or review) escalates. A check that cannot run or a broken setup is the
   // plan's fault, and a pricier model cannot fix it, so the ticket stays on its tier.
-  const modelFailed = run?.status === "failed" && (run.failedBy === undefined || run.failedBy === "checks" || run.failedBy === "review");
+  const modelFailed = run?.status === "failed" && (run.failedBy === undefined || run.failedBy === "checks" || run.failedBy === "review" || run.failedBy === "turns");
   const failedTier: Tier | undefined = modelFailed ? attempted : undefined;
   const resumeTier: Tier | undefined = modelFailed ? undefined : attempted;
   const way = run?.failedBy === "review" ? "Edit the ticket or the plan (/plan), or raise routing.maxEscalations." : "Fix it in the chat and run /build (it re-runs the checks on your changes), or raise routing.maxEscalations.";
@@ -602,10 +626,11 @@ async function prepare(ctx: WorkflowContext, state: TaskState, ticket: Ticket): 
     kind: "chunk",
     ticket,
     prompt,
-    model: { provider: decision.provider, id: piModelId(ctx.config, decision.provider, decision.model) },
+    model: { provider: decision.provider, id: piModelId(ctx.config, decision.provider, decision.model), ...(decision.candidate?.thinking ? { thinking: decision.candidate.thinking } : {}) },
     tier: decision.tier,
     candidate: decision.candidate ? { provider: decision.provider, model: decision.model } : undefined,
     previous: run,
+    limits: { maxTurns: ctx.config.routing.maxTicketTurns },
   };
 }
 
@@ -646,7 +671,7 @@ export async function unstartChunk(ctx: WorkflowContext, ticketId: string, previ
  * stored for this attempt). A check that cannot run, or a failing setup, stops the ticket with no strike against the
  * model. A review that is unavailable commits with a warning.
  */
-export async function finishChunk(ctx: WorkflowContext, ticketId: string, result: { lastText: string; aborted: boolean }, options: { final?: boolean } = {}): Promise<ChunkFinish> {
+export async function finishChunk(ctx: WorkflowContext, ticketId: string, result: ChunkReply, options: { final?: boolean } = {}): Promise<ChunkFinish> {
   try {
     const state = requireActive(ctx);
     const ticket = state.plan?.tickets?.find((item) => item.id === ticketId);
@@ -659,6 +684,21 @@ export async function finishChunk(ctx: WorkflowContext, ticketId: string, result
       return { ...previous, elapsedMs: (previous.elapsedMs ?? 0) + m.elapsed, costUsd: addUsd(previous.costUsd, total), costSplit: addSplit(previous.costSplit, split), summary: result.lastText ? clip(redact(result.lastText)) : previous.summary };
     };
     const release = (build: BuildRecord): BuildRecord => ({ ...build, currentTicket: undefined, chunkStartedAt: undefined });
+
+    // The model ran out of turns: its failure, like a failed check, so the next /build escalates it.
+    if (result.turnLimit) {
+      const limit = ctx.config.routing.maxTicketTurns;
+      const reason = `Ran out of turns: ${limit} turns plus ${TURN_GRACE} to wrap up (routing.maxTicketTurns) without finishing.`;
+      const m = measure();
+      await patch(ctx, state.taskId, ticket, (previous) => {
+        const next = accrue(previous, m);
+        return { ...next, status: "failed", failedBy: "turns", error: reason, attemptLog: [...(next.attemptLog ?? []), attempt(next, startedAt, m.elapsed, m.spent, "failure", "turns", reason)] };
+      }, release);
+      editTicketFile(ctx, state.taskId, ticket, (markdown) => setTicketStatus(markdown, "failed"));
+      logTicket(ctx, state.taskId, ticketId);
+      await ctx.store.bumpMetric(state.classification?.task_type ?? "general", run.tier ?? "standard", false, ctx.now(), run.provider && run.model ? { provider: run.provider, model: run.model } : undefined);
+      return { kind: "stopped", code: "TURN_LIMIT", reason: `Ticket ${ticketId} failed. ${reason} Run /build to retry on a stronger model, or split the ticket (/plan).` };
+    }
 
     if (result.aborted) {
       const m = measure();
@@ -827,8 +867,8 @@ export function buildReport(ctx: WorkflowContext, stopped?: string): string {
 
 /** What one fresh session can do for the loop. */
 export interface ChunkSession {
-  /** Sends a message, waits for the agent to settle, and returns the last assistant text and whether the run was aborted. */
-  send(text: string): Promise<{ lastText: string; aborted: boolean }>;
+  /** Sends a message, waits for the agent to settle, and returns the last assistant text, whether the run was aborted, and whether the turn budget stopped it. */
+  send(text: string): Promise<ChunkReply>;
 }
 
 export interface BuildDriver {
@@ -836,7 +876,8 @@ export interface BuildDriver {
    * Opens a fresh session on `model` for ticket `ticketId` and runs `run` inside it. It does not throw: when the session
    * cannot be opened, is on the wrong model, or `run` fails, it returns `{ stopped }` with why.
    */
-  fresh(model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string): Promise<void | { stopped: string }>;
+  /** `limits` holds for the whole attempt: the driver counts assistant turns across every `send`. */
+  fresh(model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string, limits?: ChunkLimits): Promise<void | { stopped: string }>;
   /** Puts back the model the user had before /build. Always called. */
   finish(): Promise<void>;
   /**
@@ -856,7 +897,7 @@ export interface BuildWorkflow {
   /** Drops this process's claim on the active task's build. */
   releaseBuild(): void;
   nextChunk(): Promise<NextChunk>;
-  finishChunk(ticketId: string, result: { lastText: string; aborted: boolean }, options?: { final?: boolean }): Promise<ChunkFinish>;
+  finishChunk(ticketId: string, result: ChunkReply, options?: { final?: boolean }): Promise<ChunkFinish>;
   /** Rolls a ticket back to not started when its session never took a turn. */
   unstartChunk(ticketId: string, previous?: TicketRun): Promise<void>;
   buildReport(stopped?: string): string;
@@ -926,6 +967,7 @@ async function buildLoop(getWorkflow: () => BuildWorkflow, driver: BuildDriver):
             outcome = finish;
           },
           chunk.ticket.id,
+          chunk.limits,
         ),
       ).catch((error: unknown) => ({ stopped: redact((error as Error)?.message || "The ticket's session failed.") }));
       running = undefined;
@@ -950,8 +992,8 @@ async function buildLoop(getWorkflow: () => BuildWorkflow, driver: BuildDriver):
         continue;
       }
       // Local mode: a ticket the local model could not pass goes straight on to Opus (the next step of the local ladder).
-      if (result.kind === "stopped" && chunk.tier === "local" && (result.code === "REVIEW_FAILED" || result.code === "CHECKS_FAILED")) {
-        workflow.progress(`Ticket ${chunk.ticket.id} · the local model did not pass (${result.code === "REVIEW_FAILED" ? "review" : "checks"}); Opus finishes it from its changes`);
+      if (result.kind === "stopped" && chunk.tier === "local" && (result.code === "REVIEW_FAILED" || result.code === "CHECKS_FAILED" || result.code === "TURN_LIMIT")) {
+        workflow.progress(`Ticket ${chunk.ticket.id} · the local model did not pass (${result.code === "REVIEW_FAILED" ? "review" : result.code === "TURN_LIMIT" ? "ran out of turns" : "checks"}); Opus finishes it from its changes`);
         continue;
       }
       stopped = result.kind === "stopped" ? result.reason : "The ticket needs another attempt.";

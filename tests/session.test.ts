@@ -10,7 +10,7 @@ import type { Workflow } from "../src/orchestrator/service.js";
 import { addTask, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
-type ModelRef = { provider: string; id: string };
+type ModelRef = { provider: string; id: string; thinking?: string };
 
 const RESTORE_MODEL = Symbol.for("pi-chef.restore-model");
 const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
@@ -34,6 +34,7 @@ function fakePi(setModelResult: boolean | "throw" = true) {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const handlers = new Map<string, Handler>();
   const setModelCalls: ModelRef[] = [];
+  const thinkingCalls: string[] = [];
   const onSetModel: { run?: (model: ModelRef) => void } = {};
   const pi = {
     registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
@@ -50,9 +51,12 @@ function fakePi(setModelResult: boolean | "throw" = true) {
       if (setModelResult) onSetModel.run?.(model);
       return setModelResult;
     },
+    setThinkingLevel(level: string) {
+      thinkingCalls.push(level);
+    },
   };
   registerWorkflow(pi as unknown as ExtensionAPI);
-  return { commands, handlers, setModelCalls, onSetModel };
+  return { commands, handlers, setModelCalls, thinkingCalls, onSetModel };
 }
 
 function writeProject(cwd: string, yaml: string): void {
@@ -109,6 +113,20 @@ describe("session_start pins the session model", () => {
   it("leaves a /build model alone: the pending slot wins", async () => {
     const { setModelCalls } = await start({ model: { provider: "openai", id: "gpt-x" }, pending: { provider: "xai", id: "grok-4.7" } });
     expect(setModelCalls).toEqual([{ provider: "xai", id: "grok-4.7" }]);
+  });
+
+  it("sets a /build ticket's thinking level after its model, and also when the session is already on the model", async () => {
+    const switched = await start({ model: { provider: "openai", id: "gpt-x" }, pending: { provider: "xai", id: "grok-4.7", thinking: "high" } });
+    expect(switched.setModelCalls).toEqual([{ provider: "xai", id: "grok-4.7" }]);
+    expect(switched.thinkingCalls).toEqual(["high"]);
+    const same = await start({ model: { provider: "xai", id: "grok-4.7" }, pending: { provider: "xai", id: "grok-4.7", thinking: "low" } });
+    expect(same.setModelCalls).toEqual([]);
+    expect(same.thinkingCalls).toEqual(["low"]);
+  });
+
+  it("leaves the thinking level alone without a tier thinking, or when the model switch failed", async () => {
+    expect((await start({ model: { provider: "openai", id: "gpt-x" }, pending: { provider: "xai", id: "grok-4.7" } })).thinkingCalls).toEqual([]);
+    expect((await start({ model: { provider: "openai", id: "gpt-x" }, setModel: false, pending: { provider: "xai", id: "grok-4.7", thinking: "high" } })).thinkingCalls).toEqual([]);
   });
 
   it("leaves the user's model alone when session.pin is false", async () => {

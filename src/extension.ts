@@ -4,10 +4,11 @@ import { COMMANDS, helpText } from "./commands.js";
 import { statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
-import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, type WorkflowConfig } from "./config.js";
+import { contextMismatch, probeLocalContext } from "./providers/local-context.js";
+import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, tierCandidates, type WorkflowConfig } from "./config.js";
 import type { FileAuthProbe } from "./providers/auth.js";
 import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
-import type { BuildDriver, ChunkSession } from "./orchestrator/build.js";
+import { TURN_GRACE, turnLimitNotice, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
 import { mainCheckoutOf, samePath } from "./git/workspace.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
 import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
@@ -16,7 +17,7 @@ import { Workflow } from "./orchestrator/service.js";
 import { presentForDecision } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
-import { WorkflowError, type CommandResult, type TokenUsage } from "./domain.js";
+import { WorkflowError, type CommandResult, type ThinkingLevel, type TokenUsage } from "./domain.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { SEARCH_MODEL } from "./tools/web-search.js";
@@ -182,7 +183,7 @@ type CommandContext = ExtensionContext & {
     compact?: (options?: { customInstructions?: string }) => void;
     sendUserMessage?: (text: string) => Promise<void> | void;
     waitForIdle?: () => Promise<void>;
-    sendMessage?: (message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean }) => Promise<void> | void;
+    sendMessage?: (message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }) => Promise<void> | void;
   };
 
 /**
@@ -221,7 +222,7 @@ function showPlanMessage(ctx: CommandContext, text: string, customType = "chef-p
  * new session may load a fresh copy of this module.
  */
 const RESTORE_MODEL = Symbol.for("pi-chef.restore-model");
-type ModelRef = { provider: string; id: string };
+type ModelRef = { provider: string; id: string; thinking?: ThinkingLevel };
 
 /**
  * Resolves when the model restore started by this session's `session_start` has finished (the driver waits for it before
@@ -234,27 +235,80 @@ const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
  * back through this, which always belongs to the live session.
  */
 const SET_MODEL = Symbol.for("pi-chef.set-model");
+/** The live session's `pi.setThinkingLevel`, set by `session_start` like SET_MODEL: /build's finish() puts the user's level back with it. */
+const SET_THINKING = Symbol.for("pi-chef.set-thinking");
 /** The last assistant text and abort flag of the run /build is waiting on, filled by the message_end and agent_settled handlers. */
 const TURN = Symbol.for("pi-chef.turn");
+/** What message_end fills in while /build waits on a ticket's turn; `onAssistant` counts the turn against its budget. */
+type TurnSlot = { lastText: string; aborted: boolean; onAssistant?: () => void };
 /**
  * The cwd of the last session this extension's `session_start` saw. The driver clears it before opening or switching a
  * session: still unset in `withSession` means Pi did not load pi-chef there, so nothing switched the model either.
  */
 const STARTED = Symbol.for("pi-chef.session-started");
-const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [TURN]?: { lastText: string; aborted: boolean }; [STARTED]?: string };
+const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [SET_THINKING]?: (level: ThinkingLevel) => void; [TURN]?: TurnSlot; [STARTED]?: string };
+
+/**
+ * Counts a ticket attempt's assistant turns. At `maxTurns` it steers the model to wrap up, once; TURN_GRACE turns later
+ * it aborts the run, and `stopped()` says so. Steering and aborting never throw out of a message_end handler.
+ */
+export function turnBudget(limits: ChunkLimits | undefined, steer: (text: string) => unknown, abort: () => void): { count: () => void; stopped: () => boolean } {
+  let turns = 0;
+  let stopped = false;
+  const safely = (action: () => unknown) => {
+    try {
+      const result = action();
+      if (result && typeof (result as Promise<unknown>).catch === "function") (result as Promise<unknown>).catch(() => undefined);
+    } catch {
+      /* the next turn tries again: the limit check is >= */
+    }
+  };
+  return {
+    count() {
+      if (!limits || stopped) return;
+      turns += 1;
+      if (turns === limits.maxTurns) safely(() => steer(turnLimitNotice(limits.maxTurns)));
+      if (turns >= limits.maxTurns + TURN_GRACE) {
+        stopped = true;
+        safely(abort);
+      }
+    },
+    stopped: () => stopped,
+  };
+}
+
+/**
+ * Warns when the local server runs `model` with a different context window than its tiers.local entry tells Pi
+ * (`probeLocalContext`). Never blocks or throws: the server may not say, and the ticket starts either way.
+ */
+export async function warnLocalContext(config: WorkflowConfig, model: string, ctx: Pick<ExtensionContext, "hasUI" | "ui">, fetchImpl?: typeof fetch): Promise<void> {
+  try {
+    const baseUrl = config.providers.local?.baseUrl;
+    if (!baseUrl) return;
+    const entry = tierCandidates(config, "local").find((candidate) => candidate.provider === "local" && candidate.model === model);
+    const warning = contextMismatch(model, entry?.contextWindow, await probeLocalContext(baseUrl, model, { fetchImpl }));
+    if (warning && ctx.hasUI) ctx.ui.notify(warning, "warning");
+  } catch {
+    /* best effort */
+  }
+}
 
 /** Why a new session in `dir` has no pi-chef, and how to give it one. */
 function notLoadedIn(dir: string): string {
   return `pi-chef is not loaded in ${dir}, so /build cannot run tickets there. Pi loads project packages from ${path.join(dir, ".pi", "settings.json")}; install pi-chef for every project (\`pi install git:github.com/pkeenan87/pi-chef\`), or check that the folder is trusted, then /build again.`;
 }
 
-/** Re-selects the model the replaced session was using, when the new session started on a different one. */
-function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): Promise<void> | undefined {
+/**
+ * Re-selects the model the replaced session was using, when the new session started on a different one, and then the
+ * ticket's thinking level (`tiers.*[].thinking`) when it has one.
+ */
+function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel" | "setThinkingLevel">>, ctx: ExtensionContext): Promise<void> | undefined {
   const wanted = restoreSlot[RESTORE_MODEL];
   delete restoreSlot[RESTORE_MODEL];
   if (!wanted) return undefined;
+  const think = () => applyThinking(pi, ctx, wanted.thinking);
   const current = (ctx as { model?: ModelRef }).model;
-  if (current?.provider === wanted.provider && current.id === wanted.id) return undefined;
+  if (current?.provider === wanted.provider && current.id === wanted.id) return void think();
   const startedOn = current ? `${current.provider}/${current.id}` : "the default model";
   const warn = () => {
     if (ctx.hasUI) ctx.ui.notify(`The new session started on ${startedOn}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
@@ -266,7 +320,18 @@ function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: Extensio
   const model = wanted.id ? ctx.modelRegistry?.find(wanted.provider, wanted.id) : undefined;
   if (!model) return void unknown();
   if (typeof pi.setModel !== "function") return void warn();
-  return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
+  return pi.setModel(model as never).then((ok) => (ok ? think() : warn()), warn);
+}
+
+/** Sets Pi's thinking level, which Pi clamps to what the model accepts. Never throws: a failure only warns. */
+function applyThinking(pi: Partial<Pick<ExtensionAPI, "setThinkingLevel">>, ctx: ExtensionContext, level: ThinkingLevel | undefined): void {
+  if (!level) return;
+  try {
+    if (typeof pi.setThinkingLevel !== "function") throw new Error("this Pi has no setThinkingLevel");
+    pi.setThinkingLevel(level as never);
+  } catch (error) {
+    if (ctx.hasUI) ctx.ui.notify(`Could not set the thinking level to ${level}: ${redact(error instanceof Error ? error.message : String(error))}`, "warning");
+  }
 }
 
 /**
@@ -414,6 +479,10 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   let live: CommandContext = ctx;
   // Plain data captured before the first replacement: the model the user was on, and the session to go back to.
   const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+  const originalThinking = (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel;
+  // Local models whose served context window was compared with tiers.local in this build (once each).
+  const contextChecked = new Set<string>();
+  let thinkingChanged = false;
   let startFile: string | undefined;
   try {
     startFile = ctx.sessionManager.getSessionFile();
@@ -422,7 +491,7 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
   }
   const getWorkflow = () => workflowFor(live.cwd, live);
   const driver: BuildDriver = {
-    async fresh(model, run, ticketId) {
+    async fresh(model, run, ticketId, limits) {
       // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
       // Routing applies the same test (registryProblem) to every candidate, so this only trips when Pi changed since.
       let preflight: string | undefined;
@@ -437,7 +506,12 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
       if (preflight) {
         return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the tier config or sign in, then /build again.` };
       }
-      restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id };
+      if (model.provider === "local" && !contextChecked.has(model.id)) {
+        contextChecked.add(model.id);
+        await warnLocalContext(getWorkflow().config, model.id, live);
+      }
+      restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id, ...(model.thinking ? { thinking: model.thinking } : {}) };
+      if (model.thinking) thinkingChanged = true;
       delete restoreSlot[STARTED];
       let opened = false;
       // Pi's newSession rethrows an error from withSession and the app dies with "Failed to create session", so nothing
@@ -468,14 +542,16 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
                 throw new Error(`The new session is on ${on.provider}/${on.id}, not the routed ${model.provider}/${model.id}, so the ticket was not started. /build resumes it.`);
               }
               if (typeof next.sendUserMessage !== "function") throw new Error("This Pi session cannot send messages, so /build cannot run.");
+              // The turn budget covers the whole attempt, so the count survives the check and review retry turns.
+              const budget = turnBudget(limits, (text) => next.sendMessage?.({ customType: "chef-turn-limit", content: text, display: true }, { deliverAs: "steer" }), () => next.abort());
               const session: ChunkSession = {
                 async send(text) {
-                  restoreSlot[TURN] = { lastText: "", aborted: false };
+                  restoreSlot[TURN] = { lastText: "", aborted: false, onAssistant: budget.count };
                   await next.sendUserMessage!(text);
                   await next.waitForIdle?.();
                   const turn = restoreSlot[TURN] ?? { lastText: "", aborted: false };
                   delete restoreSlot[TURN];
-                  return { lastText: turn.lastText, aborted: turn.aborted };
+                  return { lastText: turn.lastText, aborted: turn.aborted, ...(budget.stopped() ? { turnLimit: true } : {}) };
                 },
               };
               await run(session);
@@ -495,6 +571,14 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
       return failure ? { stopped: failure } : undefined;
     },
     async finish() {
+      // A ticket's thinking level does not outlive the build: the user's level comes back (Pi clamps it to the model).
+      if (thinkingChanged && originalThinking) {
+        try {
+          restoreSlot[SET_THINKING]?.(originalThinking);
+        } catch {
+          /* the level stays; Shift+Tab changes it */
+        }
+      }
       // With pinning on the session belongs on session.model; otherwise it goes back to the model the user was on.
       let target = original;
       try {
@@ -690,6 +774,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       show(problemNotice(error));
     }
     restoreSlot[SET_MODEL] = typeof pi.setModel === "function" ? (model) => pi.setModel(model) : undefined;
+    restoreSlot[SET_THINKING] = typeof pi.setThinkingLevel === "function" ? (level) => pi.setThinkingLevel(level as never) : undefined;
     try {
       // A model /build routed for its ticket wins; otherwise the session goes onto session.model (when pinned).
       restoreSlot[RESTORE_DONE] = restoreSlot[RESTORE_MODEL] ? restoreModel(pi, ctx) : pinSessionModel(pi, ctx);
@@ -758,6 +843,7 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     const message = event.message;
     const turn = restoreSlot[TURN];
     if (turn && message.role === "assistant") {
+      turn.onAssistant?.();
       const text = Array.isArray(message.content) ? message.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
       if (text.trim()) turn.lastText = text;
       if ("stopReason" in message && message.stopReason === "aborted") turn.aborted = true;

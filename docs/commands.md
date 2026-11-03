@@ -120,14 +120,14 @@ For a security-sensitive plan it asks you to confirm first.
 **Per ticket:**
 
 1. **Route.** The ticket goes to the tier of its difficulty: `ticketLow`, `ticketMedium` or `ticketHigh`, or `tiers.local` for a local ticket (every ticket in local mode, or those of `localMode.difficulties`). Within the tier the model is picked by `routing.selection`.
-2. **Session.** It opens a fresh Pi session on that model and sends the ticket. While the ticket runs, `git push`, branch switches and `git worktree` changes are blocked.
+2. **Session.** It opens a fresh Pi session on that model, at the tier entry's `thinking` level when it has one, and sends the ticket. While the ticket runs, `git push`, branch switches and `git worktree` changes are blocked. The attempt may take `routing.maxTicketTurns` assistant turns (default 100, retries included); at the limit the model is told to finish, and 5 turns later the run is stopped and the ticket fails (`TURN_LIMIT`). Before the first ticket on a local model, /build asks the local server what context window it runs (llama-server `/props`, Ollama `/api/ps`) and warns when that differs from the `contextWindow` its `tiers.local` entry tells Pi.
 3. **Checks.** It runs `setup` (once per build), then the ticket's `checks`, else the config's `checks`. A failure gets one retry turn in the same session.
 4. **Review.** The review tier (`routing.reviewTier`) reviews the ticket's diff; high tickets also get advisors. A first fail sends the findings back for a fix; a second fail fails the ticket at that tier.
 5. **Commit.** It commits the tree as `<id>: <title>`, then moves on.
 
 **When a ticket fails:**
 
-- **It moves up a tier** on the next `/build`: `ticketLow`, then `ticketMedium`, `ticketHigh`, `premium`, at most `routing.maxEscalations` steps and never past `routing.maxTier`. In local mode the local model gets three review rounds, and a ticket it could not pass goes straight to `premium` (Opus) in the same `/build`, which finishes it from the local model's changes; that is the only step.
+- **It moves up a tier** on the next `/build`: `ticketLow`, then `ticketMedium`, `ticketHigh`, `premium`, at most `routing.maxEscalations` steps and never past `routing.maxTier`. Running out of turns counts like failed checks. In local mode the local model gets three review rounds, and a ticket it could not pass (review, checks, or turns) goes straight to `premium` (Opus) in the same `/build`, which finishes it from the local model's changes; that is the only step.
 - **A check that cannot run, or a failed setup,** does not move it up.
 - **A ticket you fixed by hand** is re-checked and reviewed, then committed with no model turn.
 - **When nothing is left to try,** it stops with `MAX_ESCALATIONS` and says what to do.
