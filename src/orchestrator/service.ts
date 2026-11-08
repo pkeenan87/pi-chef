@@ -14,6 +14,7 @@ import { summarizeForCompaction, type CompactionInput, type CompactionSummary } 
 import { active, type WorkflowContext } from "./context.js";
 import { statusLine } from "./state-label.js";
 import { watchTicket } from "./watchdog.js";
+import { ledgerChildSession, sweepTicketSessions } from "../herdr/session-file.js";
 import { displayName } from "./tasks.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
@@ -67,6 +68,7 @@ export class Workflow {
       report: options.report,
       chat: options.chat,
       advisorChat: options.advisorChat,
+      reviewChat: options.reviewChat,
       status: options.status,
       planStatus: options.planStatus,
       startTurn: options.startTurn,
@@ -95,6 +97,8 @@ export class Workflow {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
     ctx.advisorChat = binding.advisorChat ?? ctx.advisorChat;
+    // Unlike the others this is replaced on every bind: switching `isolation.runner` away from herdr must unbind it.
+    ctx.reviewChat = binding.reviewChat;
     ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
@@ -345,8 +349,35 @@ export class Workflow {
     return auth(this.ctx, arg);
   }
 
-  observeUsage(input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
-    return observeUsage(this.ctx, input);
+  observeUsage(input: { provider: string; model: string; usage: TokenUsage }, extra?: Parameters<typeof observeUsage>[2]): CostRecord | undefined {
+    return observeUsage(this.ctx, input, extra);
+  }
+
+  /** `<task dir>/sessions` of the active task: where the herdr runner keeps a ticket child's session dirs and status files. */
+  ticketSessionsRoot(): string | undefined {
+    const state = active(this.ctx);
+    return state ? path.join(this.store.taskDir(state.taskId), "sessions") : undefined;
+  }
+
+  /** The active task's readable name (for a herdr tab name). */
+  ticketSessionsName(): string {
+    const state = active(this.ctx);
+    return state ? displayName(state) : "";
+  }
+
+  /** `<workspace>/reviews` (main checkout): where the herdr review tab keeps its packets and sessions. */
+  reviewsRoot(): string {
+    return path.join(this.store.root, "reviews");
+  }
+
+  /** Ledgers a herdr ticket child's new session entries (`src/herdr/session-file.ts`). */
+  ledgerChildSession(files: Parameters<typeof ledgerChildSession>[1], options: Parameters<typeof ledgerChildSession>[2]): CostRecord[] {
+    return ledgerChildSession(this.ctx, files, options);
+  }
+
+  /** The resume sweep over a ticket's earlier herdr session dirs. */
+  sweepTicketSessions(ticketId: string, options: Parameters<typeof sweepTicketSessions>[2] = {}): CostRecord[] {
+    return sweepTicketSessions(this.ctx, ticketId, options);
   }
 
   /** Ledgers the calls Pi made on its own (cache warming, its own compaction and branch summaries) from the session file. */

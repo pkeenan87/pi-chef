@@ -44,6 +44,8 @@ export interface WorkflowContext {
   chat?: ChatFn;
   /** Advisor calls as read-only Pi sessions in the repository (`advisors.tools`); absent when Pi cannot open them. */
   advisorChat?: ChatFn;
+  /** The review calls (the per-ticket review and /review's model pass) through the one herdr review tab, when `isolation.runner` is herdr; every other call keeps `chat`. */
+  reviewChat?: ChatFn;
   /** Pi's model registry for the live session. When bound, routing skips candidates it does not know or holds no credentials for. */
   registry?: UsableRegistry;
   status?: (text: string | undefined) => void;

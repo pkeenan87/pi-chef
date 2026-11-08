@@ -174,9 +174,10 @@ export interface WorkflowConfig {
   /**
    * `runner`: how /build runs a ticket. `subagent` (default): in a session pi-chef opens with Pi's SDK beside yours,
    * which stays where it is. `session`: Pi replaces your session with a new one per ticket (the older path). A Pi
-   * whose model runtime cannot be reached uses `session` either way.
+   * whose model runtime cannot be reached uses `session` either way. `herdr`: each ticket runs as its own `pi` process
+   * in a herdr tab (`herdrCommand`, default `hc`, is the herdr CLI); outside herdr it falls back to `subagent`.
    */
-  isolation: { worktree: boolean; dir: string; runner: "subagent" | "session" };
+  isolation: { worktree: boolean; dir: string; runner: "subagent" | "session" | "herdr"; herdrCommand: string };
   budgets: {
     taskUsd: number;
     dailyUsd: number;
@@ -278,7 +279,7 @@ const DEFAULTS: WorkflowConfig = {
     ticketContextTokens: 150000,
   },
   branchPrefix: "chef",
-  isolation: { worktree: true, dir: "", runner: "subagent" },
+  isolation: { worktree: true, dir: "", runner: "subagent", herdrCommand: "hc" },
   budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
   approvals: { plan: "required", merge: "manual" },
   checks: [],
@@ -701,7 +702,8 @@ function normalizeRaw(input: unknown, where: string, warnings: string[] = [], le
   if (isolation) {
     if (isolation.worktree !== undefined && typeof isolation.worktree !== "boolean") invalid(where, "isolation.worktree", "must be a boolean");
     if (isolation.dir !== undefined && typeof isolation.dir !== "string") invalid(where, "isolation.dir", "must be a directory path");
-    if (isolation.runner !== undefined && isolation.runner !== "subagent" && isolation.runner !== "session") invalid(where, "isolation.runner", "must be subagent or session");
+    if (isolation.runner !== undefined && isolation.runner !== "subagent" && isolation.runner !== "session" && isolation.runner !== "herdr") invalid(where, "isolation.runner", "must be subagent, session or herdr");
+    if (isolation.herdrCommand !== undefined && (typeof isolation.herdrCommand !== "string" || !/^[A-Za-z0-9._\/~+-]+$/.test(isolation.herdrCommand))) invalid(where, "isolation.herdrCommand", "must be the herdr CLI: a command name or path without spaces, such as hc");
   }
   const budgets = section(raw, "budgets", where);
   if (budgets) {
@@ -1241,15 +1243,33 @@ export class ConfigFileError extends WorkflowError {
  */
 function readConfigFile(file: string, warnings: string[]): Record<string, unknown> {
   try {
-    let parsed: unknown;
-    try {
-      parsed = parse(readFileSync(file, "utf8"));
-    } catch (error) {
-      const first = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable";
-      throw new WorkflowError("CONFIG_INVALID", `${displayPath(file)}: YAML could not be read (${first})`);
-    }
-    // An empty file, or one that is all comments (the commented chef.yaml template), is an empty config.
-    return normalizeRaw(parsed ?? {}, file, warnings, true);
+    return readConfigText(readFileSync(file, "utf8"), file, warnings);
+  } catch (error) {
+    if (error instanceof ConfigFileError) throw error;
+    const code = error instanceof WorkflowError ? error.code : "CONFIG_INVALID";
+    throw new ConfigFileError(code, file, redact(error instanceof Error && error.message ? error.message : String(error)));
+  }
+}
+
+function readConfigText(text: string, file: string, warnings: string[]): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = parse(text);
+  } catch (error) {
+    const first = (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable";
+    throw new WorkflowError("CONFIG_INVALID", `${displayPath(file)}: YAML could not be read (${first})`);
+  }
+  // An empty file, or one that is all comments (the commented chef.yaml template), is an empty config.
+  return normalizeRaw(parsed ?? {}, file, warnings, true);
+}
+
+/**
+ * Throws a ConfigFileError when loadConfig would reject a file with this text (the lenient path it reads files with:
+ * a bad tier, session or quota section is only a warning). `file` is used for messages only.
+ */
+export function checkConfigText(text: string, file: string): void {
+  try {
+    readConfigText(text, file, []);
   } catch (error) {
     if (error instanceof ConfigFileError) throw error;
     const code = error instanceof WorkflowError ? error.code : "CONFIG_INVALID";

@@ -158,7 +158,7 @@ async function ask(
   system: string,
   user: string,
 ): Promise<Asked> {
-  const chat = ctx.chat!;
+  const chat = (ctx.reviewChat ?? ctx.chat)!;
   let micro: number | null = 0;
   const errors: string[] = [];
   const taskType = state.classification?.task_type ?? "general";
@@ -239,7 +239,7 @@ export function reviewFailureDetail(record: TicketReviewRecord): string {
  * throws for a failed call: that is `unavailable`.
  */
 export async function reviewTicket(ctx: WorkflowContext, state: TaskState, ticket: Ticket, run: TicketRun): Promise<TicketReviewOutcome | undefined> {
-  if (!ctx.config.advisors.tickets || !ctx.chat) return undefined;
+  if (!ctx.config.advisors.tickets || !(ctx.reviewChat ?? ctx.chat)) return undefined;
   try {
     return await reviewTicketUnsafe(ctx, state, ticket, run);
   } catch (error) {

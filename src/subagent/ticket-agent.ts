@@ -14,7 +14,8 @@ import path from "node:path";
 import { buildBashBlock, isDeniedCommand } from "../sandbox.js";
 import { checkSyntax, syntaxNote, type SyntaxCheck } from "./syntax.js";
 import { redact } from "../redact.js";
-import { turnBudget, type ChunkLimits, type ChunkReply } from "../orchestrator/build.js";
+import { turnBudget, type ChunkLimits } from "../orchestrator/turn-budget.js";
+import type { ChunkReply } from "../orchestrator/build.js";
 import type { ThinkingLevel } from "../domain.js";
 
 /** The tool names a ticket session has. No `task` or other extension tools: the ticket cannot spawn more agents. */

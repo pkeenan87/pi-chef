@@ -103,15 +103,21 @@ export function remember(
   return record(ctx, state.taskId, phase, tier, provider, model, usage, outcome, retries, reason);
 }
 
-export function observeUsage(ctx: WorkflowContext, input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
+export function observeUsage(
+  ctx: WorkflowContext,
+  input: { provider: string; model: string; usage: TokenUsage },
+  /** A call read back after the fact (a herdr child's session file): its ledger id and time, and the ticket it belongs to. */
+  extra: { id?: string; at?: Date; ticketId?: string } = {},
+): CostRecord | undefined {
   const state = active(ctx);
+  const when = { ...(extra.id ? { id: extra.id } : {}), ...(extra.at ? { at: extra.at } : {}) };
   const known = input.usage.input !== null && input.usage.output !== null;
   const base = known ? "observed assistant usage" : "observed assistant usage missing tokens";
   // No task: still ledger the turn so it counts toward the daily limit.
-  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, base);
+  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, extra.ticketId ? `${base} · ticket ${extra.ticketId}` : base, when);
   // While /build runs a ticket, the turn is that ticket's spend (/cost and the build report read it back).
-  const reason = state.build?.currentTicket ? `${base} · ticket ${state.build.currentTicket}` : base;
-  return remember(ctx, state, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, reason);
+  const ticket = extra.ticketId ?? state.build?.currentTicket;
+  return record(ctx, state.taskId, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, ticket ? `${base} · ticket ${ticket}` : base, when);
 }
 
 /** A session-file entry as `sessionManager.getEntries()` returns it; only the fields the ledger reads. */
@@ -133,10 +139,22 @@ interface PiEntry {
  * older than `since` (when this extension began watching the session) are left alone.
  * `model` is the session's model, the one Pi summarizes with; a usage entry names its own.
  */
-export function recordPiUsage(ctx: WorkflowContext, input: { sessionId: string; entries: readonly unknown[]; model?: { provider: string; id: string }; since?: Date }): CostRecord[] {
+/**
+ * The ledger ids of Pi's calls that are already recorded. The set is loaded once per context, so a second Workflow on the
+ * same workspace (or a process that wrote since) could have recorded an id this one does not know; call this right
+ * before recording an id that looks new, and it adds what the ledger file holds now.
+ */
+export function refreshPiLedgered(ctx: WorkflowContext): Set<string> {
+  const seen = (ctx.piLedgered ??= new Set());
+  for (const row of ctx.store.readLedger()) if (row.id.startsWith("pi-")) seen.add(row.id);
+  return seen;
+}
+
+export function recordPiUsage(ctx: WorkflowContext, input: { sessionId: string; entries: readonly unknown[]; model?: { provider: string; id: string }; since?: Date; ticketId?: string }): CostRecord[] {
   const seen = (ctx.piLedgered ??= new Set(ctx.store.readLedger().map((entry) => entry.id).filter((id) => id.startsWith("pi-"))));
   const state = active(ctx);
   const out: CostRecord[] = [];
+  let refreshed = false;
   const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
   for (const raw of input.entries) {
     const entry = raw as PiEntry;
@@ -151,12 +169,17 @@ export function recordPiUsage(ctx: WorkflowContext, input: { sessionId: string; 
     const at = typeof entry.timestamp === "string" && !Number.isNaN(Date.parse(entry.timestamp)) ? new Date(entry.timestamp) : ctx.now();
     // A resumed session's history belongs to whatever ran then, not to the task active now.
     if (seen.has(id) || (input.since && at < input.since)) continue;
+    if (!refreshed) {
+      refreshed = true;
+      refreshPiLedgered(ctx);
+      if (seen.has(id)) continue;
+    }
     seen.add(id);
     const provider = typeof entry.provider === "string" ? entry.provider : input.model?.provider ?? "pi";
     const model = typeof entry.model === "string" ? entry.model : input.model?.id ?? "unknown";
     const listed = count(entry.usage.cost?.total);
     const usage: TokenUsage = { input: count(entry.usage.input), output: count(entry.usage.output), cacheRead: count(entry.usage.cacheRead), cacheWrite: count(entry.usage.cacheWrite), requests: 1, ...(listed !== null ? { listPriceUsd: listed } : {}) };
-    out.push(record(ctx, state?.taskId ?? SESSION_TASK_ID, state?.phase ?? "IDLE", "pi", provider, model, usage, "success", 0, job, { id, at }));
+    out.push(record(ctx, state?.taskId ?? SESSION_TASK_ID, state?.phase ?? "IDLE", "pi", provider, model, usage, "success", 0, input.ticketId ? `${job} · ticket ${input.ticketId}` : job, { id, at }));
   }
   return out;
 }

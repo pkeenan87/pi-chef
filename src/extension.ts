@@ -3,6 +3,7 @@ import { convertToLlm, isToolCallEventType, serializeConversation, SessionManage
 import { COMMANDS, helpText } from "./commands.js";
 import { statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { contextMismatch, probeLocalContext } from "./providers/local-context.js";
 import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, tierCandidates, type WorkflowConfig } from "./config.js";
@@ -11,6 +12,9 @@ import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
 import { turnBudget, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
 import { openTicketAgent, type TicketAgent } from "./subagent/ticket-agent.js";
 import { piChildSdk, runtimeOf } from "./subagent/pi-sdk.js";
+import { runInHerdr } from "./subagent/herdr-runner.js";
+import { createHerdrClient, type HerdrClient } from "./herdr/client.js";
+import { createReviewTabChat } from "./herdr/review-tab.js";
 import { createAgentChat } from "./subagent/advisor-agent.js";
 import { mainCheckoutOf, samePath } from "./git/workspace.js";
 import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
@@ -20,7 +24,8 @@ import { Workflow } from "./orchestrator/service.js";
 import { presentForDecision } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
-import { WorkflowError, type CommandResult, type ThinkingLevel, type TokenUsage } from "./domain.js";
+import { WorkflowError, type CommandResult, type ThinkingLevel } from "./domain.js";
+import { usageOfMessage } from "./usage-message.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { SEARCH_MODEL } from "./tools/web-search.js";
@@ -48,9 +53,82 @@ function registerWith(pi: Partial<Pick<ExtensionAPI, "registerProvider">>): void
   if (typeof pi.registerProvider === "function") providerSlot[PROVIDERS_SLOT] = { register: pi.registerProvider.bind(pi) as (name: string, config: unknown) => void };
 }
 
+/** `~/` at the start of a configured command: execFile does not expand it. */
+function expandHome(command: string): string {
+  return command === "~" || command.startsWith("~/") ? path.join(homedir(), command.slice(1)) : command;
+}
+
+/** Tests bind a fake herdr client here; unset, `isolation.runner: herdr` spawns the real `hc`. */
+let herdrClientFactory: ((command: string) => HerdrClient) | undefined;
+export function bindHerdrClient(factory: ((command: string) => HerdrClient) | undefined): void {
+  herdrClientFactory = factory;
+  reviewTab = undefined;
+}
+
+/**
+ * The review tab's chat (`isolation.runner: herdr`): every review call goes through one herdr tab. It holds the tab's
+ * queue and last-used model, so it lives across binds (one per command) and only its registry and checkout are refreshed.
+ * Outside herdr (`client.self()` has a problem) it answers with the plain chat and says so once.
+ */
+let reviewTab: { key: string; latest: { registry: PiRegistryLike; checkout: string; plain: ChatFn }; chat: ChatFn; warned: boolean } | undefined;
+
+function reviewChatFor(workflow: Workflow, registry: PiRegistryLike | undefined, checkout: string, plain: ChatFn | undefined): ChatFn | undefined {
+  const isolation = workflow.config.isolation;
+  if (isolation.runner !== "herdr" || !registry || !plain) return undefined;
+  const command = expandHome(isolation.herdrCommand);
+  const key = `${command}|${workflow.reviewsRoot()}`;
+  if (reviewTab && reviewTab.key === key) {
+    reviewTab.latest = { registry, checkout, plain };
+    return reviewTab.chat;
+  }
+  const client = (herdrClientFactory ?? ((cmd: string) => createHerdrClient({ command: cmd })))(command);
+  const latest = { registry, checkout, plain };
+  let space: string | undefined;
+  const spaceOf = async () => {
+    if (space) return space;
+    const self = await client.self();
+    if ("problem" in self) return self;
+    space = self.space;
+    return space;
+  };
+  const tab = createReviewTabChat({
+    client,
+    registry: { find: (provider, model) => latest.registry.find(provider, model), isUsingOAuth: (model) => latest.registry.isUsingOAuth?.(model) ?? false },
+    apiKeyFallback: (provider) => active?.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true,
+    piModelId: (provider, model) => piModelId(active!.config, provider, model),
+    checkout: () => latest.checkout,
+    space: spaceOf,
+    ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
+    host: {
+      reviewsRoot: () => active?.reviewsRoot(),
+      ledgerOwn: (files, model) => void active?.ledgerChildSession(files, { model, messages: false }),
+      progress: (text) => active?.progress(text),
+    },
+  });
+  const entry = {
+    key,
+    latest,
+    warned: false,
+    chat: (async (candidate, request) => {
+      const where = await spaceOf();
+      if (typeof where !== "string") {
+        if (!entry.warned) {
+          entry.warned = true;
+          active?.progress(`herdr not available: ${where.problem}; reviewing without the review tab`);
+        }
+        return entry.latest.plain(candidate, request);
+      }
+      return tab(candidate, request);
+    }) as ChatFn,
+  };
+  reviewTab = entry;
+  return entry.chat;
+}
+
 export function bindWorkflow(workflow: Workflow | undefined): void {
   // A workflow bound from outside brings its own auth probe; prices fall back to subscription billing.
   setBillingResolver(undefined);
+  reviewTab = undefined;
   active = workflow;
   loaded = undefined;
   const slot = providerSlot[PROVIDERS_SLOT];
@@ -158,10 +236,12 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
     // A replacement session's ctx brings its own sendUserMessage; the captured pi is stale after a replacement.
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
     const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
+    const plainChat = registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined;
     active.bind({
       registry: registry as unknown as UsableRegistry | undefined,
-      chat: registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined,
+      chat: plainChat,
       advisorChat: advisorChatFor(registry, apiKeyFallback, ctx.cwd),
+      reviewChat: reviewChatFor(active, registry, ctx.cwd, plainChat),
       // Routes and planning stages redraw the one status line; its text is derived from the task, not passed in.
       status: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
@@ -544,8 +624,48 @@ function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: 
         contextChecked.add(model.id);
         await warnLocalContext(getWorkflow().config, model.id, live);
       }
+      // The herdr runner: the ticket is its own pi process in a tab. Outside herdr (or without hc) it falls back, with a notice.
+      let herdrProblem: string | undefined;
+      try {
+        const isolation = getWorkflow().config.isolation;
+        if (isolation.runner === "herdr") {
+          const client = (herdrClientFactory ?? ((command: string) => createHerdrClient({ command })))(expandHome(isolation.herdrCommand));
+          const self = await client.self();
+          if ("problem" in self) herdrProblem = self.problem;
+          else {
+                        const workflow = getWorkflow();
+            return await runInHerdr(
+              {
+                client,
+                space: self.space,
+                cwd: live.cwd,
+                ticketId,
+                model,
+                modelLabel: modelLabel(workflow.config, model.provider, model.provider === "foundry" ? foundryModelOf(workflow.config, model.id) : model.id),
+                limits,
+                ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
+                host: {
+                  sessionsRoot: () => getWorkflow().ticketSessionsRoot(),
+                  taskName: () => getWorkflow().ticketSessionsName(),
+                  ledger: (files, id, launched) => {
+                    getWorkflow().ledgerChildSession(files, { ticketId: id, model: launched });
+                    refreshStatus(live);
+                  },
+                  sweep: (id, launched) => void getWorkflow().sweepTicketSessions(id, { model: launched }),
+                  progress: (text) => getWorkflow().progress(text),
+                  activity: (action, text) => getWorkflow().activity(action, text),
+                },
+              },
+              run,
+            );
+          }
+        }
+      } catch (error) {
+        herdrProblem = redact(error instanceof Error ? error.message : String(error));
+      }
       // The ticket subagent: a session beside this one, so nothing below (session replacement and its slots) applies.
       const childRuntime = subagentRuntime();
+      if (herdrProblem) getWorkflow().progress(`herdr not available: ${herdrProblem}; running the ticket in ${childRuntime ? "a subagent" : "this session"}`);
       if (childRuntime) return runInSubagent(childRuntime, model, run, ticketId, limits);
       restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id, ...(model.thinking ? { thinking: model.thinking } : {}) };
       if (model.thinking) thinkingChanged = true;
@@ -892,29 +1012,6 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     // The footer's spend follows each turn, not just the next command.
     refreshStatus(ctx);
   });
-}
-
-/**
- * The ledger entry of one finished assistant message (the session's own turn or a /build ticket subagent's), or
- * undefined for a message that bills nothing: not an assistant turn, no usage, or a failed attempt with no tokens
- * (Pi retries it, possibly on another model, and the retry ledgers its own message).
- */
-export function usageOfMessage(message: { role: string; usage?: unknown; stopReason?: unknown; provider?: unknown; model?: unknown }): { provider: string; model: string; usage: TokenUsage } | undefined {
-  if (message.role !== "assistant" || !message.usage || typeof message.usage !== "object") return undefined;
-  const raw = message.usage as { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; cost?: { total?: unknown } };
-  const stop = message.stopReason;
-  if ((stop === "error" || stop === "aborted") && !raw.input && !raw.output && !raw.cacheRead && !raw.cacheWrite) return undefined;
-  const usage: TokenUsage = {
-    input: typeof raw.input === "number" ? raw.input : null,
-    output: typeof raw.output === "number" ? raw.output : null,
-    cacheRead: typeof raw.cacheRead === "number" ? raw.cacheRead : null,
-    cacheWrite: typeof raw.cacheWrite === "number" ? raw.cacheWrite : null,
-    requests: 1,
-  };
-  // Pi's own price for the call: stored beside ours, and the estimate when no pricing row prices it.
-  const listed = raw.cost?.total;
-  if (typeof listed === "number" && Number.isFinite(listed)) usage.listPriceUsd = listed;
-  return { provider: String(message.provider ?? ""), model: String(message.model ?? ""), usage };
 }
 
 /** Advisors as read-only Pi sessions in `cwd` (`advisors.tools`), when this Pi's model runtime can be reached. */

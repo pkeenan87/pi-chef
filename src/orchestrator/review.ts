@@ -72,7 +72,7 @@ export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision
 async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string, plan: PlanDocument, decision: RoutingDecision | undefined, diff: string, askQuestions = false): Promise<ModelReview | undefined> {
   if (!ctx.config.review.model) return undefined;
   const skip = (error: string): ModelReview => ({ provider: decision?.provider ?? "none", model: decision?.model ?? "none", findings: [], truncated: false, error });
-  if (!ctx.chat) return skip("no model connection (only available inside a Pi session).");
+  if (!(ctx.reviewChat ?? ctx.chat)) return skip("no model connection (only available inside a Pi session).");
   if (!decision?.candidate) return skip(decision?.blocked ?? "no review model is available.");
   const exhausted = () => (budgetState(ctx, taskId).status === "hard" ? "the task or daily budget is exhausted." : undefined);
   const stop = exhausted();
@@ -90,7 +90,7 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
       return name ? [{ name, label: name, text }] : [];
     });
     const lines = sections.length > 0 ? await summarizeCutFiles(ctx, taskId, sections) : new Map<string, string>();
-    review = await runModelReview(ctx.chat, reviewCandidates(ctx, decision), {
+    review = await runModelReview((ctx.reviewChat ?? ctx.chat)!, reviewCandidates(ctx, decision), {
       notSent: lines.size > 0 ? sections.map((item) => `- ${item.name}${lines.has(item.name) ? `: ${lines.get(item.name)}` : ""}`).join("\n") : undefined,
       plan,
       diff,

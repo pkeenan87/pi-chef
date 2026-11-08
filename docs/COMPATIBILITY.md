@@ -123,6 +123,43 @@ Pi supports it.
 
 Isolated registry calls exist for the nested calls (advisors, the compaction summary, the `/review` model pass). They do not change the model under the user.
 
+## Ticket mode (`src/ticket-mode.ts`)
+
+The herdr runner starts a ticket child as `pi -ne -e <pi-chef>/src/ticket-mode.ts`. It relies on these parts of Pi's surface:
+
+- **`-e <file>` entry loading:** Pi loads a `.ts` extension file by path with built-in extensions off. Tests load it through `DefaultResourceLoader` `additionalExtensionPaths`.
+- **`tool_result` content replacement:** a handler returns `{ content, structuredContent }` to append a syntax note to an `edit` or `write` result. `structuredContent` is passed along because replacing `content` alone drops it. The `tool_call` event's `toolCallId` pairs the before and after states.
+- **`ctx.abort()` from `message_end`:** the turn budget aborts the run from that handler. `agent_start` and `agent_settled` (`event.aborted`) bound the run, and `agent_settled` is the final word on `aborted`.
+- **`pi.sendMessage(..., { deliverAs: "steer" })`** for the one steer at the limit.
+- **`user_bash` and `tool_call` (`bash`, `powershell`)** for the deny rules.
+- **`session_start`** (`reason: "startup" | "new" | …`, `SessionStartEvent`): ticket mode resets its turn count and status file on every one, which the review tab relies on after its `/new`.
+
+## Session files (`src/herdr/session-file.ts`)
+
+The herdr runner learns a ticket child's spend and its last answer from the child's Pi session files. Confirmed against Pi 1.2.0's `SessionManager` (`dist/core/session-manager.js`) and written back by its real `create`/`appendMessage`/`appendUsage`/`appendCompaction` in `tests/herdr-session-file.test.ts`:
+
+- **Files:** one `<timestamp>_<sessionId>.jsonl` per session in `--session-dir`; `/new` in the child starts another file in the same dir. JSON Lines, appended with `appendFileSync`. Pi creates the file only once the session holds a user or assistant message, then writes every entry so far in one go, so a reader can meet a missing file or a half-written last line.
+- **Header (line 1):** `{type: "session", version: 3, id, timestamp, cwd, parentSession?}`. `id` is the session id.
+- **Entries:** all have `type`, `id` (short, unique within the session, not across sessions), `parentId` (`null` or an entry id), `timestamp` (ISO string).
+- **`message`:** `{type: "message", message}`. An assistant `message` is pi-ai's `AssistantMessage`: `role: "assistant"`, `content` (parts: `text` with `text`, `thinking`, `toolCall`), `api`, `provider`, `model`, `usage` `{input, output, cacheRead, cacheWrite, totalTokens, cost: {input, output, cacheRead, cacheWrite, total}}`, `stopReason` (`pending`, `stop`, `length`, `toolUse`, `error`, `aborted`, `deferred`), `timestamp`. Other roles in the same entry type: `user`, `toolResult`.
+- **Pi's own calls:** `{type: "usage", kind, provider, model, usage, note?}` (cache warming); `{type: "compaction", summary, firstKeptEntryId, tokensBefore, details?, usage?, fromHook?, systemMessage?}`; `{type: "branch_summary", fromId, summary, usage?, fromHook?}`. Same as the entries `recordPiUsage` reads from `getEntries()` in the main session.
+- **Ledger id:** `pi-<sessionId>-<entryId>`, the one `recordPiUsage` uses, for assistant messages as well. Entry ids repeat across sessions, so the session id is part of the key.
+- **Not confirmed live:** (the file was complete at idle in the 2026-11-08 check below) what a real TUI child writes for an aborted or retried turn, and whether a written assistant message can carry `stopReason` `pending` or `deferred` (pi-ai's `StopReason` lists both besides `stop`, `length`, `toolUse`, `error`, `aborted`; `usageOfMessage` bills any value other than a zero-token `error`/`aborted` like a normal turn). Compaction and branch-summary entries carry no provider or model, so the ledger takes the runner's launch model, else the nearest preceding assistant message's (the shapes above are Pi's source; the fixtures use the real writer, not a running child).
+
+## Live check of the herdr mechanics (2026-11-08)
+
+Herdr mechanics only, not a `/build`. A script over the built `createHerdrClient` started one child the way `runInHerdr` does (`hc run --bg … -- env PI_CHEF_TICKET=99 PI_CHEF_STATUS=… PI_CHEF_MAX_TURNS=8 pi -ne -e src/ticket-mode.ts --model anthropic/claude-haiku-5-5 --session-dir …`, a throwaway git repo as cwd, the three labels, no notify) with Pi 1.5.0 and sent three messages (two model prompts, plus `/new`). Confirmed:
+
+- **Env reaches Pi:** the status file at `PI_CHEF_STATUS` appeared after the first turn with `{turns: 2, turnLimit: false, aborted: false}`. It does not exist right after startup (nothing writes it before a turn). Only the status path proves the env; `PI_CHEF_MAX_TURNS` was never reached, so it is not shown to bind.
+- **`waitIdle` after `hc run`:** returned `idle`, turn 0, once Pi was up. After a send it returned `done` (turn 1) only after the turn finished.
+- **Working soon after send:** the tab read `working` on the first poll that succeeded, 1087 ms after `hc send` returned (200 ms polls, each an `hc get`). No early idle was seen.
+- **Session file at idle:** one `*.jsonl` in `--session-dir` with model_change, thinking_level_change, system, user, assistant (`stopReason: toolUse`, tool `write`), toolResult, assistant (`stopReason: stop`). Assistant entries carried `provider: anthropic`, `model: claude-haiku-5-5` and `usage` with cost (0.000488525 and 0.00005037). A re-read 2 s later was identical. `lastAssistantText` gave `DONE`, and `hello.txt` held `hi`.
+- **`/new` through `client.command`:** the status file went back to `turns: 0`, so `session_start` fired in the child. No second session file existed right after `/new`; it appeared with the next message, with new session id and fresh entry ids.
+- **Deny hook live:** asked to run `git push origin main`, the child's bash returned `/build commits each ticket; do not push or switch branches during a ticket.`; the model then ran two read-only git commands. Nothing was pushed (the repo has no remote). The status after three turns of that session was `turns: 3`.
+- **Kill:** `hc kill` of the tab succeeded and `hc ls --label pi-chef.ticket=99` listed nothing afterwards.
+
+Not covered: the `/build` loop with the herdr runner, `PI_CHEF_MAX_TURNS` biting, `ctx.abort()` and the steer at the limit in a live child, `--outlive-parent` tabs found by label from a later Pi session, kill-then-run under the same name, and a reviewer on read-only tools.
+
 ## Assumptions that still need a live Pi session
 
 These are labeled assumptions. Unit tests cover the code around them; they do not boot the TUI.

@@ -1,15 +1,17 @@
 import type { TaskState } from "../src/domain.js";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseConfig } from "../src/config.js";
-import { bindWorkflow, currentWorkflow, registerWorkflow } from "../src/extension.js";
+import { bindHerdrClient, bindWorkflow, currentWorkflow, registerWorkflow } from "../src/extension.js";
 import type { Workflow } from "../src/orchestrator/service.js";
-import { addTask, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fakeHerdrClient, reviewerWrites, VERDICT, type FakeHerdrClientOptions, type FakeTab } from "./herdr-fake.js";
+import { addTask, checkRunner, contextOf, readyAuth, sampleTicket, tempRepo, ticketWorkflow, tieredYaml, workflow } from "./helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type ModelRef = { provider: string; id: string; thinking?: string };
@@ -27,6 +29,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   process.env.HOME = priorHome;
+  bindHerdrClient(undefined);
   bindWorkflow(undefined);
   delete slots[RESTORE_MODEL];
   delete slots[RESTORE_DONE];
@@ -252,6 +255,257 @@ describe("/build in a ticket subagent", () => {
     const { replaced, faux } = await build("session");
     expect(replaced()).toBe(1);
     expect(faux.state.callCount).toBe(0);
+  });
+});
+
+describe("/build in a herdr tab", () => {
+  const usage = { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  const reply = (text: string, model = "claude-sonnet-5-5") => ({ role: "assistant" as const, content: [{ type: "text" as const, text }], api: "anthropic-messages", provider: "anthropic", model, usage, stopReason: "stop" as const, timestamp: Date.now() });
+
+  /** The child's session file as Pi's real SessionManager writes it. */
+  function childWrites(dir: string, text: string, model?: string): SessionManager {
+    const sm = SessionManager.create("/work", dir);
+    sm.appendMessage({ role: "user", content: "ticket", timestamp: Date.now() } as never);
+    sm.appendMessage(reply(text, model) as never);
+    return sm;
+  }
+
+  async function build(options: { client?: FakeHerdrClientOptions; checksFail?: boolean; accountKey?: boolean; runner?: "herdr" | "subagent"; before?: (ctx: { cwd: string; sessions: string }) => void; herdrCommand?: string } = {}) {
+    let failing = options.checksFail ?? false;
+    const { cwd, app } = await ticketWorkflow([sampleTicket("01", { suggestedTier: "standard" })], { runner: checkRunner(async () => (failing ? { code: 1, stdout: "", stderr: "FAIL injected" } : { code: 0, stdout: "ok", stderr: "" })) });
+    app.reconfigure({
+      ...app.config,
+      // The test registry holds no account login; the review's chat path (like every chat path) refuses an account provider without one unless the key is allowed.
+      ...(options.accountKey ? { providers: { ...app.config.providers, anthropic: { ...app.config.providers.anthropic, apiKeyFallback: true } as never } } : {}),
+      isolation: { ...app.config.isolation, worktree: false, runner: options.runner ?? "herdr", ...(options.herdrCommand ? { herdrCommand: options.herdrCommand } : {}) },
+    });
+    const sessions = path.join(contextOf(app).store.taskDir(app.activeTaskId()!), "sessions");
+    options.before?.({ cwd, sessions });
+    const fake = fakeHerdrClient({
+      onSend: (tab, text) => {
+        writeFileSync(path.join(tab.options.cwd!, "f1.txt"), "x\n");
+        childWrites(tab.sessionDir, "Done.\n- [x] retry works");
+        void text;
+      },
+      ...options.client,
+    });
+    const commandsSeen: string[] = [];
+    bindHerdrClient((command) => (commandsSeen.push(command), fake.client));
+    const { commands, handlers } = fakePi();
+    bindWorkflow(app);
+    const runtime = await ModelRuntime.create({ authPath: path.join(process.env.HOME!, "auth.json"), modelsPath: null, refreshOnCreate: false });
+    const faux = fauxProvider({ provider: "anthropic", models: [{ id: "claude-sonnet-5-5" }, { id: "claude-opus-5-5" }] });
+    runtime.registerNativeProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage(fauxToolCall("write", { path: "f1.txt", content: "x\n" }), { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("Done.\n- [x] retry works"))]);
+    const notices: string[] = [];
+    let replaced = 0;
+    const ctx: Record<string, unknown> = {
+      cwd,
+      hasUI: true,
+      model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: new ModelRegistry(runtime),
+      ui: { notify: (m: string) => notices.push(m), setStatus() {}, setWidget() {}, confirm: async () => true },
+      sessionManager: { getSessionFile: () => undefined, getSessionId: () => "main", getEntries: () => [] },
+      async sendMessage() {},
+      async newSession() {
+        replaced += 1;
+        return { cancelled: true };
+      },
+    };
+    handlers.get("session_start")!({}, ctx);
+    const run = () => commands.get("build")!.handler("", ctx);
+    await run();
+    return { app, fake, faux, cwd, sessions, notices, commandsSeen, replaced: () => replaced, run, setChecks: (fail: boolean) => void (failing = fail) };
+  }
+
+  const ticketRows = (app: Awaited<ReturnType<typeof build>>["app"]) => app.store.readLedger().filter((row) => row.reason.includes("ticket 01"));
+
+  it("runs the ticket in a tab, ledgers the child's turns, commits it and closes the tab", async () => {
+    const { app, fake, faux, replaced, cwd } = await build();
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(state.ticketRuns!["01"]).toMatchObject({ status: "done" });
+    expect(replaced()).toBe(0);
+    expect(faux.state.callCount).toBe(0);
+    expect(fake.tabs).toHaveLength(1);
+    const tab = fake.tabs[0]!;
+    expect(tab.killed).toBe(true);
+    expect(tab.sends).toHaveLength(1);
+    expect(readFileSync(path.join(cwd, "f1.txt"), "utf8")).toBe("x\n");
+    // argv: the env wrapper (no env option in hc run), the ticket-mode extension, the model, a session dir in the workspace.
+    const argv = tab.options.argv;
+    expect(argv.slice(0, 4)).toEqual(["env", "PI_CHEF_TICKET=01", expect.stringMatching(/^PI_CHEF_STATUS=.*01-1\.status\.json$/), expect.stringMatching(/^PI_CHEF_MAX_TURNS=\d+$/)]);
+    expect(argv.slice(4, 8)).toEqual(["pi", "-ne", "-e", expect.stringMatching(/src\/ticket-mode\.ts$/)]);
+    expect(path.isAbsolute(argv[7]!)).toBe(true);
+    expect(tab.model).toBe("anthropic/claude-sonnet-5-5");
+    expect(tab.sessionDir).toContain(path.join("sessions", "01-1"));
+    expect(tab.sessionDir.startsWith(cwd)).toBe(true);
+    expect(tab.statusFile!.startsWith(cwd)).toBe(true);
+    expect(tab.options).toMatchObject({ cwd, labels: { "herdr.space": "sp1", "pi-chef.ticket": "01" } });
+    expect(tab.options.labels!["herdr.tab"]).toBeTruthy();
+    expect(tab.options.notify).toBeFalsy();
+    expect(tab.options.outliveParent).toBeFalsy();
+    const rows = ticketRows(app).filter((row) => row.model === "claude-sonnet-5-5" && row.provider === "anthropic");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]!.id).toMatch(/^pi-/);
+  });
+
+  it("leaves a failed ticket's tab open and reuses it for the retry; the next /build opens a new tab and sweeps the old dir", async () => {
+    const { app, fake, run, setChecks, sessions, cwd } = await build({ checksFail: true });
+    expect(app.store.load(app.activeTaskId()!)!.ticketRuns!["01"]!.status).not.toBe("done");
+    // First turn plus one check retry, both on the same tab; the tab stays for the person to read.
+    expect(fake.tabs).toHaveLength(1);
+    expect(fake.tabs[0]!.sends).toHaveLength(2);
+    expect(fake.tabs[0]!.killed).toBe(false);
+    const before = ticketRows(app).length;
+    expect(before).toBeGreaterThan(0);
+    // A crash left an entry no read ledgered: the next attempt's sweep finds it.
+    const late = childWrites(path.join(sessions, "01-1"), "late reply");
+    setChecks(false);
+    // The failed attempt's change is dropped, or /build would treat the dirty tree as a hand fix and commit it with no model.
+    rmSync(path.join(cwd, "f1.txt"));
+    await run();
+    expect(fake.tabs.length).toBeGreaterThanOrEqual(2);
+    expect(fake.tabs[0]!.killed).toBe(false);
+    expect(fake.tabs[fake.tabs.length - 1]!.sessionDir).toMatch(/01-[2-9]$/);
+    expect(fake.tabs[fake.tabs.length - 1]!.killed).toBe(true);
+    expect(ticketRows(app).length).toBeGreaterThan(before);
+    expect(app.store.readLedger().some((row) => row.id.startsWith(`pi-${late.getSessionId()}-`) && row.reason.includes("ticket 01"))).toBe(true);
+    // Never double counted: every ledger id is unique.
+    const ids = app.store.readLedger().map((row) => row.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("passes isolation.herdrCommand to the client, expanding a leading ~/", async () => {
+    // One client for the ticket runner and one for the review tab, both made from the configured command.
+    const seen = async (options?: Parameters<typeof build>[0]) => [...new Set((await build(options)).commandsSeen)];
+    expect(await seen()).toEqual(["hc"]);
+    expect(await seen({ herdrCommand: "~/bin/hc" })).toEqual([path.join(homedir(), "bin/hc")]);
+    expect(await seen({ herdrCommand: "/opt/herdr/hc" })).toEqual(["/opt/herdr/hc"]);
+  });
+
+  it("rejects a bad isolation.herdrCommand or runner with a message that names the key", () => {
+    expect(() => parseConfig("isolation:\n  herdrCommand: \"hc --evil\"\n")).toThrow(/isolation\.herdrCommand.*command name or path without spaces/);
+    expect(() => parseConfig("isolation:\n  herdrCommand: 5\n")).toThrow(/isolation\.herdrCommand/);
+    expect(() => parseConfig("isolation:\n  runner: tabs\n")).toThrow(/isolation\.runner.*subagent, session or herdr/);
+    expect(parseConfig("isolation:\n  runner: herdr\n  herdrCommand: ~/bin/hc\n").isolation).toMatchObject({ runner: "herdr", herdrCommand: "~/bin/hc" });
+  });
+
+  it("names the tab chef-<task name>-<ticket>-<n>", async () => {
+    const { fake, app } = await build();
+    const name = fake.tabs[0]!.options.name!;
+    expect(name).toMatch(/^chef-[a-z0-9_-]+-01-1$/);
+    expect(name.length).toBeLessThanOrEqual(32);
+    expect(name).toContain(app.store.load(app.activeTaskId()!)!.name!.slice(0, 8));
+    expect(fake.tabs[0]!.options.labels!["herdr.tab"]).toBe(name);
+  });
+
+  it("sends the per-ticket review through the one review tab, and the ledger rows are the caller's alone", async () => {
+    const { app, fake, faux, cwd } = await build({
+      accountKey: true,
+      client: {
+        onSend: (tab) => {
+          if (tab.options.labels?.["pi-chef.role"] === "review") return void reviewerWrites(tab.sessionDir, VERDICT);
+          writeFileSync(path.join(tab.options.cwd!, "f1.txt"), "x\n");
+          childWrites(tab.sessionDir, "Done.\n- [x] retry works");
+        },
+      },
+    });
+    const state = app.store.load(app.activeTaskId()!)!;
+    expect(state.ticketRuns!["01"]).toMatchObject({ status: "done" });
+    const review = fake.tabs.filter((tab) => tab.options.labels?.["pi-chef.role"] === "review");
+    expect(review).toHaveLength(1);
+    expect(review[0]!.commands).toEqual(["/new"]);
+    expect(review[0]!.sends[0]).toMatch(/^Review request .+: read .+\.md and answer exactly as it asks\.$/);
+    expect(review[0]!.options).toMatchObject({ name: "chef-review", outliveParent: true, cwd });
+    expect(review[0]!.killed).toBe(false); // it outlives the ticket
+    expect(state.ticketRuns!["01"]!.reviews?.[0]?.verdict).toBe("pass");
+    expect(faux.state.callCount).toBe(0); // the plain chat made no review call
+    const rows = app.store.readLedger();
+    const reviewRows = rows.filter((row) => row.reason.includes("ticket review") || row.reason.includes("review"));
+    expect(reviewRows.some((row) => row.model === "claude-opus-5-5" && !row.id.startsWith("pi-"))).toBe(true);
+    // The reviewer's assistant messages are not ledgered a second time from the session files.
+    expect(rows.filter((row) => row.id.startsWith("pi-") && row.model === "claude-opus-5-5")).toEqual([]);
+    const ids = rows.map((row) => row.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("does not bind reviewChat for the other runners", async () => {
+    const { app, fake } = await build({ runner: "subagent" });
+    expect(contextOf(app).reviewChat).toBeUndefined();
+    expect(fake.tabs).toHaveLength(0);
+  });
+
+  it("ends the ticket unstarted with hc's message when the tab cannot be started (duplicate name)", async () => {
+    const { app, fake, notices } = await build({ client: { failRun: () => "name 'chef-x-01-1' is already in use" } });
+    expect(fake.tabs).toHaveLength(0);
+    expect(notices.some((n) => n.startsWith("Ticket 01 stopped: run --bg failed: name 'chef-x-01-1' is already in use"))).toBe(true);
+    const run = app.store.load(app.activeTaskId()!)!.ticketRuns?.["01"];
+    expect(run?.status === "done").toBe(false);
+    expect(run?.attempts ?? 0).toBe(0);
+  });
+
+  it("falls back to the subagent with a notice when pi-chef is not in herdr", async () => {
+    const { app, fake, faux, notices } = await build({ client: { self: { problem: "HC_TERMINAL_ID is not set; pi-chef is not running inside a herdr terminal" } } });
+    expect(fake.tabs).toHaveLength(0);
+    expect(faux.state.callCount).toBe(2);
+    expect(app.store.load(app.activeTaskId()!)!.ticketRuns!["01"]).toMatchObject({ status: "done" });
+    expect(notices.some((n) => n.includes("herdr not available: HC_TERMINAL_ID is not set") && n.includes("running the ticket in a subagent"))).toBe(true);
+  });
+
+  it("turns a turnLimit status into TURN_LIMIT and leaves the tab open", async () => {
+    const { app, fake } = await build({
+      client: {
+        onSend: (tab) => {
+          writeFileSync(path.join(tab.options.cwd!, "f1.txt"), "x\n");
+          childWrites(tab.sessionDir, "I ran out of turns");
+          writeFileSync(tab.statusFile!, JSON.stringify({ turns: 105, turnLimit: true, aborted: true }));
+        },
+      },
+    });
+    const run = app.store.load(app.activeTaskId()!)!.ticketRuns!["01"]!;
+    expect(run.status).not.toBe("done");
+    expect(run.failedBy).toBe("turns");
+    expect(fake.tabs[0]!.killed).toBe(false);
+  });
+
+  it("stops cleanly on a status error, before the ticket starts when the child failed at startup", async () => {
+    const startup = await build({
+      client: {
+        onRun: (tab: FakeTab) => {
+          mkdirSync(path.dirname(tab.statusFile!), { recursive: true });
+          writeFileSync(tab.statusFile!, JSON.stringify({ error: "providers.foundry: bad endpoint" }));
+        },
+      },
+    });
+    expect(startup.fake.tabs[0]!.sends).toEqual([]);
+    expect(startup.fake.tabs[0]!.killed).toBe(false);
+    expect(startup.app.store.load(startup.app.activeTaskId()!)!.ticketRuns?.["01"]?.status ?? "pending").not.toBe("done");
+    expect(startup.notices.some((n) => n.includes("bad endpoint"))).toBe(true);
+
+    // An error reported during a turn stops the build; the child's spend is still ledgered.
+    const mid = await build({
+      client: {
+        onSend: (tab) => {
+          childWrites(tab.sessionDir, "partial");
+          writeFileSync(tab.statusFile!, JSON.stringify({ error: "model call failed" }));
+        },
+      },
+    });
+    expect(mid.app.store.load(mid.app.activeTaskId()!)!.ticketRuns!["01"]!.status).not.toBe("done");
+    expect(mid.fake.tabs[0]!.killed).toBe(false);
+    expect(ticketRows(mid.app).length).toBeGreaterThan(0);
+  });
+
+  it("stops when the tab dies mid-send and keeps what it spent", async () => {
+    const { app, fake } = await build({
+      client: {
+        onSend: (tab) => void childWrites(tab.sessionDir, "half done"),
+        waitIdle: (_tab, wait) => (wait === 1 ? { status: "idle", exitCode: null, timedOut: false } : { status: "ended", exitCode: 1, timedOut: false }),
+      },
+    });
+    expect(app.store.load(app.activeTaskId()!)!.ticketRuns!["01"]!.status).not.toBe("done");
+    expect(fake.tabs[0]!.killed).toBe(false);
+    expect(ticketRows(app).length).toBeGreaterThan(0);
   });
 });
 

@@ -215,4 +215,40 @@ describe("/build in a worktree", () => {
     expect(off.load().build!.worktree).toBeUndefined();
     expect(off.host.entered).toEqual([]);
   });
+
+  it("commits a ticket whose work is done in the worktree from outside the session (a herdr tab)", async () => {
+    const t = await worktreeTask({ tickets: 1 });
+    const mainBefore = await git(t.cwd, "status", "--porcelain");
+    const headBefore = await git(t.cwd, "rev-parse", "HEAD");
+    const baseBranch = await git(t.cwd, "branch", "--show-current");
+    const childCwd: string[] = [];
+    // The child is another process with its own cwd: it knows only the build's recorded worktree, never the session's Workflow.
+    t.driver.fresh = async (_model, run) => {
+      const dir = t.load().build!.worktree!;
+      await run({
+        async send() {
+          childCwd.push(dir);
+          writeFileSync(path.join(dir, "child.txt"), "from the tab\n");
+          return { lastText: "Done.\n- [x] retry works", aborted: false };
+        },
+      });
+    };
+    const result = await t.run();
+    expect(result.ok, result.text).toBe(true);
+    const build = t.load().build!;
+    expect(childCwd).toEqual([build.worktree]);
+    // The commit is on the build branch, made in the worktree, with the ticket's subject and the child's file.
+    expect(await git(build.worktree!, "branch", "--show-current")).toBe(build.branch);
+    expect(await git(build.worktree!, "log", "-1", "--format=%s")).toBe("01: Ticket 01");
+    expect(await git(t.cwd, "log", "-1", "--format=%s", build.branch)).toBe("01: Ticket 01");
+    expect(await git(build.worktree!, "show", "--name-only", "--format=", "HEAD")).toBe("child.txt");
+    expect(await git(build.worktree!, "status", "--porcelain")).toBe("");
+    // The checks ran in the worktree, and the main checkout is untouched.
+    expect(t.ran.length).toBeGreaterThan(0);
+    expect(t.ran.every((line) => line.endsWith(` in ${build.worktree}`))).toBe(true);
+    expect(await git(t.cwd, "branch", "--show-current")).toBe(baseBranch);
+    expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(headBefore);
+    expect(await git(t.cwd, "status", "--porcelain")).toBe(mainBefore);
+    expect(existsSync(path.join(t.cwd, "child.txt"))).toBe(false);
+  });
 });

@@ -147,5 +147,6 @@
 # isolation:
 #   worktree: true              # /build works in a git worktree per task; false works in the main checkout
 #   dir: ""                     # where the worktrees go, relative to the project; empty for ../<repo>.worktrees
-#   runner: subagent            # subagent: each ticket runs in a session beside yours | session: Pi replaces your session per ticket
+#   runner: subagent            # subagent: each ticket runs in a session beside yours | session: Pi replaces your session per ticket | herdr: each ticket is its own pi process in a herdr tab
+#   herdrCommand: hc            # the herdr CLI the herdr runner calls (a leading ~/ is expanded to your home directory)
 # workspaceDir: .pi-workflows   # where task state, the ledger and metrics live, in each project

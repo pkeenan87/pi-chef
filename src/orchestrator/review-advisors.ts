@@ -116,7 +116,7 @@ async function resolveReview(
   ctx: WorkflowContext,
   input: { taskId: string; taskType: string; decision: RoutingDecision; candidates: { provider: string; model: string }[]; packet: string; results: AdvisorOpinion[]; progress: (line: string) => void },
 ): Promise<{ resolution?: NonNullable<ModelReview["resolution"]>; error?: string; costUsd: number | null }> {
-  const chat = ctx.chat!;
+  const chat = (ctx.reviewChat ?? ctx.chat)!;
   const user = redact([input.packet, "", "# Advisors", ...input.results.map(advisorBlock)].join("\n\n"));
   const advisorModels = input.results.map((item) => item.model);
   const attempts = input.candidates.length > 1 ? [input.candidates[0]!, input.candidates[1]!] : [input.candidates[0]!, input.candidates[0]!];

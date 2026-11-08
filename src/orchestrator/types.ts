@@ -13,6 +13,8 @@ export interface WorkflowBinding {
   chat?: ChatFn;
   /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
   advisorChat?: ChatFn;
+  /** Review calls through the herdr review tab (`isolation.runner: herdr`); unset otherwise. */
+  reviewChat?: ChatFn;
   /** Pi's model registry for the live session (see WorkflowContext.registry). Set on every bind. */
   registry?: UsableRegistry;
   /** Persistent routing status line (for example ctx.ui.setStatus("chef", text)). */
@@ -73,6 +75,8 @@ export interface WorkflowOptions {
   chat?: ChatFn;
   /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
   advisorChat?: ChatFn;
+  /** Review calls through the herdr review tab (`isolation.runner: herdr`); unset otherwise. */
+  reviewChat?: ChatFn;
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   startTurn?: (text: string) => void;
