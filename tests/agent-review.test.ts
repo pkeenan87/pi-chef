@@ -46,7 +46,7 @@ describe("/review with an agent", () => {
     const tab = t.fake.tabs[0]!;
     expect(t.fake.tabs).toHaveLength(1);
     expect(tab.options.cwd).toBe(t.app.cwd);
-    expect(tab.options.argv[0]).toBe("gemini");
+    expect(tab.options.argv.slice(0, 3)).toEqual(["env", `PATH=${process.env.PATH}`, "gemini"]);
     expect(tab.killed).toBe(true);
     const prompt = tab.sends[0]!;
     expect(prompt).toContain("Do not modify any file");
@@ -193,7 +193,7 @@ describe("/review --with", () => {
     const t = await agentReview({ review: "anthropic/claude-opus-5-5", chat });
     expect((await t.run("--with agent:gemini/gemini-3")).ok).toBe(true);
     expect(models).toEqual([]);
-    expect(t.fake.tabs[0]!.options.argv).toEqual(["gemini", "--approval-mode", "auto_edit", "-m", "gemini-3"]);
+    expect(t.fake.tabs[0]!.options.argv).toEqual(["env", `PATH=${process.env.PATH}`, "gemini", "--approval-mode", "auto_edit", "-m", "gemini-3"]);
   });
 
   it("forces the model pass with --with when review.model is false, and stays off without it", async () => {

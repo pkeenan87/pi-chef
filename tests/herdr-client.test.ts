@@ -11,6 +11,14 @@ describe("herdr client errors", () => {
     expect(error).toBeInstanceOf(HerdrError);
     expect(error.kind).toBe("status_mismatch");
   });
+
+  it("reads hc's error from stderr too, so the person sees the reason instead of 'exit 1'", async () => {
+    const stderr = JSON.stringify({ error: { kind: "spawn_failed", message: 'cannot start "codex": No such file or directory (os error 2)' } });
+    const { exec } = fakeHerdr({ run: [{ stdout: "", stderr, code: 1 }] });
+    const error = (await createHerdrClient({ exec }).run({ argv: ["codex"] }).catch((e: unknown) => e)) as HerdrError;
+    expect(error.message).toMatch(/cannot start "codex"/);
+    expect(error.kind).toBe("spawn_failed");
+  });
 });
 
 describe("herdr client argv", () => {

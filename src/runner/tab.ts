@@ -71,6 +71,20 @@ export interface OpenTabInput extends TabTimings {
   progress(text: string): void;
   /** What to say, once per wait, when the program is blocked in this tab. */
   blockedNotice: string;
+  /** The PATH the program is started with. Default: pi-chef's own `PATH`. */
+  path?: string;
+}
+
+/**
+ * The argv with pi-chef's PATH put in front through `env`. herdr starts a tab with its server's environment, not ours, and
+ * a server started by launchd (macOS) has only /usr/bin:/bin:/usr/sbin:/sbin: an agent installed by fnm, nvm, npm or
+ * Homebrew would not be found ("cannot start codex"), nor the `node` its script needs. An argv that is already an `env`
+ * wrapper gets the PATH as its first assignment.
+ */
+export function withPath(argv: string[], path: string | undefined): string[] {
+  if (!path || path.includes("\n")) return argv;
+  const assignment = `PATH=${path}`;
+  return argv[0] === "env" ? ["env", assignment, ...argv.slice(1)] : ["env", assignment, ...argv];
 }
 
 export interface Tab {
@@ -94,7 +108,7 @@ export async function openTab(input: OpenTabInput): Promise<Tab> {
   const now = input.now ?? Date.now;
   const turnTimeoutMs = input.turnTimeoutMs ?? TURN_TIMEOUT_MS;
   const readyTimeoutMs = input.readyTimeoutMs ?? READY_TIMEOUT_MS;
-  const address = await client.run({ argv: input.argv, cwd: input.cwd, name: input.name, labels: { "herdr.space": input.space, "herdr.tab": input.name, ...input.labels } });
+  const address = await client.run({ argv: withPath(input.argv, "path" in input ? input.path : process.env.PATH), cwd: input.cwd, name: input.name, labels: { "herdr.space": input.space, "herdr.tab": input.name, ...input.labels } });
 
   /** Follows `current` until the tab is neither working nor blocked, or `limitMs` (counted from `started`) has passed. */
   async function settle(current: WaitResult, started: number, limitMs: number): Promise<WaitResult> {

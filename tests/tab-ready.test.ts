@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { openTab, READY_NUDGE_MS } from "../src/runner/tab.js";
+import { openTab, READY_NUDGE_MS, withPath } from "../src/runner/tab.js";
 import { fakeHerdrClient } from "./herdr-fake.js";
 
 const base = { space: "s1", cwd: "/repo", argv: ["claude"], name: "chef-t-01-1-abcd", blockedNotice: "Ticket 01 is waiting for you in tab chef-t-01-1-abcd" };
@@ -27,5 +27,18 @@ describe("openTab ready wait", () => {
     const lines: string[] = [];
     await openTab({ ...base, client: fakeHerdrClient().client, progress: (text) => lines.push(text) });
     expect(lines).toEqual([]);
+  });
+});
+
+describe("withPath", () => {
+  it("starts the program with pi-chef's PATH (a launchd herdr server has only the system dirs)", async () => {
+    const { client, tabs } = fakeHerdrClient();
+    await openTab({ ...base, argv: ["codex", "-m", "x"], client, progress: () => {}, path: "/home/me/.fnm/bin:/usr/bin" });
+    expect(tabs[0].options.argv).toEqual(["env", "PATH=/home/me/.fnm/bin:/usr/bin", "codex", "-m", "x"]);
+  });
+
+  it("joins an existing env wrapper, and leaves argv alone without a PATH", () => {
+    expect(withPath(["env", "A=1", "pi"], "/p")).toEqual(["env", "PATH=/p", "A=1", "pi"]);
+    expect(withPath(["claude"], undefined)).toEqual(["claude"]);
   });
 });
