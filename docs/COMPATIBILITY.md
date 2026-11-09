@@ -69,6 +69,7 @@ Unit tests cover the code around these with fakes; none ran against a live servi
 - A ticket child's session file after an aborted or retried turn, and whether an assistant message can carry `stopReason` `pending` or `deferred`.
 - That `hc send` of a long multi-line prompt pastes cleanly into each agent (it did for Pi), and that each agent reports `blocked` when it asks for approval.
 - That the Codex rollout is flushed by the time the agent reports idle (a late flush lands on the next read or is missed on the last), and that Claude Code's `output_tokens` is final on long multi-block turns (the meter takes the largest per field).
+- The outside-chef sweep against real Claude Code and Codex logs: that line timestamps and `message.id` repeats behave as the fixtures assume, and that a session running while `/cost` reads is counted once and completely on the next read.
 - Each built-in agent's default command against a real ticket.
 - The `local` registration (including the Qwen 3.8 27B preset) against a live llama-server through `registerProvider`.
 - `getArgumentCompletions` in the live TUI menu.

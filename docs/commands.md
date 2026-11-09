@@ -57,6 +57,8 @@ Spend is ledgered per ticket. Claude Code and Codex are metered from their own l
 
 Reviews what differs from the base (the build's recorded base, else the default branch): commits ahead of the merge-base plus uncommitted and untracked changes. Works after `/build`, after chat fixes, or with no task (the report goes under `.pi-workflows/reports/`). With nothing changed it says so and stops.
 
+With an active task, Claude Code and Codex use in the repo that pi-chef did not start is counted first (see `/cost`).
+
 1. `setup`, then the checks (`config.checks`, else the plan's ticket checks).
 2. A static scan of the added lines (secrets, auth bypass, `eval`, TODO/FIXME).
 3. A model pass (`models.review`, off with `review.model: false`): findings rated like the ticket review, those below risk 5 dropped. A diff over `review.maxDiffChars` is split by file into up to `review.maxChunks` calls.
@@ -67,7 +69,7 @@ Reviews what differs from the base (the build's recorded base, else the default 
 
 ## /cost
 
-Spend by model, job and task against the budgets. A cost that could not be priced shows as unknown, never $0. `/cost json` and `/cost csv` write the ledger to `.pi-workflows/reports/`.
+Spend by model, job and task against the budgets. Claude Code and Codex use in this repo that pi-chef did not start (for example `hc run claude` from the chat) is counted first, under the job "outside chef"; it starts counting when the task is created, or at the first `/cost`, `/review` or `/build` of a task that predates this. A cost that could not be priced shows as unknown, never $0. `/cost json` and `/cost csv` write the ledger to `.pi-workflows/reports/`.
 
 ## Status line
 

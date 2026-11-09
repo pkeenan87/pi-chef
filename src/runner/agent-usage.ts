@@ -48,6 +48,8 @@ export interface AgentMeterOptions {
   cwd: string;
   /** Replaces the home directory the logs are looked for under (tests). */
   home?: string;
+  /** Called with a log file and the byte offset `collect()` has read it to (the per-task watermark follows it). */
+  onConsumed?: (file: string, offset: number) => void;
 }
 
 /** The agents that have a reader, with the provider their usage is priced under. */
@@ -133,8 +135,11 @@ function* lines(buffer: Buffer): Generator<{ start: number; value: unknown }> {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 
-/** Claude Code messages in a file that begin at or after byte `from`, by message id (the largest value per field). */
-function claudeMessages(buffer: Buffer, from: number): Map<string, Found> {
+/** Whether a line is already accounted for: it takes the line's start offset and its parsed value. */
+type Before = (start: number, value: Record<string, unknown>) => boolean;
+
+/** Claude Code messages in a file whose lines are not `before`, by message id (the largest value per field). */
+function claudeMessages(buffer: Buffer, before: Before): Map<string, Found> {
   const earlier = new Set<string>();
   const found = new Map<string, Found>();
   for (const { start, value } of lines(buffer)) {
@@ -142,7 +147,7 @@ function claudeMessages(buffer: Buffer, from: number): Map<string, Found> {
     const message = value.message;
     const id = typeof message.id === "string" ? message.id : undefined;
     if (!id) continue;
-    if (start < from) {
+    if (before(start, value)) {
       earlier.add(id);
       continue;
     }
@@ -162,8 +167,8 @@ function claudeMessages(buffer: Buffer, from: number): Map<string, Found> {
   return found;
 }
 
-/** A Codex rollout's spend since byte `from`: the last running total minus the one at `from`. Undefined for another directory's session. */
-function codexSession(buffer: Buffer, from: number, repos: string[]): Found | undefined {
+/** A Codex rollout's spend after the lines that are `before`: the last running total minus the one at the boundary. Undefined for another directory's session. */
+function codexSession(buffer: Buffer, before: Before, repos: string[]): Found | undefined {
   let cwd: string | undefined;
   let model: string | undefined;
   let base: Totals = ZERO;
@@ -178,7 +183,7 @@ function codexSession(buffer: Buffer, from: number, repos: string[]): Found | un
       const total = payload.info.total_token_usage;
       const cached = num(total.cached_input_tokens);
       const now: Totals = { input: Math.max(0, num(total.input_tokens) - cached), output: num(total.output_tokens), cacheRead: cached, cacheWrite: 0, requests: 0 };
-      if (start < from) base = now;
+      if (before(start, value)) base = now;
       else if (now.input !== last.input || now.output !== last.output || now.cacheRead !== last.cacheRead) requests += 1;
       last = now;
     }
@@ -193,6 +198,61 @@ function samePath(a: string, b: string): boolean {
   return strip(a) === strip(b);
 }
 
+/** The agent's log files for the repo (its path forms `repos`) with their sizes; a missing directory is no files. */
+export function listAgentLogs(reader: "claude" | "codex", home: string, repos: string[]): Snapshot {
+  if (reader === "claude") {
+    const out: Snapshot = new Map();
+    for (const repo of repos) jsonlFiles(path.join(home, ".claude", "projects", claudeProjectSlug(repo)), (name) => name.endsWith(".jsonl"), 3, out);
+    return out;
+  }
+  return jsonlFiles(path.join(home, ".codex", "sessions"), (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"), 5);
+}
+
+export { pathForms as repoPathForms };
+
+/**
+ * What a log file holds past a watermark. Lines that start before `offset`, or are stamped before `since`, are already
+ * accounted for: a Claude message id seen in them is not counted again, and a Codex total in them is the base of the
+ * delta. Only whole lines are read; `end` is where the next read starts.
+ */
+export function readAgentLog(reader: "claude" | "codex", file: string, from: { offset: number; since?: string; repos: string[] }): { calls: AgentCall[]; end: number } | undefined {
+  let buffer: Buffer;
+  try {
+    buffer = readFileSync(file);
+  } catch {
+    return undefined;
+  }
+  const end = buffer.length > 0 && buffer[buffer.length - 1] !== 10 ? buffer.lastIndexOf(10) + 1 : buffer.length;
+  buffer = buffer.subarray(0, end);
+  const since = from.since ? Date.parse(from.since) : NaN;
+  const before: Before = (start, value) => {
+    if (start < from.offset) return true;
+    const at = typeof value.timestamp === "string" ? Date.parse(value.timestamp) : NaN;
+    return Number.isFinite(since) && Number.isFinite(at) && at < since;
+  };
+  const found: Found[] = [];
+  if (reader === "claude") found.push(...claudeMessages(buffer, before).values());
+  else {
+    const session = codexSession(buffer, before, from.repos);
+    if (session) found.push(session);
+  }
+  const merged = new Map<string, AgentCall>();
+  for (const item of found) {
+    const { input, output, cacheRead, cacheWrite, requests } = item.totals;
+    if (input + output + cacheRead + cacheWrite === 0) continue;
+    const name = `${item.provider}/${item.model}`;
+    const sum = merged.get(name);
+    merged.set(name, {
+      provider: item.provider,
+      model: item.model,
+      usage: sum
+        ? { input: sum.usage.input! + input, output: sum.usage.output! + output, cacheRead: sum.usage.cacheRead! + cacheRead, cacheWrite: sum.usage.cacheWrite! + cacheWrite, requests: sum.usage.requests + requests }
+        : { input, output, cacheRead, cacheWrite, requests },
+    });
+  }
+  return { calls: [...merged.values()].map((call) => ({ ...call, usage: { ...call.usage, requests: Math.max(1, call.usage.requests) } })), end };
+}
+
 /**
  * A meter for `agent` in `options.cwd`, snapshotted now (call it before the agent's tab opens). Undefined when the agent
  * has no reader: its usage cannot be metered.
@@ -202,14 +262,7 @@ export function createAgentMeter(agent: string, options: AgentMeterOptions): Age
   if (!reader) return undefined;
   const home = options.home ?? homedir();
   const repos = pathForms(options.cwd);
-  const list = (): Snapshot => {
-    if (reader === "claude") {
-      const out: Snapshot = new Map();
-      for (const repo of repos) jsonlFiles(path.join(home, ".claude", "projects", claudeProjectSlug(repo)), (name) => name.endsWith(".jsonl"), 3, out);
-      return out;
-    }
-    return jsonlFiles(path.join(home, ".codex", "sessions"), (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"), 5);
-  };
+  const list = (): Snapshot => listAgentLogs(reader, home, repos);
   const snapshot = list();
   /** Spend per message id (Claude) or per rollout file (Codex) already handed out. */
   const reported = new Map<string, Totals>();
@@ -228,9 +281,10 @@ export function createAgentMeter(agent: string, options: AgentMeterOptions): Age
             continue;
           }
           const from = was ?? 0;
-          if (reader === "claude") for (const [id, found] of claudeMessages(buffer, from)) current.set(`${id}`, found);
+          options.onConsumed?.(file, buffer.length);
+          if (reader === "claude") for (const [id, found] of claudeMessages(buffer, (start) => start < from)) current.set(`${id}`, found);
           else {
-            const found = codexSession(buffer, from, repos);
+            const found = codexSession(buffer, (start) => start < from, repos);
             if (found) current.set(file, found);
           }
         }

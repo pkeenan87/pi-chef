@@ -44,6 +44,8 @@ export interface AgentTicketHost {
   sessionsRoot(): string | undefined;
   /** Ledgers an agent's usage under the ticket. */
   ledgerAgent(entries: readonly AgentLedgerEntry[], ticketId: string): void;
+  /** The meter has read an agent log file to this byte offset (the outside-chef sweep starts there). */
+  agentLogRead?(file: string, offset: number): void;
   /** HEAD of the checkout. */
   head(): Promise<string | undefined>;
   /** The checked-out branch ("HEAD" when detached). */
@@ -77,7 +79,7 @@ export async function runAgentTicket(input: AgentTicketInput, run: (session: Chu
   let tab: Tab | undefined;
   try {
     // Before the tab opens, so everything the agent writes after is new.
-    const meter: AgentMeter | undefined = createAgentMeter(input.agent.name, { cwd: input.cwd, home: input.home });
+    const meter: AgentMeter | undefined = createAgentMeter(input.agent.name, { cwd: input.cwd, home: input.home, onConsumed: host.agentLogRead });
     const name = tabName(host.taskName(), ticketId, input.attempt, (input.now ?? Date.now)());
     const root = host.sessionsRoot();
     const summaryFile = root ? path.resolve(root, `${ticketId}-${input.attempt}.summary.md`) : undefined;

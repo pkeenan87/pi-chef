@@ -15,6 +15,7 @@ import { findingsTable, reviewItems, reviewMarkdown, type ReviewItem, type Revie
 import { costLabel, reviewLabel } from "./build.js";
 import { announce, reviewModel, routeFor, type Route } from "./routing.js";
 import { carriedFindings } from "./ticket-review.js";
+import { sweepAgentLogs } from "./agent-sweep.js";
 import { runAgentReview, type ReviewAgent } from "./agent-review.js";
 import { splitCheckLine } from "./tickets.js";
 
@@ -199,6 +200,7 @@ async function runReview(ctx: WorkflowContext, override?: TicketModel): Promise<
   // Workflow state is not the user's code: it stays out of the review and out of every model packet.
   const rawDiff = await ctx.git.workingDiff(ref, excludedPaths(ctx));
   if (!rawDiff.trim()) return done(`Nothing to review: no changes against ${base}.`);
+  if (state) sweepAgentLogs(ctx, state.taskId);
   const exhausted = gateBudget(ctx, taskId);
   if (exhausted) return exhausted;
 

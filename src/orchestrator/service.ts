@@ -276,6 +276,12 @@ export class Workflow {
     return recordAgentUsage(this.ctx, input);
   }
 
+  /** A ticket meter has read an agent log to `offset`: the active task's watermark moves there so the sweep skips it. */
+  advanceAgentLog(file: string, offset: number): void {
+    const taskId = this.store.readActive();
+    if (taskId) this.store.advanceAgentLog(taskId, file, offset);
+  }
+
   /** Ledgers the calls Pi made on its own (cache warming, its own compaction and branch summaries) from the session file. */
   recordPiUsage(input: Parameters<typeof recordPiUsage>[1]): CostRecord[] {
     return recordPiUsage(this.ctx, input);

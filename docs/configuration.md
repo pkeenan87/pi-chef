@@ -71,7 +71,7 @@ The defaults let the agent edit files but still ask for risky actions; none uses
 
 Hard stops, in USD. A prompt, ticket or review call does not start at the limit.
 
-Budgets count every priced call: Pi models (including subscription logins) and metered agents (Claude Code, Codex) are priced from `pricing`, so with API rates there they count as API-equivalent spend. Raise the budgets, or give a subscription model a row of 0, if that spend should not stop a build. "Not metered" agents count as $0.
+Budgets count every priced call: Pi models (including subscription logins) and metered agents (Claude Code, Codex) are priced from `pricing`, so with API rates there they count as API-equivalent spend. Raise the budgets, or give a subscription model a row of 0, if that spend should not stop a build. "Not metered" agents count as $0. Claude Code and Codex sessions in the repo that pi-chef did not start count too ("outside chef"), from the task's start on.
 
 | Key | Default | Meaning |
 |---|---|---|
