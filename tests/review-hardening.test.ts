@@ -35,6 +35,22 @@ describe("commitAll", () => {
     expect(after).not.toBe(before);
     expect(existsSync(marker)).toBe(false);
   });
+
+  it("commits when the excluded workspace dir is in .gitignore, and leaves it out even if an agent staged it", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    writeFileSync(path.join(cwd, ".gitignore"), ".pi-workflows\n");
+    mkdirSync(path.join(cwd, ".pi-workflows", "tasks"), { recursive: true });
+    writeFileSync(path.join(cwd, ".pi-workflows", "tasks", "summary.md"), "s\n");
+    writeFileSync(path.join(cwd, "feature.txt"), "x\n");
+    execFileSync("git", ["add", "-f", ".pi-workflows/tasks/summary.md", "feature.txt"], { cwd });
+    const before = await git.head();
+    const after = await git.commitAll(cwd, "ticket", [".pi-workflows"]);
+    expect(after).not.toBe(before);
+    const files = execFileSync("git", ["show", "--name-only", "--format=", after], { cwd, encoding: "utf8" });
+    expect(files).toContain("feature.txt");
+    expect(files).not.toContain(".pi-workflows");
+  });
 });
 
 // ---- H2: interview cap --------------------------------------------------------------------------------------------
