@@ -160,6 +160,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
       herdr: herdrClient(),
+      ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,

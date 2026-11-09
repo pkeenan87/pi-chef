@@ -82,16 +82,17 @@ export function observeUsage(
   ctx: WorkflowContext,
   input: { provider: string; model: string; usage: TokenUsage },
   /** A call read back after the fact (a herdr child's session file): its ledger id and time, and the ticket it belongs to. */
-  extra: { id?: string; at?: Date; ticketId?: string } = {},
+  extra: { id?: string; at?: Date; ticketId?: string; /** The job the rows are ledgered under, instead of the main session's "observed assistant usage" (a fix run in a tab). */ job?: string; tier?: string } = {},
 ): CostRecord | undefined {
   const state = active(ctx);
   const when = { ...(extra.id ? { id: extra.id } : {}), ...(extra.at ? { at: extra.at } : {}) };
   const known = input.usage.input !== null && input.usage.output !== null;
-  const base = known ? "observed assistant usage" : "observed assistant usage missing tokens";
+  const base = extra.job ? (known ? extra.job : `${extra.job} missing tokens`) : known ? "observed assistant usage" : "observed assistant usage missing tokens";
+  const tier = extra.tier ?? "interactive";
   // No task: still ledger the turn so it counts toward the daily limit.
-  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", "interactive", input.provider, input.model, input.usage, "unknown", 0, extra.ticketId ? `${base} · ticket ${extra.ticketId}` : base, when);
+  if (!state) return record(ctx, SESSION_TASK_ID, "IDLE", tier, input.provider, input.model, input.usage, "unknown", 0, extra.ticketId ? `${base} · ticket ${extra.ticketId}` : base, when);
   // Only a runner that reads a ticket's tab back names the ticket (`extra.ticketId`); the main session's own turns are not a ticket's spend.
-  return record(ctx, state.taskId, state.phase, "interactive", input.provider, input.model, input.usage, "unknown", 0, extra.ticketId ? `${base} · ticket ${extra.ticketId}` : base, when);
+  return record(ctx, state.taskId, state.phase, tier, input.provider, input.model, input.usage, "unknown", 0, extra.ticketId ? `${base} · ticket ${extra.ticketId}` : base, when);
 }
 
 /** A session-file entry as `sessionManager.getEntries()` returns it; only the fields the ledger reads. */
