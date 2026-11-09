@@ -75,3 +75,4 @@ Unit tests cover the code around these with fakes; none ran against a live servi
 - That the `ctx` Pi passes to `message_end` can draw the footer (`ui.setStatus`) mid-run, and that `message_end` usage fields (and `usage.cost.total`) are the provider's counts.
 - Account entitlement: ChatGPT and Claude subscription logins, and Anthropic's extra-usage billing, can change without a Pi release.
 - The herdr side panel's rendering and the layout docking in a live herdr app.
+- Fix all in a tab after `/review` (`review-fix.ts`) on a live Pi child and a live agent: the tab, the "review fix" ledger rows, and the undo of a commit the fixer makes.

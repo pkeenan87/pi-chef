@@ -77,7 +77,7 @@ function timeOf(entry: Record<string, unknown>, fallback: Date): Date {
  * Pi's compaction and branch-summary entries name no model: they take `options.model` (what the runner launched), else
  * the nearest preceding assistant message's provider and model in the same file, else stay unknown.
  */
-export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSessionFile[], options: { ticketId?: string; model?: { provider: string; id: string } }): CostRecord[] {
+export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSessionFile[], options: { ticketId?: string; model?: { provider: string; id: string }; /** Ledger the model calls under this job and tier (a review fix in a tab) instead of the session's. */ job?: string; tier?: string }): CostRecord[] {
   const seen = (ctx.piLedgered ??= new Set(ctx.store.readLedger().map((row) => row.id).filter((id) => id.startsWith("pi-"))));
   const out: CostRecord[] = [];
   let refreshed = false;
@@ -97,7 +97,7 @@ export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSe
       const call = usageOfMessage(message as Parameters<typeof usageOfMessage>[0]);
       if (!call) continue;
       seen.add(id);
-      const row = observeUsage(ctx, call, { id, at, ...(options.ticketId ? { ticketId: options.ticketId } : {}) });
+      const row = observeUsage(ctx, call, { id, at, ...(options.ticketId ? { ticketId: options.ticketId } : {}), ...(options.job ? { job: options.job } : {}), ...(options.tier ? { tier: options.tier } : {}) });
       if (row) out.push(row);
     }
     // Pi's own entries, one at a time, each on the model that was running when it was written.

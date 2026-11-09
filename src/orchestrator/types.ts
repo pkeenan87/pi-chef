@@ -12,6 +12,8 @@ export interface WorkflowBinding {
   chat?: ChatFn;
   /** The herdr client an agent review opens its tab with. */
   herdr?: HerdrClient;
+  /** Absolute path of `ticket-mode.ts`, for a review fix run by a Pi model in a tab. */
+  ticketModePath?: string;
   /** Pi's model registry for the live session (see WorkflowContext.registry). Set on every bind. */
   registry?: UsableRegistry;
   /** Persistent routing status line (for example ctx.ui.setStatus("chef", text)). */
@@ -68,6 +70,7 @@ export interface WorkflowOptions {
   herdr?: HerdrClient;
   /** Test seam: timings and sleeps of the herdr tab waits. */
   herdrTimings?: TabTimings;
+  ticketModePath?: string;
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   startTurn?: (text: string) => void;

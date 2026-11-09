@@ -52,6 +52,7 @@ export class Workflow {
       chat: options.chat,
       herdr: options.herdr,
       herdrTimings: options.herdrTimings,
+      ticketModePath: options.ticketModePath,
       status: options.status,
       planStatus: options.planStatus,
       startTurn: options.startTurn,
@@ -74,6 +75,7 @@ export class Workflow {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
     ctx.herdr = binding.herdr ?? ctx.herdr;
+    ctx.ticketModePath = binding.ticketModePath ?? ctx.ticketModePath;
     ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;

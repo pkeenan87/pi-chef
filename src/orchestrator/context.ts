@@ -39,6 +39,8 @@ export interface WorkflowContext {
   herdr?: HerdrClient;
   /** Timings and sleeps of the herdr tab waits; a test seam (the defaults are right for a person). */
   herdrTimings?: TabTimings;
+  /** Absolute path of this install's `src/ticket-mode.ts`: a Pi model fix in a tab (`review-fix.ts`) needs it. Absent outside Pi; a test sets it. */
+  ticketModePath?: string;
   /** Pi's model registry for the live session. When bound, routing skips candidates it does not know or holds no credentials for. */
   registry?: UsableRegistry;
   status?: (text: string | undefined) => void;

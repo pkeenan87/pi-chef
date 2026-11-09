@@ -33,7 +33,7 @@ Orchestrator (`src/orchestrator/`)
 - `tickets.ts`, `ticket-plan.ts`: ticket validation, context sizing, ticket files.
 - `tasks.ts`: names, listing, active task, closing. `plans.ts`: `/plans`.
 - `build.ts`: `/build` (`startBuild`, `nextChunk`, `finishChunk`, `runBuild`), pure over a `BuildDriver`. `routing.ts`: model per difficulty and escalation. `turn-budget.ts`: ticket turn limit. `ticket-review.ts`: the per-ticket review gate.
-- `review.ts`: `/review`. `review-report.ts`: its report and numbered findings. `agent-review.ts`: `/review` run by an external agent.
+- `review.ts`: `/review`. `review-report.ts`: its report and numbered findings. `agent-review.ts`: `/review` run by an external agent. `review-fix.ts`: "Fix all in a tab", the findings fixed by `models.medium` in a herdr tab, ledgered as "review fix".
 - `budget.ts`: usage recording and budget checks. `reports.ts`: `/cost`. `exec.ts`: running checks.
 
 Runners, providers, review, storage
@@ -60,7 +60,7 @@ Elsewhere: `bin/init.mjs` (npx setup), `scripts/herdr-install.mjs`, `herdr/chef-
 - **Agent usage comes from the agent's log or is recorded as not metered** (`createAgentMeter`). Claude Code and Codex are metered; others get one `meter: "not-metered"` row per attempt.
 - **Every model call reaches the ledger.** Session turns come from `message_end`; calls pi-chef makes record themselves; Pi's own calls are swept from the session file by `sweepPiUsage` into `recordPiUsage`, once per entry id. A failed call ledgers what the provider reported, else unknown. Only the runners' own ledgering tags rows ` · ticket <id>`; the main session's turns never are.
 - **Unknown cost is never zero.** Record `actualUsd: null`; budgets count an estimate from tokens and the dearest price, else `budgets.unknownCallUsd`. The estimate lives in `summarize`, never in a ledger row. Money math is integer micro-USD.
-- **Review findings are scored 1-10 for likelihood and severity; risk is the product** (`src/review/risk.ts`). Below `MIN_RISK` (5) or unscored is dropped; never default a score. The per-ticket review gates (`TICKET_FAIL_RISK` 20 fails the ticket) and its lower findings are carried into the first `/review` after it (newer than the last saved report); the `/review` model pass advises and never changes `passed`.
+- **Review findings are scored 1-10 for likelihood and severity; risk is the product** (`src/review/risk.ts`). Below `MIN_RISK` (5) or unscored is dropped; never default a score. The per-ticket review gates (`TICKET_FAIL_RISK` 20 fails the ticket) and its lower findings are carried into the first `/review` after it (newer than the last saved report); the `/review` model pass advises and never changes `passed`. A "Fix all in a tab" run never commits (a commit it makes is soft-reset while the branch is unchanged) and never reaches the main session.
 - **Checks are command lines, never prose, and run without a shell.** Every check and setup command passes `assertCommandSafe`. `validateTickets` rejects shell syntax and commands not on `PATH`. A check that cannot run (`ran: false`) fails the ticket without counting against the model.
 - **Spawn with `execFile` and argv arrays, never a shell.** Put `--` before user-derived refs.
 - **Writes to `.pi-workflows/` go through `atomicWrite`, `withLock`, or append-only files.** Never truncate `events.jsonl` or the ledger.
