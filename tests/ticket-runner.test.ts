@@ -133,7 +133,7 @@ describe("an agent ticket in a herdr tab", () => {
     const { fake, state, result, app, cwd } = await herdrBuild({ models: AGENT });
     expect(result.ok, result.text).toBe(true);
     const tab = fake.tabs[0]!;
-    expect(tab.options.argv).toEqual(agentCommand({ kind: "agent", name: "gemini" }, app.config));
+    expect(tab.options.argv).toEqual(["env", `PATH=${process.env.PATH}`, ...agentCommand({ kind: "agent", name: "gemini" }, app.config)]);
     expect(tab.options.cwd).toBe(cwd);
     expect(tab.options.name).toMatch(/^chef-.*-01-1-[a-z0-9]{4}$/);
     expect(tab.sends).toHaveLength(1);

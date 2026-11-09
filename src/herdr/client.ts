@@ -132,7 +132,8 @@ export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
     }
     const parsed = parse(result.stdout);
     if (result.code !== 0) {
-      const err = asRecord(asRecord(parsed)?.error);
+      // hc prints its error JSON ({"error":{"kind","message"}}) on stdout or stderr, depending on the command.
+      const err = asRecord(asRecord(parsed)?.error) ?? asRecord(asRecord(parse(result.stderr))?.error);
       const reason = typeof err?.message === "string" ? err.message : result.code === null ? "killed or timed out" : `exit ${result.code}`;
       throw new HerdrError(`${shown} failed: ${redact(reason)}`, shown, redact(result.stderr.trim()), typeof err?.kind === "string" ? err.kind : undefined);
     }
