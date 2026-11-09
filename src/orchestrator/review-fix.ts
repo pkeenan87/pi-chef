@@ -19,7 +19,7 @@ import { createAgentMeter, meteredEntries, notMeteredEntry } from "../runner/age
 import { readStatus } from "../runner/pi-ticket.js";
 import { messageOf, openTab, tabName, type Tab } from "../runner/tab.js";
 import { herdrSpace } from "../runner/ticket.js";
-import { recordAgentUsage } from "./budget.js";
+import { recordAgentUsage, SESSION_TASK_ID } from "./budget.js";
 import type { WorkflowContext } from "./context.js";
 
 export const FIX_REASON = "review fix";
@@ -78,7 +78,8 @@ function piProgram(ctx: WorkflowContext, model: Extract<TicketModel, { kind: "pi
 
 function agentProgram(ctx: WorkflowContext, model: Extract<TicketModel, { kind: "agent" }>, input: FixInput): Program {
   // Before the tab opens, so everything the agent writes after is new.
-  const meter = createAgentMeter(model.name, { cwd: ctx.git.repoRoot, home: input.home });
+  // Advancing the task's agent-log watermark keeps the sweep from counting this tab again as "outside chef".
+  const meter = createAgentMeter(model.name, { cwd: ctx.git.repoRoot, home: input.home, onConsumed: input.taskId !== SESSION_TASK_ID ? (file, offset) => ctx.store.advanceAgentLog(input.taskId, file, offset) : undefined });
   return {
     argv: agentCommand(model, ctx.config),
     collect: () => {

@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { PlanReviewRequest } from "../src/orchestrator/types.js";
 import { claudeProjectSlug } from "../src/runner/agent-usage.js";
+import { sweepAgentLogs } from "../src/orchestrator/agent-sweep.js";
 import { fakeHerdrClient, type FakeHerdrClientOptions, type FakeTab } from "./herdr-fake.js";
-import { permissiveRegistry, tempRepo, tieredConfig, workflow } from "./helpers.js";
+import { addTask, contextOf, permissiveRegistry, tempRepo, tieredConfig, workflow } from "./helpers.js";
 
 const gitIn = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
@@ -193,5 +194,39 @@ describe("Fix all in a tab with a Pi model", () => {
     expect(result).toMatchObject({ ok: false, code: "REVIEW_FIX_FAILED" });
     expect(result.text).toContain("anthropic/claude-sonnet-5-5");
     expect(t.fake.tabs).toHaveLength(0);
+  });
+});
+
+describe("Fix all in a tab and the outside-chef sweep", () => {
+  it("advances the task's agent-log watermark, so a following sweep counts nothing more", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agent-home-"));
+    const prior = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const t = await fixing({
+        medium: "agent:claude/claude-sonnet-5-5",
+        fake: {
+          onSend: (tab) => {
+            const dir = path.join(home, ".claude", "projects", claudeProjectSlug(tab.options.cwd!));
+            mkdirSync(dir, { recursive: true });
+            appendFileSync(path.join(dir, "r.jsonl"), `${JSON.stringify({ type: "assistant", timestamp: "2026-10-14T12:30:00.000Z", message: { id: "m1", model: "claude-sonnet-5-5", usage: { input_tokens: 1000, output_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })}\n`);
+          },
+        },
+      });
+      const task = await addTask(t.app, "fix");
+      const ctx = contextOf(t.app);
+      mkdirSync(path.join(home, ".claude", "projects", claudeProjectSlug(ctx.git.repoRoot)), { recursive: true });
+      sweepAgentLogs(ctx, task.taskId, home); // the first sweep only sets the watermark
+      expect(ctx.store.readAgentWatermark(task.taskId)).toBeDefined();
+      await t.app.review();
+      expect(fixRows(t)).toHaveLength(1);
+      expect(fixRows(t)[0]).toMatchObject({ taskId: task.taskId, meter: "agent-log", inputTokens: 1000 });
+      const before = ctx.store.readLedger().length;
+      sweepAgentLogs(ctx, task.taskId, home);
+      expect(ctx.store.readLedger()).toHaveLength(before);
+      expect(ctx.store.readLedger().filter((row) => row.reason === "outside chef")).toHaveLength(0);
+    } finally {
+      process.env.HOME = prior;
+    }
   });
 });
