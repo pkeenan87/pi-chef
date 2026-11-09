@@ -1,6 +1,7 @@
-import { tierCandidates, type WorkflowConfig } from "../config.js";
-import { advisorsFor } from "../review/advisors.js";
-import { buildsLocally, DIFFICULTY_TIER, ticketDifficulty, WorkflowError, type LocalScope, type AdvisorOpinion, type PlanAdvisorReview, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
+import { modelText } from "../agents.js";
+import type { WorkflowConfig } from "../config.js";
+import { ticketDifficulty, WorkflowError, type PlanDocument, type PlanGroup, type TaskState, type Ticket } from "../domain.js";
+import { modelFor } from "./routing.js";
 
 /** The human-readable plan in the task folder: the document shown for review and approval. */
 export const PLAN_FILE = "plan.md";
@@ -27,45 +28,20 @@ export function applyOverlap(groups: PlanGroup[]): { groups: PlanGroup[]; overla
   return { groups: next, overlap: unique(overlap) };
 }
 
-function opinionLines(opinion: AdvisorOpinion): string[] {
-  if (opinion.error) return [`- ${opinion.provider}/${opinion.model}: did not answer (${opinion.error})`];
-  return [
-    `- ${opinion.provider}/${opinion.model}: ${opinion.verdict ?? "unsure"}`,
-    ...opinion.concerns.map((item) => `  - ${item.severity.toUpperCase()} ${item.file ? `${item.file}: ` : ""}${item.issue}${item.suggestion ? ` (suggestion: ${item.suggestion})` : ""}`),
-  ];
+/** Who builds a ticket, from the effective config: the model of its difficulty (`models.<difficulty>`). */
+export function ticketRouteView(config: WorkflowConfig, ticket: Ticket): { implementer: string } {
+  return { implementer: modelText(modelFor(config, ticketDifficulty(ticket))) };
 }
 
-/** The "Advisor review" section at the top of the plan: each advisor's verdict and concerns, errors, then the resolution. */
-export function advisorReviewLines(review: PlanAdvisorReview | undefined): string[] {
-  if (!review) return [];
-  const lines = ["## Advisor review", ""];
-  if (review.note) lines.push(review.note);
-  for (const opinion of review.consult?.results ?? []) lines.push(...opinionLines(opinion));
-  if (review.reconsultWaived) lines.push("", "The tickets changed after the advisors were consulted; the planning model waived a new consult (see its resolution).");
-  if (review.resolution) lines.push("", `Opus resolution: ${review.resolution}`);
-  lines.push("", "Advisors advise; approval is yours.", "");
-  return lines;
-}
-
-/** Who builds a ticket and who advises on it, from the effective config: the first candidate of its difficulty tier. */
-export function ticketRouteView(config: WorkflowConfig, ticket: Ticket, scope?: LocalScope): { implementer: string; advisors: string } {
-  const difficulty = ticketDifficulty(ticket);
-  const first = tierCandidates(config, buildsLocally(scope, ticket) ? "local" : DIFFICULTY_TIER[difficulty])[0];
-  const candidates = tierCandidates(config, "advisor").map((item) => ({ provider: item.provider, model: item.model }));
-  const picked = advisorsFor({ difficulty, implementerProvider: first?.provider ?? "", implementerModel: first?.model, candidates, fromDifficulty: config.advisors.fromDifficulty });
-  const advisors = picked.length === 0 ? "—" : picked.length === 1 ? `${picked[0]!.provider}/${picked[0]!.model}` : picked.length === 2 ? "both" : `all ${picked.length}`;
-  return { implementer: first ? `${first.provider}/${first.model}` : "(none)", advisors };
-}
-
-/** The "Tickets" summary table: number, title, difficulty, implementer, advisors, and what blocks it. */
-export function ticketsTableLines(tickets: Ticket[], config: WorkflowConfig, scope?: LocalScope): string[] {
+/** The "Tickets" summary table: number, title, difficulty, implementer, and what blocks it. */
+export function ticketsTableLines(tickets: Ticket[], config: WorkflowConfig): string[] {
   const cell = (text: string) => text.replace(/\|/g, "/").replace(/\s+/g, " ").trim();
   return [
-    "| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| # | Ticket | Difficulty | Implementer | Blocked by |",
+    "| --- | --- | --- | --- | --- |",
     ...tickets.map((ticket) => {
-      const view = ticketRouteView(config, ticket, scope);
-      return `| ${cell(ticket.id)} | ${cell(ticket.title)} | ${ticketDifficulty(ticket)} | ${view.implementer} | ${view.advisors} | ${ticket.blockedBy.join(", ") || "none"} |`;
+      const view = ticketRouteView(config, ticket);
+      return `| ${cell(ticket.id)} | ${cell(ticket.title)} | ${ticketDifficulty(ticket)} | ${view.implementer} | ${ticket.blockedBy.join(", ") || "none"} |`;
     }),
   ];
 }
@@ -82,14 +58,13 @@ export function renderPlanReview(plan: PlanDocument, spec: string | undefined, c
   const lines = [
     `# Plan v${plan.version}`,
     "",
-    `${tickets.length} tickets · security sensitive: ${plan.securitySensitive ? "yes" : "no"}${plan.localMode ? (plan.localDifficulties ? ` · local mode: ${plan.localDifficulties.join("/")} tickets on the local model, the rest on the cloud tiers` : " · local mode: built by the local model only") : ""}`,
+    `${tickets.length} tickets · security sensitive: ${plan.securitySensitive ? "yes" : "no"}`,
     "",
   ];
-  lines.push(...advisorReviewLines(plan.advisorReview));
   // The spec's own title is replaced by the plan title; its sections follow as they are.
   const body = (spec ?? "").replace(/^# Spec\s*\n/, "").trim();
   lines.push(body ? `## Summary\n\n${body}` : `## Summary\n\n${plan.summary}`, "", "## Tickets");
-  if (config) lines.push("", ...ticketsTableLines(tickets, config, plan));
+  if (config) lines.push("", ...ticketsTableLines(tickets, config));
   for (const ticket of tickets) {
     const meta = [`Blocked by: ${ticket.blockedBy.join(", ") || "none"}`, `~${Math.round(ticket.estimatedContextTokens / 1000)}K tokens`];
     lines.push("", `### ${ticket.id} · ${ticketDifficulty(ticket)} · ${ticket.title}`, "", meta.join(" · "));

@@ -1,31 +1,21 @@
 import path from "node:path";
-import { loadConfig, modelLabel, type WorkflowConfig } from "../config.js";
-import { type AcceptedClassification, type CommandResult, type CostRecord, type RoutingDecision, type Tier, type Ticket, type TicketRun, type TicketTier, type TokenUsage } from "../domain.js";
-import { GitWorkspace, mainCheckoutOf, samePath } from "../git/workspace.js";
-import type { Availability } from "../router/select.js";
+import { fromMicroUsd, loadConfig, toMicroUsd, type WorkflowConfig } from "../config.js";
+import { type CommandResult, type CostRecord, type TicketRun, type TokenUsage } from "../domain.js";
+import { GitWorkspace } from "../git/workspace.js";
 import { TaskStore } from "../storage/store.js";
-import type { AuthProbe } from "../providers/auth.js";
-import type { ChatFn } from "../providers/pi-chat.js";
-import { runAz } from "../providers/runtime.js";
-import { advisor } from "./advisor.js";
-import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk, type StartBuildOptions } from "./build.js";
-import { budgetRemainingUsd, budgetState, checkBudget, observeUsage, recordPiUsage, recordWebSearch, type BudgetStatus } from "./budget.js";
-import { summarizeForCompaction, type CompactionInput, type CompactionSummary } from "./compaction.js";
+import { buildReport, finishChunk, nextChunk, startBuild, unstartChunk } from "./build.js";
+import { budgetState, checkBudget, observeUsage, recordAgentUsage, recordPiUsage, recordWebSearch } from "./budget.js";
 import { active, type WorkflowContext } from "./context.js";
-import { statusLine } from "./state-label.js";
-import { watchTicket } from "./watchdog.js";
-import { displayName } from "./tasks.js";
+import { ledgerChildSession, sweepTicketSessions } from "../herdr/session-file.js";
+import { displayName, stateText } from "./tasks.js";
 import { cachingRunner, defaultRunner } from "./exec.js";
 import { abandonRound, beginRound, planningPrompt, planningStatusText, recordAnswers, savePlanSpec, startPlan, activePlanning, type InterviewAnswer, type InterviewQuestion } from "./interview.js";
-import { adviceForTickets, consultPlan } from "./plan-consult.js";
 import { checkTickets, commitTickets, requireTicketStage } from "./ticket-plan.js";
 import { presentPendingPlan } from "./present-plan.js";
 import { plans, taskNames } from "./plans.js";
 import { approveDraft, showPlan } from "./planning.js";
-import { ProgressIndicator } from "./progress.js";
 import { review } from "./review.js";
-import { auth, cost, status } from "./reports.js";
-import { availability, decide } from "./routing.js";
+import { cost } from "./reports.js";
 import type { WorkflowBinding, WorkflowOptions } from "./types.js";
 
 export type { PlanReviewFn, PlanReviewRequest, WorkflowBinding, WorkflowOptions } from "./types.js";
@@ -39,14 +29,11 @@ export class Workflow {
   readonly git: GitWorkspace;
   readonly cwd: string;
   private readonly ctx: WorkflowContext;
-  private readonly progressLine?: ProgressIndicator;
 
   constructor(options: WorkflowOptions) {
     this.cwd = options.cwd;
-    // A /build worktree shares the main checkout's tasks, ledger and config, so its tickets cannot change the policy.
-    const project = mainCheckoutOf(options.cwd);
-    const config = options.config ?? loadConfig(project);
-    this.store = options.store ?? new TaskStore(path.join(project, config.workspaceDir), project === options.cwd ? undefined : options.cwd);
+    const config = options.config ?? loadConfig(options.cwd);
+    this.store = options.store ?? new TaskStore(path.join(options.cwd, config.workspaceDir));
     this.git = options.git ?? new GitWorkspace(options.cwd);
     const ctx: WorkflowContext = {
       cwd: this.cwd,
@@ -55,9 +42,6 @@ export class Workflow {
       git: this.git,
       now: options.now ?? (() => new Date()),
       id: options.id ?? (() => `id-${Math.random().toString(16).slice(2, 10)}`),
-      authProbe: options.auth,
-      azure: options.azure ?? runAz,
-      rng: options.rng,
       checkRunner: cachingRunner(this.git, options.runner ?? defaultRunner),
       shutdown: new AbortController(),
       warned: new Set(),
@@ -66,16 +50,12 @@ export class Workflow {
       progress: options.progress,
       report: options.report,
       chat: options.chat,
-      advisorChat: options.advisorChat,
+      herdr: options.herdr,
+      herdrTimings: options.herdrTimings,
       status: options.status,
       planStatus: options.planStatus,
       startTurn: options.startTurn,
     };
-    if (options.indicator) ctx.indicator = options.indicator;
-    else {
-      this.progressLine = new ProgressIndicator(ctx.now);
-      ctx.indicator = this.progressLine;
-    }
     this.ctx = ctx;
   }
 
@@ -84,17 +64,16 @@ export class Workflow {
     return this.ctx.config;
   }
 
-  /** Applies a reloaded config (and the providers built from it) without rebuilding the workflow. */
-  reconfigure(config: WorkflowConfig, providers?: { auth: AuthProbe }): void {
+  /** Applies a reloaded config without rebuilding the workflow. */
+  reconfigure(config: WorkflowConfig): void {
     this.ctx.config = config;
-    if (providers) this.ctx.authProbe = providers.auth;
   }
 
   /** Rebinds per-command UI hooks without rebuilding the workflow. */
   bind(binding: WorkflowBinding): void {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
-    ctx.advisorChat = binding.advisorChat ?? ctx.advisorChat;
+    ctx.herdr = binding.herdr ?? ctx.herdr;
     ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
@@ -105,14 +84,11 @@ export class Workflow {
     ctx.report = binding.report ?? ctx.report;
     ctx.review = binding.review;
     ctx.edit = binding.edit;
-    // The sink is the live ctx's UI; it is replaced on every bind so a stopped line never draws on a dead session.
-    this.progressLine?.attach(binding.indicatorSink);
     ctx.show = binding.show ?? ctx.show;
   }
 
-  /** Aborts work still running for this workflow (the advisory model review). Call when the session ends. */
+  /** Aborts work still running for this workflow (the model review). Call when the session ends. */
   dispose(): void {
-    this.ctx.indicator?.stop();
     this.ctx.shutdown.abort();
     // Re-armed so a workflow that is reused afterwards can run again.
     this.ctx.shutdown = new AbortController();
@@ -122,27 +98,8 @@ export class Workflow {
     return this.store.readActive();
   }
 
-  /** Which providers can be called right now, each with the reason when it cannot. */
-  availability(): Promise<Availability> {
-    return availability(this.ctx);
-  }
-
-  /** Smaller of the task and daily budget left (USD), counting only known spend. */
-  budgetRemainingUsd(taskId?: string): number {
-    return budgetRemainingUsd(this.ctx, taskId);
-  }
-
-  /** decideRoute with live availability, remaining budget, and learned per-model metrics. Does not announce. */
-  decide(
-    classification: AcceptedClassification,
-    purpose: "implement" | "review",
-    extra: { failedTier?: Tier; escalations?: number; taskId?: string; ticketTier?: TicketTier; strictAvailability?: boolean } = {},
-  ): Promise<RoutingDecision> {
-    return decide(this.ctx, classification, purpose, extra);
-  }
-
   /** `/plan`: starts or resumes the model-run interview. */
-  startPlan(request: string, options: { noQuestions?: boolean; local?: boolean } = {}): Promise<CommandResult> {
+  startPlan(request: string, options: { noQuestions?: boolean } = {}): Promise<CommandResult> {
     return startPlan(this.ctx, request, options);
   }
 
@@ -156,23 +113,15 @@ export class Workflow {
     return activePlanning(this.ctx)?.task.planning?.stage;
   }
 
-  /** The persistent status line for the stored active task (no git call), or undefined to clear it. */
+  /** The persistent status line for the stored active task (no git call): task, state, spend; today's spend alone with no open task. */
   statusLine(): string | undefined {
     const state = active(this.ctx);
-    const running = state?.build?.currentTicket ? state.ticketRuns?.[state.build.currentTicket] : undefined;
     const { task, daily } = budgetState(this.ctx, state?.taskId);
     const { taskUsd, dailyUsd } = this.ctx.config.budgets;
-    return statusLine(state, {
-      name: state ? displayName(state) : "",
-      local: state?.localMode === true,
-      planning: planningStatusText(this.ctx),
-      model: running?.provider && running.model ? modelLabel(this.ctx.config, running.provider, running.model) : undefined,
-      spentUsd: task.knownUsd,
-      unknownSpend: task.unknownRecords > 0,
-      estimatedUnknownUsd: task.estimatedUnknownUsd,
-      budgetUsd: taskUsd,
-      daily: { spentUsd: daily.knownUsd, unknownSpend: daily.unknownRecords > 0, estimatedUnknownUsd: daily.estimatedUnknownUsd, budgetUsd: dailyUsd },
-    });
+    const spend = (s: { knownUsd: number; unknownRecords: number; estimatedUnknownUsd: number }) => (s.unknownRecords > 0 ? `≈$${fromMicroUsd(toMicroUsd(s.knownUsd) + toMicroUsd(s.estimatedUnknownUsd)).toFixed(2)}` : `$${s.knownUsd.toFixed(2)}`);
+    const today = `today ${spend(daily)} of $${dailyUsd}`;
+    if (!state || state.phase === "IDLE" || state.phase === "COMPLETE") return daily.knownUsd > 0 || daily.unknownRecords > 0 ? `chef · ${today}` : undefined;
+    return ["chef", displayName(state), planningStatusText(this.ctx) ?? stateText(state), `${spend(task)} of $${taskUsd}`, today].join(" · ");
   }
 
   /** Validates a round of plan_questions input against the cap and ordering rules and records it as pending. */
@@ -198,21 +147,12 @@ export class Workflow {
     requireTicketStage(this.ctx);
   }
 
-  /** plan_consult: both advisors on the draft tickets, once per draft. */
-  consultPlan(input: Parameters<typeof consultPlan>[1]) {
-    return consultPlan(this.ctx, input);
-  }
-
-  /** What plan_tickets needs from the advisor consult (throws when it is missing), as the review to store on the plan. */
-  adviceForTickets(resolution: string | undefined, tickets: Ticket[], reconsultWaived?: boolean) {
-    return adviceForTickets(this.ctx, resolution, tickets, reconsultWaived);
-  }
   checkTickets(input: unknown) {
     return checkTickets(this.ctx, input);
   }
 
-  commitTickets(tickets: Parameters<typeof commitTickets>[1], advisorReview?: Parameters<typeof commitTickets>[2], options?: Parameters<typeof commitTickets>[3]) {
-    return commitTickets(this.ctx, tickets, advisorReview, options);
+  commitTickets(tickets: Parameters<typeof commitTickets>[1], options?: Parameters<typeof commitTickets>[2]) {
+    return commitTickets(this.ctx, tickets, options);
   }
 
   /** True when plan_tickets saved a draft that has not been shown yet. */
@@ -250,18 +190,8 @@ export class Workflow {
   }
 
   /** `/build`: starts or resumes the build (branch, budget, approval). The session loop is in extension.ts. */
-  startBuild(options?: StartBuildOptions): Promise<CommandResult> {
-    return startBuild(this.ctx, options);
-  }
-
-  buildCheckout(): { dir: string; taskId: string } | undefined {
-    const state = active(this.ctx);
-    const dir = state?.build?.worktree;
-    return state && dir && !samePath(dir, this.cwd) ? { dir, taskId: state.taskId } : undefined;
-  }
-
-  followBuild(taskId: string): void {
-    this.store.setActive(taskId, this.store.load(taskId)?.build?.branch);
+  startBuild(): Promise<CommandResult> {
+    return startBuild(this.ctx);
   }
 
   releaseBuild(): void {
@@ -289,28 +219,10 @@ export class Workflow {
     return buildReport(this.ctx, stopped);
   }
 
-  /** The ticket a /build chunk is running now, if any. */
-  buildingTicket(): string | undefined {
+  /** The branch /build made for the active task, while it has a build. */
+  buildBranch(): string | undefined {
     const id = this.store.readActive();
-    return id ? this.store.load(id)?.build?.currentTicket : undefined;
-  }
-
-  /**
-   * The live progress line while a ticket runs out of sight (the /build subagent): `start` names it, `stage` updates
-   * the detail after it, `stop` clears it. A no-op without a UI.
-   */
-  activity(action: "start" | "stage" | "stop", text = ""): void {
-    if (action === "start") this.ctx.indicator?.start(text);
-    else if (action === "stage") this.ctx.indicator?.stage(text);
-    else this.ctx.indicator?.stop();
-  }
-
-  /** The watchdog's look at the running ticket (`watchdog.ts`): a note to steer in, or undefined. Never throws. */
-  async watchTicket(ticketId: string, turn: number): Promise<string | undefined> {
-    const state = active(this.ctx);
-    const ticket = state?.plan?.tickets?.find((item) => item.id === ticketId);
-    if (!state || !ticket) return undefined;
-    return watchTicket(this.ctx, { taskId: state.taskId, ticket, turn });
+    return id ? this.store.load(id)?.build?.branch : undefined;
   }
 
   /** One-line chat event, when a Pi session is bound. */
@@ -323,48 +235,50 @@ export class Workflow {
     this.ctx.report?.(markdown);
   }
 
-  /** `/review`: checks, static scan, and the advisory model pass over the changes against the base branch; offers to fix the findings in this session. Never commits or pushes. */
-  review(): Promise<CommandResult> {
-    return review(this.ctx);
+  /** `/review [--with <model>]`: checks, static scan, and the advisory model pass over the changes against the base branch; offers to fix the findings in this session. Never commits or pushes. */
+  review(args = ""): Promise<CommandResult> {
+    return review(this.ctx, args);
   }
 
-
-  advisor(question: string): Promise<CommandResult> {
-    return advisor(this.ctx, question);
-  }
 
   cost(format = ""): Promise<CommandResult> {
     return cost(this.ctx, format);
   }
 
-  status(arg = ""): Promise<CommandResult> {
-    return status(this.ctx, arg);
+  observeUsage(input: { provider: string; model: string; usage: TokenUsage }, extra?: Parameters<typeof observeUsage>[2]): CostRecord | undefined {
+    return observeUsage(this.ctx, input, extra);
   }
 
-  auth(arg = ""): Promise<CommandResult> {
-    return auth(this.ctx, arg);
+  /** `<task dir>/sessions` of the active task: where the Pi ticket runner keeps a child's session dirs and status files. */
+  ticketSessionsRoot(): string | undefined {
+    const state = active(this.ctx);
+    return state ? path.join(this.store.taskDir(state.taskId), "sessions") : undefined;
   }
 
-  observeUsage(input: { provider: string; model: string; usage: TokenUsage }): CostRecord | undefined {
-    return observeUsage(this.ctx, input);
+  /** The active task's readable name (for a herdr tab name). */
+  ticketSessionsName(): string {
+    const state = active(this.ctx);
+    return state ? displayName(state) : "";
+  }
+
+  /** Ledgers a Pi ticket child's new session entries (`src/herdr/session-file.ts`). */
+  ledgerChildSession(files: Parameters<typeof ledgerChildSession>[1], options: Parameters<typeof ledgerChildSession>[2]): CostRecord[] {
+    return ledgerChildSession(this.ctx, files, options);
+  }
+
+  /** The resume sweep over a ticket's earlier child session dirs. */
+  sweepTicketSessions(ticketId: string, options: Parameters<typeof sweepTicketSessions>[2] = {}): CostRecord[] {
+    return sweepTicketSessions(this.ctx, ticketId, options);
+  }
+
+  /** Ledgers what an external agent spent on a ticket (`src/runner/agent-usage.ts`): metered calls, or one "not metered" row. */
+  recordAgentUsage(input: Parameters<typeof recordAgentUsage>[1]): CostRecord[] {
+    return recordAgentUsage(this.ctx, input);
   }
 
   /** Ledgers the calls Pi made on its own (cache warming, its own compaction and branch summaries) from the session file. */
   recordPiUsage(input: Parameters<typeof recordPiUsage>[1]): CostRecord[] {
     return recordPiUsage(this.ctx, input);
-  }
-
-  /**
-   * A compaction summary from `session.compactionTier`, ledgered as `compaction`. Undefined when no model can write it
-   * (hard budget, nobody signed in, a failed call), so the caller lets Pi compact with the session model.
-   */
-  summarizeForCompaction(chat: ChatFn, input: CompactionInput): Promise<CompactionSummary | undefined> {
-    return summarizeForCompaction(this.ctx, chat, input);
-  }
-
-  /** Task or daily budget state with no warning, for gates that decide for themselves what to say. */
-  budgetStatus(taskId?: string): BudgetStatus {
-    return budgetState(this.ctx, taskId).status;
   }
 
   now(): Date {

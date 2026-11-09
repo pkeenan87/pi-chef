@@ -5,7 +5,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { GitWorkspace } from "../src/git/workspace.js";
-import { tempRepo } from "./helpers.js";
+import { dirtyPaths } from "../src/orchestrator/build.js";
+import { contextOf, tempRepo, workflow } from "./helpers.js";
 
 describe("git helpers for the main checkout", () => {
   const exec = promisify(execFile);
@@ -108,6 +109,51 @@ describe("git helpers for the main checkout", () => {
     await git.commitAll(cwd, "ticket", [".pi-workflows"]);
     const files = (await sh(cwd, "show", "--name-only", "--format=", "HEAD")).stdout.trim().split("\n");
     expect(files).toEqual(["code.txt"]);
+  });
+});
+
+describe("commitAll and agent artefacts", () => {
+  const exec = promisify(execFile);
+  const sh = (cwd: string, ...args: string[]) => exec("git", args, { cwd });
+  const write = (cwd: string, file: string, text: string) => {
+    mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+    writeFileSync(path.join(cwd, file), text);
+  };
+
+  it("leaves out new untracked files under an agent's directory, but commits tracked ones there and the rest of the tree", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    write(cwd, ".claude/settings.json", "{}\n");
+    await sh(cwd, "add", "-f", ".claude/settings.json");
+    await sh(cwd, "commit", "-m", "track settings");
+    write(cwd, ".claude/settings.json", '{"edited":true}\n');
+    write(cwd, ".claude/settings.local.json", "{}\n");
+    for (const dir of [".codex", ".cursor", ".gemini", ".opencode", ".grok"]) write(cwd, `${dir}/state`, "x\n");
+    write(cwd, "src/code.txt", "code\n");
+    await git.commitAll(cwd, "ticket");
+    const files = (await sh(cwd, "show", "--name-only", "--format=", "HEAD")).stdout.trim().split("\n").sort();
+    expect(files).toEqual([".claude/settings.json", "src/code.txt"]);
+    expect((await git.changedPaths()).sort()).toEqual([".claude/settings.local.json", ".codex/state", ".cursor/state", ".gemini/state", ".grok/state", ".opencode/state"]);
+  });
+
+  it("does not count an agent's new files as the tree being dirty for /build", async () => {
+    const cwd = await tempRepo();
+    const app = workflow(cwd);
+    write(cwd, ".claude/settings.local.json", "{}\n");
+    expect(await new GitWorkspace(cwd).agentArtefacts()).toEqual([".claude/settings.local.json"]);
+    expect(await dirtyPaths(contextOf(app))).toEqual([]);
+    write(cwd, "src/code.txt", "code\n");
+    expect(await dirtyPaths(contextOf(app))).toEqual(["src/code.txt"]);
+  });
+
+  it("also leaves out a new agent file the agent staged itself", async () => {
+    const cwd = await tempRepo();
+    const git = new GitWorkspace(cwd);
+    write(cwd, ".claude/new.json", "{}\n");
+    await sh(cwd, "add", "-f", ".claude/new.json");
+    write(cwd, "code.txt", "code\n");
+    await git.commitAll(cwd, "ticket");
+    expect((await sh(cwd, "show", "--name-only", "--format=", "HEAD")).stdout.trim()).toBe("code.txt");
   });
 });
 

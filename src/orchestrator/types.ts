@@ -1,18 +1,17 @@
 import type { WorkflowConfig } from "../config.js";
+import type { HerdrClient } from "../herdr/client.js";
+import type { TabTimings } from "../runner/tab.js";
 import type { GitWorkspace } from "../git/workspace.js";
-import type { AuthProbe } from "../providers/auth.js";
 import type { ChatFn } from "../providers/pi-chat.js";
-import type { AzRunner } from "./status-foundry.js";
 import type { UsableRegistry } from "../providers/usable.js";
 import type { CheckRunner } from "../review/review.js";
-import type { Indicator, IndicatorSink } from "./progress.js";
 import type { TaskStore } from "../storage/store.js";
 
 export interface WorkflowBinding {
-  /** Chat access to the selected model (/advisor and the model review). */
+  /** Chat access to the selected model (the model review and the ticket review). */
   chat?: ChatFn;
-  /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
-  advisorChat?: ChatFn;
+  /** The herdr client an agent review opens its tab with. */
+  herdr?: HerdrClient;
   /** Pi's model registry for the live session (see WorkflowContext.registry). Set on every bind. */
   registry?: UsableRegistry;
   /** Persistent routing status line (for example ctx.ui.setStatus("chef", text)). */
@@ -26,8 +25,6 @@ export interface WorkflowBinding {
   progress?: (message: string) => void;
   /** Posts a multi-line markdown block in the chat transcript (a ticket's result, the build summary, a review). */
   report?: (markdown: string) => void;
-  /** The live Pi UI for the progress line; undefined without a UI. Set on every bind, from the live ctx. */
-  indicatorSink?: IndicatorSink;
   /** Opens Pi's editor with a prompt and prefill (Edit tickets). Absent without a UI. */
   edit?: (title: string, prefill: string) => Promise<string | undefined>;
   /** Shows a plan or review inline and returns the action chosen in a compact picker. Absent without a UI. */
@@ -55,15 +52,12 @@ export interface PlanReviewRequest {
 export type PlanReviewFn = (request: PlanReviewRequest) => Promise<{ value: string; text?: string } | undefined>;
 
 export interface WorkflowOptions {
-  /** The checkout commands work in: git, checks, project files. A linked worktree keeps its state in its main checkout. */
+  /** The checkout commands work in: git, checks, project files. */
   cwd: string;
   config?: WorkflowConfig;
   store?: TaskStore;
   now?: () => Date;
   id?: () => string;
-  auth: AuthProbe;
-  /** Runs the Azure CLI for `/status foundry`; tests pass a fake. */
-  azure?: AzRunner;
   git?: GitWorkspace;
   confirm?: (title: string, message: string) => Promise<boolean>;
   notify?: (message: string) => void;
@@ -71,13 +65,10 @@ export interface WorkflowOptions {
   report?: (markdown: string) => void;
   runner?: CheckRunner;
   chat?: ChatFn;
-  /** Advisor calls as read-only Pi sessions (`advisors.tools`). */
-  advisorChat?: ChatFn;
+  herdr?: HerdrClient;
+  /** Test seam: timings and sleeps of the herdr tab waits. */
+  herdrTimings?: TabTimings;
   status?: (text: string | undefined) => void;
   planStatus?: (text: string | undefined) => void;
   startTurn?: (text: string) => void;
-  /** Replaces the progress indicator (tests inject a fake). */
-  indicator?: Indicator;
-  /** Uniform [0, 1) used for exploration when choosing among a tier's candidates. */
-  rng?: () => number;
 }

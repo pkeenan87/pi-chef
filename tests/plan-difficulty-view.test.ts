@@ -15,24 +15,22 @@ const tickets = [
 ];
 
 describe("difficulty in the plan", () => {
-  it("shows a Tickets table with the implementer and advisors, and the difficulty in each heading", async () => {
+  it("shows a Tickets table with the implementer, and the difficulty in each heading", async () => {
     const { app, taskId } = await ticketWorkflow(tickets);
     const markdown = app.store.readText(taskId, PLAN_FILE)!;
     const section = markdown.slice(markdown.indexOf("## Tickets"));
     expect(section.split("\n").slice(0, 7)).toEqual([
       "## Tickets",
       "",
-      "| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |",
-      "| --- | --- | --- | --- | --- | --- |",
-      "| 01 | Scaffold the project | low | xai/grok-4.7 | — | none |",
-      // advisors.fromDifficulty defaults to high: a medium ticket gets no advisor.
-      "| 02 | Add the parser | medium | anthropic/claude-sonnet-5-5 | — | 01 |",
-      "| 03 | Harden auth | high | openai/gpt-6.1-sol | both | 02 |",
+      "| # | Ticket | Difficulty | Implementer | Blocked by |",
+      "| --- | --- | --- | --- | --- |",
+      "| 01 | Scaffold the project | low | xai/grok-4.7 | none |",
+      "| 02 | Add the parser | medium | anthropic/claude-sonnet-5-5 | 01 |",
+      "| 03 | Harden auth | high | openai/gpt-6.1-sol | 02 |",
     ]);
     expect(markdown).toContain("### 01 · low · Scaffold the project");
     expect(markdown).toContain("### 03 · high · Harden auth");
     expect(markdown).not.toContain("difficulty: high");
-    // The table comes right after the advisor review when there is one, and before the first ticket.
     expect(markdown.indexOf("| # |")).toBeLessThan(markdown.indexOf("### 01"));
   });
 
@@ -43,8 +41,8 @@ describe("difficulty in the plan", () => {
     const params = tickets.map((item) => ({ ...item, implementation: "Do it in src/ingest.ts." }));
     const result = await call(createPlanTicketsTool(() => app), { tickets: params }, headless);
     const text = result.content[0]!.text;
-    expect(text).toContain("| 03 | Harden auth | high | openai/gpt-6.1-sol | both | 02 |");
-    expect(text).toContain("| # | Ticket | Difficulty | Implementer | Advisors | Blocked by |");
+    expect(text).toContain("| 03 | Harden auth | high | openai/gpt-6.1-sol | 02 |");
+    expect(text).toContain("| # | Ticket | Difficulty | Implementer | Blocked by |");
   });
 
   it("renders the difficulty in a ticket file and omits the table without a config", async () => {

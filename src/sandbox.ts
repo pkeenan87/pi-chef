@@ -341,3 +341,9 @@ export function buildBashBlock(command: string): string | undefined {
   if (changesWorktrees(command)) return "/build runs each ticket in the task's checkout; do not add, move or remove git worktrees during a ticket.";
   return runsGitPush(command) || switchesBranch(command) ? "/build commits each ticket; do not push or switch branches during a ticket." : undefined;
 }
+
+/** Why bash may not run this command during a ticket, or undefined when it may: the deny rules, then the `/build` block. */
+export function ticketBashProblem(command: string): string | undefined {
+  if (isDeniedCommand(command)) return "Blocked destructive command. It stays blocked until a person runs an approved command.";
+  return buildBashBlock(command);
+}

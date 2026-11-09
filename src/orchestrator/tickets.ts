@@ -1,6 +1,6 @@
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
-import { DIFFICULTIES, isDifficulty, isTier, ticketDifficulty, type PlanGroup, type Ticket } from "../domain.js";
+import { DIFFICULTIES, isDifficulty, ticketDifficulty, type Difficulty, type PlanGroup, type Ticket } from "../domain.js";
 import { assertCommandSafe } from "../sandbox.js";
 import { assertGraph } from "./plan.js";
 
@@ -85,41 +85,8 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
 }
 
-/** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. */
-export interface LocalTicketRules {
-  /** "9B model": named in the errors, so the planner knows why. */
-  label: string;
-  difficulties: string[];
-  maxFiles: number;
-  /** True when the config sets no checks, so each ticket must bring its own. */
-  needChecks: boolean;
-  /** localMode.difficulties: only tickets of these difficulties are local (and held to these rules); the rest are cloud tickets. */
-  only?: string[];
-  /** The context target of a local ticket when it differs from the cloud target (`only` set). */
-  targetTokens?: number;
-}
-
-/** A ticket that only touches documentation: no test can check it, so the review is its gate. */
-const DOC_FILE = /\.(?:md|mdx|markdown|rst|adoc|txt)$/i;
-export const docsOnly = (files: string[]) => files.length > 0 && files.every((file) => DOC_FILE.test(file));
-
-/** Whether a ticket of this difficulty is built by the local model under these rules. */
-const isLocal = (rules: LocalTicketRules | undefined, difficulty: string | undefined): rules is LocalTicketRules =>
-  rules !== undefined && (rules.only === undefined || rules.only.includes(difficulty ?? "medium"));
-
-/** What a local-mode ticket must have so a small model can finish it: low or medium, few listed files, numbered steps, a check. */
-function localTicketProblems(label: string, item: { difficulty?: string; files: string[]; implementation: string; checks: string[] }, rules: LocalTicketRules): string[] {
-  const errors: string[] = [];
-  if (!item.difficulty || !rules.difficulties.includes(item.difficulty)) errors.push(`Ticket ${label}: for the local ${rules.label}, difficulty must be ${rules.difficulties.join(" or ")}${item.difficulty ? ` (not ${item.difficulty})` : ""}; split a harder ticket.`);
-  if (item.files.length === 0) errors.push(`Ticket ${label}: local mode needs files: every file the ticket touches (at most ${rules.maxFiles}).`);
-  else if (item.files.length > rules.maxFiles) errors.push(`Ticket ${label}: touches ${item.files.length} files; the local ${rules.label} gets at most ${rules.maxFiles}. Split it.`);
-  const steps = item.implementation.split("\n").filter((line) => /^\s*\d+[.)]\s+\S/.test(line)).length;
-  if (steps < 2) errors.push(`Ticket ${label}: local mode needs implementation as numbered steps ("1. ", "2. "), at least two, each naming the file and the exact function, type or test to change.`);
-  if (rules.needChecks && item.checks.length === 0 && !docsOnly(item.files)) errors.push(`Ticket ${label}: local mode needs at least one check (a targeted test command), because the config sets no checks.`);
-  return errors;
-}
-
-export function validateTickets(input: unknown, options: { target: number; fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean; local?: LocalTicketRules }): TicketCheck {
+/** Coerces untrusted tool input into tickets, collecting every problem rather than stopping at the first. `target` is the context a ticket of that difficulty must fit. */
+export function validateTickets(input: unknown, options: { target: number | ((difficulty: Difficulty) => number); fileSize: (file: string) => number | undefined; commandExists?: (command: string) => boolean }): TicketCheck {
   const errors: string[] = [];
   const tickets: Ticket[] = [];
   if (!Array.isArray(input) || input.length === 0) return { tickets, errors: ["tickets must be a non-empty array."] };
@@ -149,10 +116,6 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     if (acceptanceCriteria.length === 0) errors.push(`Ticket ${label}: at least one acceptance criterion is required.`);
     const model = typeof item.estimatedContextTokens === "number" && Number.isFinite(item.estimatedContextTokens) && item.estimatedContextTokens > 0 ? item.estimatedContextTokens : undefined;
     if (model === undefined) errors.push(`Ticket ${label}: estimatedContextTokens must be a positive number.`);
-    const tier = typeof item.suggestedTier === "string" ? item.suggestedTier : undefined;
-    // Old plans only: any tier name, including the retired "deterministic".
-    const oldTier = (value: string) => isTier(value) || value === "deterministic";
-    if (tier !== undefined && !oldTier(tier)) errors.push(`Ticket ${label}: suggestedTier "${tier}" is not a tier.`);
     const difficulty = typeof item.difficulty === "string" ? item.difficulty : undefined;
     if (difficulty !== undefined && !isDifficulty(difficulty)) errors.push(`Ticket ${label}: difficulty "${difficulty}" must be one of ${DIFFICULTIES.join(", ")}.`);
     const files = strings(item.files).map((file) => file.replace(/^\.\//, ""));
@@ -169,7 +132,6 @@ export function validateTickets(input: unknown, options: { target: number; fileS
         `Ticket ${label}: check "${check}" cannot run (${problem}). Checks are command lines /build runs after the ticket without a shell, one command with plain arguments per entry; destructive commands are refused. Put prose verification steps in implementation instead.`,
       );
     }
-    if (isLocal(options.local, difficulty)) errors.push(...localTicketProblems(label, { difficulty, files, implementation, checks }, options.local));
     tickets.push({
       id,
       slug,
@@ -179,7 +141,6 @@ export function validateTickets(input: unknown, options: { target: number; fileS
       acceptanceCriteria,
       blockedBy: strings(item.blockedBy),
       ...(difficulty && isDifficulty(difficulty) ? { difficulty } : {}),
-      ...(tier && oldTier(tier) ? { suggestedTier: tier } : {}),
       ...(files.length ? { files } : {}),
       estimatedContextTokens: model ?? 0,
       ...(checks.length ? { checks } : {}),
@@ -203,7 +164,7 @@ export function validateTickets(input: unknown, options: { target: number; fileS
     for (const ticket of tickets) {
       const code = estimateTicketTokens(ticket, options.fileSize);
       const worst = Math.max(ticket.estimatedContextTokens, code);
-      const target = isLocal(options.local, ticketDifficulty(ticket)) ? (options.local.targetTokens ?? options.target) : options.target;
+      const target = typeof options.target === "number" ? options.target : options.target(ticketDifficulty(ticket));
       if (worst > target) {
         errors.push(`Ticket ${ticket.id} (${ticket.title}) is estimated at ${worst} tokens (model ${ticket.estimatedContextTokens}, code-side ${code}), above the ${target} target. Split it into smaller vertical slices and call plan_tickets again.`);
       }
@@ -238,7 +199,6 @@ export function renderTicket(ticket: Ticket): string {
     `id: ${ticket.id}`,
     `slug: ${ticket.slug}`,
     ...(ticket.difficulty ? [`difficulty: ${ticket.difficulty}`] : []),
-    ...(ticket.suggestedTier ? [`suggestedTier: ${ticket.suggestedTier}`] : []),
     `estimatedContextTokens: ${ticket.estimatedContextTokens}`,
     ...(ticket.files?.length ? [`files: ${JSON.stringify(ticket.files)}`] : []),
     ...(ticket.checks?.length ? [`checks: ${JSON.stringify(ticket.checks)}`] : []),
@@ -315,7 +275,6 @@ export function parseTicketsMarkdown(markdown: string): unknown[] {
           .filter(Boolean),
         blockedBy: /^none$/i.test(blocked) ? [] : blocked.split("\n").map((line) => line.replace(/^\s*-\s*/, "").trim()).filter(Boolean),
         difficulty: meta.get("difficulty"),
-        suggestedTier: meta.get("suggestedTier"),
         estimatedContextTokens: Number(meta.get("estimatedContextTokens")),
         files: jsonList(meta.get("files")),
         checks: jsonList(meta.get("checks")),
@@ -328,14 +287,15 @@ export type TicketStatus = "ready-for-agent" | "in-progress" | "done" | "failed"
 const norm = (text: string) => text.toLowerCase().replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
 
 /**
- * Best-effort read of a ticket's closing summary: for each acceptance criterion, true when a line that
- * mentions it is ticked ("- [x]") or says "met" (and not "not met"/"unmet"). Unmatched criteria are not met.
+ * Best-effort read of a ticket's closing summary: for each acceptance criterion, true when the last line that
+ * mentions it is ticked ("- [x]") or says "met" (and not "not met"/"unmet"). Unmatched criteria are not met. The last
+ * line, because text that echoes the ticket prompt (a screen) lists every criterion unticked before the closing summary.
  */
 export function parseCriteriaMet(finalText: string, criteria: string[]): boolean[] {
   const lines = finalText.split("\n").map((line) => ({ raw: line, text: norm(line) }));
   return criteria.map((criterion) => {
     const key = norm(criterion).slice(0, 50);
-    const hit = key ? lines.find((line) => line.text.includes(key)) : undefined;
+    const hit = key ? [...lines].reverse().find((line) => line.text.includes(key)) : undefined;
     if (!hit) return false;
     if (/\[ \]|\bnot met\b|\bunmet\b|\bnot done\b|\bfailed\b/i.test(hit.raw)) return false;
     return /\[x\]/i.test(hit.raw) || /\bmet\b|\bdone\b|\bpass(ed)?\b|✅|✓/i.test(hit.raw);
@@ -356,7 +316,7 @@ export function tickCriteria(markdown: string, met: boolean[]): string {
   const next = markdown.slice(start + 1).search(/^## /m);
   const end = next < 0 ? markdown.length : start + 1 + next;
   let index = 0;
-  const block = markdown.slice(start, end).replace(/^(\s*-\s*)\[([ xX])\]/gm, (whole, lead: string, mark: string) => {
+  const block = markdown.slice(start, end).replace(/^(\s*-\s*)\[([ xX])\]/gm, (_whole, lead: string, mark: string) => {
     const done = met[index++];
     return done ? `${lead}[x]` : `${lead}[${mark}]`;
   });

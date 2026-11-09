@@ -19,13 +19,6 @@ export function formatUsd(usd: number | null | undefined): string {
   return usd === null || usd === undefined ? "cost unknown" : `$${usd.toFixed(4)}`;
 }
 
-/** "1.7M", "82k", "512". */
-export function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 1000) return `${Math.round(count / 1000)}k`;
-  return String(count);
-}
-
 /** Plain one-line text: newlines and runs of space collapsed, clipped to `max` characters with an ellipsis. No markdown escapes. */
 export function flat(text: string, max?: number): string {
   const one = text.replace(/\s+/g, " ").trim();
@@ -47,3 +40,11 @@ export function formatUsdShort(usd: number): string {
 
 /** A markdown table: pass cells through `cell` so a `|` cannot split a row. */
 export const mdTable = (head: string[], rows: string[][]): string[] => [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((row) => `| ${row.join(" | ")} |`)];
+
+/** "14:32" in the local time zone; undefined for a missing or unreadable timestamp. */
+export function clock(iso: string | undefined): string | undefined {
+  if (!iso) return undefined;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return undefined;
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}

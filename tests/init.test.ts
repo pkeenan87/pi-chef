@@ -98,7 +98,7 @@ describe("pi-chef-init", () => {
     expect(lines[0]).toBe("node_modules/");
 
     await init(["--no-install", "--force"], cwd);
-    expect(readFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "utf8")).toContain("providers:");
+    expect(readFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "utf8")).toContain("checks:");
   });
 
   it("changes nothing on --dry-run", async () => {

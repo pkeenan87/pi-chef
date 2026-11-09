@@ -163,13 +163,13 @@ describe("/review with no task", () => {
     expect(sessionReport(t.app).passed).toBe(false);
     expect(t.reports.at(-1)).toContain("## Review did not pass");
     expect(t.dialogs).toHaveLength(1);
-    expect(t.dialogs[0]!.markdown).toContain("| 1 | BLOCKING | npm test | unit failed with exit 1: FAIL injected | Check | — |");
+    expect(t.dialogs[0]!.markdown).toContain("| 1 | BLOCKING | npm test | unit failed with exit 1: FAIL injected |");
     expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(head);
     expect(await git(t.cwd, "status", "--porcelain")).toContain("src/wip.ts");
   });
 
   it("lists the model review's findings but never lets them change the verdict", async () => {
-    const t = await setup({ chat: modelChat([{ severity: "high", category: "correctness", file: "src/retry.ts", message: "retry never backs off.", evidence: "const retry = 3" }]) });
+    const t = await setup({ chat: modelChat([{ likelihood: 8, severity: 8, category: "correctness", file: "src/retry.ts", message: "retry never backs off.", evidence: "const retry = 3" }]) });
     await branchWithCommit(t.cwd);
     const result = await t.app.review();
     expect(result.ok, result.text).toBe(true);
@@ -177,14 +177,14 @@ describe("/review with no task", () => {
     expect(report.passed).toBe(true);
     expect(report.findings.filter((finding) => finding.severity === "blocking")).toEqual([]);
     expect(report.modelReview?.findings).toHaveLength(1);
-    expect(t.reports.at(-1)).toMatch(/\| 1 \| HIGH \| src\/retry\.ts \| retry never backs off\. \|/);
-    expect(t.dialogs[0]!.markdown).toMatch(/\| 1 \| HIGH \| src\/retry\.ts \| retry never backs off\. \|/);
+    expect(t.reports.at(-1)).toMatch(/\| 1 \| L8×S8=64 \| src\/retry\.ts \| retry never backs off\. \|/);
+    expect(t.dialogs[0]!.markdown).toMatch(/\| 1 \| L8×S8=64 \| src\/retry\.ts \| retry never backs off\. \|/);
     expect(t.app.store.readLedger().find((entry) => entry.reason === "model review")).toMatchObject({ taskId: "session", phase: "REVIEWING" });
   });
 });
 
 describe("/review findings dialog", () => {
-  const findings = [{ severity: "medium", category: "correctness", file: "src/retry.ts", message: "no jitter." }];
+  const findings = [{ likelihood: 5, severity: 6, category: "correctness", file: "src/retry.ts", message: "no jitter." }];
 
   async function failing(choice: Choice, extra: { ui?: boolean } = {}) {
     // An eval in the diff (static), a failing check, and a model finding: numbered in that order.
@@ -226,7 +226,7 @@ describe("/review findings dialog", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(/^\| 1 \| BLOCKING \| security \|/);
     expect(lines[1]).toMatch(/^\| 2 \| BLOCKING \| npm test \|/);
-    expect(lines[2]).toMatch(/^\| 3 \| MEDIUM \| src\/retry\.ts \| no jitter\./);
+    expect(lines[2]).toMatch(/^\| 3 \| L5×S6=30 \| src\/retry\.ts \| no jitter\./);
   });
 
   it("Fix all starts a turn with every finding, the check commands, and the rules; nothing is committed", async () => {
@@ -240,7 +240,7 @@ describe("/review findings dialog", () => {
     expect(message).toContain("Fix all 3 finding(s)");
     expect(message).toMatch(/1\. BLOCKING security:/);
     expect(message).toContain("2. Check failed: unit");
-    expect(message).toContain("3. MEDIUM src/retry.ts: no jitter.");
+    expect(message).toContain("3. L5×S6 src/retry.ts: no jitter.");
     expect(message).toContain("- `npm test`");
     expect(message).toContain("Do not commit, push, or switch branches.");
     expect(message).toContain("one line per finding addressed");
@@ -257,7 +257,7 @@ describe("/review findings dialog", () => {
     expect(message).toContain("1 and rename foo");
     expect(message).toContain("for reference");
     expect(message).toMatch(/1\. BLOCKING security:/);
-    expect(message).toContain("3. MEDIUM src/retry.ts: no jitter.");
+    expect(message).toContain("3. L5×S6 src/retry.ts: no jitter.");
     expect(message).toContain("- `npm test`");
     expect(message).toContain("Run /review again when done.");
   });
@@ -323,6 +323,50 @@ describe("/review after /build", () => {
     expect(readFileSync(path.join(dir, "reports", "review.md"), "utf8")).toContain("## Review passed");
     expect(await git(t.cwd, "rev-parse", "HEAD")).toBe(head);
     expect(await git(t.cwd, "branch", "--show-current")).toBe(`chef/${t.app.store.load(t.taskId)!.name}`);
+  });
+
+  it("lists the findings the tickets' passing reviews carried from build, after the model's, once", async () => {
+    const t = await built();
+    await t.app.store.update(t.taskId, "carry", (task) => {
+      const run = task.ticketRuns!["01"]!;
+      const record = { attempt: 1, round: 1, tier: "low" as const, implementer: "xai/grok-4.7", verdict: "pass" as const, rationale: "ok", costUsd: { review: 0 } };
+      run.reviews = [{ ...record, findings: [{ likelihood: 3, severity: 5, file: "src/retry.ts", issue: "no test for the empty case" }, { likelihood: 4, severity: 4, file: "src/retry.ts", issue: "retry never backs off." }] }];
+      return task;
+    });
+    t.app.bind({ chat: modelChat([{ likelihood: 8, severity: 8, category: "correctness", file: "src/retry.ts", message: "Retry never backs off" }]) } as never);
+    const result = await t.app.review();
+    expect(result.ok, result.text).toBe(true);
+    const report = t.app.store.load(t.taskId)!.review!;
+    expect(report.carried).toEqual([{ ticket: "01", likelihood: 3, severity: 5, file: "src/retry.ts", issue: "no test for the empty case" }]);
+    const md = readFileSync(path.join(t.app.store.taskDir(t.taskId), "reports", "review.md"), "utf8");
+    expect(md).toContain("| L8×S8=64 | src/retry.ts | Retry never backs off |");
+    expect(md).toContain("| L3×S5=15 | src/retry.ts | no test for the empty case (carried from build, ticket 01) |");
+    expect(md.match(/never backs off/gi)).toHaveLength(1);
+  });
+
+  it("carries a ticket's build findings into the first /review after its review only, not into every later one", async () => {
+    const t = await built();
+    const record = { attempt: 1, round: 1, tier: "low" as const, implementer: "xai/grok-4.7", verdict: "pass" as const, rationale: "ok", costUsd: { review: 0 } };
+    const finding = (issue: string) => ({ likelihood: 3, severity: 5, file: "src/retry.ts", issue });
+    await t.app.store.update(t.taskId, "carry", (task) => {
+      task.ticketRuns!["01"]!.reviews = [{ ...record, findings: [finding("no test for the empty case")] }];
+      return task;
+    });
+    t.app.bind({ chat: modelChat([]) } as never);
+    expect((await t.app.review()).ok).toBe(true);
+    expect(t.app.store.load(t.taskId)!.review!.carried).toHaveLength(1);
+    // The same findings are not listed again.
+    expect((await t.app.review()).ok).toBe(true);
+    expect(t.app.store.load(t.taskId)!.review!.carried).toBeUndefined();
+    // A ticket reviewed after that report carries into the next one, and only its findings.
+    const reportAt = t.app.store.load(t.taskId)!.review!.at!;
+    const later = new Date(Date.parse(reportAt) + 60_000).toISOString();
+    await t.app.store.update(t.taskId, "carry again", (task) => {
+      task.ticketRuns!["02"]!.reviews = [{ ...record, at: later, findings: [finding("second ticket gap")] }];
+      return task;
+    });
+    expect((await t.app.review()).ok).toBe(true);
+    expect(t.app.store.load(t.taskId)!.review!.carried).toEqual([{ ticket: "02", ...finding("second ticket gap") }]);
   });
 
   it("falls back to the tickets' checks when the config has none, and cannot pass with no checks at all", async () => {

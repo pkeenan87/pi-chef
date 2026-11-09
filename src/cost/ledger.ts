@@ -1,4 +1,4 @@
-import { billingFor, DEFAULT_UNKNOWN_CALL_USD, estimateUsd, priceFor, type PricingRow } from "../config.js";
+import { DEFAULT_UNKNOWN_CALL_USD, estimateUsd, priceFor, type PricingRow } from "../config.js";
 import type { CostRecord, Phase, TokenUsage } from "../domain.js";
 
 export interface UsageInput {
@@ -49,12 +49,13 @@ export interface SpendBucket {
   estimatedUnknownUsd?: number;
 }
 
-/** provider/model pairs in the ledger that have no pricing row for the provider's current billing, in first-seen order. */
+/** provider/model pairs in the ledger that have no pricing row, in first-seen order. */
 export function unpricedModels(records: CostRecord[], pricing: PricingRow[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const record of records) {
-    if (!record.model) continue;
+    // A subscription agent's "not metered" row has nothing to price.
+    if (!record.model || record.meter === "not-metered") continue;
     const key = `${record.provider}/${record.model}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -68,6 +69,8 @@ export interface SpendSummary {
   unknownRecords: number;
   /** Same as unknownRecords; named to match budget callers. */
   unknownCount: number;
+  /** Rows of external agents that are not metered (subscriptions): $0 and never an unknown-cost estimate. */
+  notMeteredRecords: number;
   /**
    * Budget-only estimate for unknown-cost entries: tokens x the most expensive configured price for the provider, or
    * the flat `budgets.unknownCallUsd` for an entry with nothing to price it from. The ledger entries stay null.
@@ -93,15 +96,14 @@ function fromMicro(micro: number): number {
 }
 
 /**
- * Worst-case micro-USD for an unknown record, or null when tokens or prices are unavailable. Only rows for the provider's
- * current billing count: a subscription session is not estimated at API-key rates.
+ * Worst-case micro-USD for an unknown record (the dearest pricing row of its provider), or null when tokens or prices
+ * are unavailable.
  */
 function estimateUnknownMicro(record: CostRecord, pricing: PricingRow[]): number | null {
   // Pi's own price for the call, when it gave one, is the next best thing to a pricing row.
   const listed = typeof record.listPriceUsd === "number" && record.listPriceUsd > 0 ? toMicro(record.listPriceUsd) : null;
   if (record.inputTokens === null && record.outputTokens === null) return listed;
-  const apiKey = billingFor(record.provider) === "api-key";
-  const rows = pricing.filter((row) => row.provider === record.provider && (row.billing === "api-key") === apiKey);
+  const rows = pricing.filter((row) => row.provider === record.provider);
   if (rows.length === 0) return listed;
   let worst = 0;
   for (const row of rows) {
@@ -150,6 +152,7 @@ export function summarize(records: CostRecord[], options: { pricing?: PricingRow
   let unknown = 0;
   let estimated = 0;
   let unestimated = 0;
+  let notMetered = 0;
   const phase: Record<string, MicroBucket> = {};
   const provider: Record<string, MicroBucket> = {};
   const model: Record<string, MicroBucket> = {};
@@ -158,6 +161,7 @@ export function summarize(records: CostRecord[], options: { pricing?: PricingRow
     let k = 0;
     let u = 0;
     let e = 0;
+    if (record.meter === "not-metered") notMetered += 1;
     if (record.actualUsd === null) {
       u = 1;
       unknown += 1;
@@ -180,6 +184,7 @@ export function summarize(records: CostRecord[], options: { pricing?: PricingRow
     knownUsd: fromMicro(known),
     unknownRecords: unknown,
     unknownCount: unknown,
+    notMeteredRecords: notMetered,
     estimatedUnknownUsd: fromMicro(estimated),
     unestimatedUnknownCount: unestimated,
     byPhase: finish(phase),
@@ -248,6 +253,7 @@ export function toCsv(records: CostRecord[]): string {
     "outcome",
     "retries",
     "reason",
+    "meter",
   ];
   const lines = [headers.join(",")];
   for (const record of records) {

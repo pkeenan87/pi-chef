@@ -88,11 +88,10 @@ describe("budgets.unknownCallUsd layering", () => {
     expect(parseConfig("{}").budgets.unknownCallUsd).toBe(0.05);
   });
 
-  it("a project can only raise it: the higher of user and project wins", () => {
-    expect(layered({ budgets: { unknownCallUsd: 0.1 } }, { budgets: { unknownCallUsd: 0.01 } })).toBe(0.1);
+  it("a project's budgets section replaces the user's, so its value is the one used", () => {
+    expect(layered({ budgets: { unknownCallUsd: 0.1 } }, { budgets: { unknownCallUsd: 0.01 } })).toBe(0.01);
     expect(layered({ budgets: { unknownCallUsd: 0.1 } }, { budgets: { unknownCallUsd: 0.5 } })).toBe(0.5);
-    // The user sets none: the project is compared with the default, so it cannot lower it below 0.05.
-    expect(layered(undefined, { budgets: { unknownCallUsd: 0 } })).toBe(0.05);
-    expect(layered({ budgets: { taskUsd: 5 } }, { budgets: { unknownCallUsd: 0.2 } })).toBe(0.2);
+    expect(layered({ budgets: { unknownCallUsd: 0.1 } }, { budgets: { taskUsd: 5 } })).toBeUndefined();
+    expect(layered({ budgets: { taskUsd: 5 } }, undefined)).toBeUndefined();
   });
 });

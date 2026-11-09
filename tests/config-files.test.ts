@@ -46,17 +46,18 @@ describe("config file names", () => {
     expect(config.warnings?.join("\n")).toMatch(/config\.yml is ignored because .*config\.yaml exists/);
   });
 
-  it("reads a legacy cost-workflow.yml and says to rename it", () => {
+  it("no longer reads the legacy cost-workflow.yaml", () => {
     user("cost-workflow.yml", "branchPrefix: legacyyml\n");
     const config = loadConfig(project);
-    expect(config.branchPrefix).toBe("legacyyml");
-    expect(config.warnings).toContain("Rename ~/.pi/agent/cost-workflow.yml to chef.yaml");
+    expect(config.branchPrefix).toBe("chef");
+    expect(config.warnings ?? []).toEqual([]);
   });
 
   it("watches every candidate file so the cache follows whichever one is used", () => {
     const { watch } = configPaths(project);
-    for (const name of ["chef.yaml", "chef.yml", "cost-workflow.yaml", "cost-workflow.yml", "config.yaml", "config.yml"]) {
+    for (const name of ["chef.yaml", "chef.yml", "config.yaml", "config.yml"]) {
       expect(watch.some((file) => path.basename(file) === name)).toBe(true);
     }
+    expect(watch.some((file) => path.basename(file).startsWith("cost-workflow"))).toBe(false);
   });
 });

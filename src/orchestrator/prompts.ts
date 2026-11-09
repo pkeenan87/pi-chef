@@ -9,7 +9,7 @@ const TECHNICAL_PLAN = `The spec is a technical implementation plan, like an eng
 - changes: every file to create or modify, each with the concrete change (functions added or edited, fields, exports).
 - reuse: existing functions and utilities to build on, with their paths.
 - verification: the tests to add and the commands to run to prove it works end to end.
-- complexity, risk (low, medium or high), securitySensitive (true when it touches authentication, authorization, secrets, credentials, permissions or production deployment) and classificationReason (one short sentence): you rate the task. They pick the models and the review depth. A keyword scan can raise securitySensitive but never lower it.`;
+- complexity, risk (low, medium or high), securitySensitive (true when it touches authentication, authorization, secrets, credentials, permissions or production deployment) and classificationReason (one short sentence): you rate the task. They are shown with the plan.`;
 
 export const INTERVIEW_RULES = `[PLAN INTERVIEW]
 You are planning, not building. Edit and write tools are off; use read, grep, find, ls, safe bash, web_search and web_fetch.
@@ -18,62 +18,43 @@ You are planning, not building. Edit and write tools are off; use read, grep, fi
 3. Ask 3-${MAX_INTERVIEW_QUESTIONS} questions in TOTAL across all rounds. Fewer for small tasks. Never more than ${MAX_INTERVIEW_QUESTIONS}; the tool rejects a round that would exceed it.
 4. Every question has 2-4 options, exactly one recommended option, and a one-line reason. Word each question so accepting the recommendation is the easy path.
 5. Stop when no open decision remains or the cap is reached. Then call plan_spec once.
-6. After plan_spec, draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the advisors' answers yourself, then call plan_tickets with \`advisorResolution\`. Do not write code or edit files.
+6. After plan_spec, draft the tickets and call plan_tickets. Do not write code or edit files.
 ${TECHNICAL_PLAN}`;
 
 export const NO_QUESTIONS_RULES = `[PLAN WITHOUT QUESTIONS]
-The user chose --no-questions. Do not call plan_questions. Explore with read-only tools, then call plan_spec. Record each decision you would have asked about as an assumption (the choice you recommend and why). Then draft the tickets, call plan_consult with 2-3 specific questions about the riskiest parts, resolve the answers, and call plan_tickets with \`advisorResolution\`.
+The user chose --no-questions. Do not call plan_questions. Explore with read-only tools, then call plan_spec. Record each decision you would have asked about as an assumption (the choice you recommend and why). Then draft the tickets and call plan_tickets.
 ${TECHNICAL_PLAN}`;
 
 export const REVISION_RULES = `[PLAN REVISION]
-The user reviewed the drafted plan and asked for changes (below). Do not call plan_questions. Re-read code where the changes need it, then call plan_spec with the full revised spec (not a diff), then plan_consult for the revised draft, then plan_tickets with the full revised ticket list and \`advisorResolution\`. Keep what the user did not ask to change.
+The user reviewed the drafted plan and asked for changes (below). Do not call plan_questions. Re-read code where the changes need it, then call plan_spec with the full revised spec (not a diff), then plan_tickets with the full revised ticket list. Keep what the user did not ask to change.
 ${TECHNICAL_PLAN}`;
 
-export const TICKET_RULES = (target: number, local = false) => `[PLAN TICKETS]
-The spec is saved. Break the work into tickets, consult the advisors on the draft, then call plan_tickets.
+export const TICKET_RULES = (target: number) => `[PLAN TICKETS]
+The spec is saved. Break the work into tickets, then call plan_tickets.
 - Vertical tracer-bullet slices: each ticket delivers one end-to-end behavior and is independently demoable and testable. Never slice layer by layer.
 - Each ticket must fit ONE fresh context window. Soft target: ${target} tokens (estimatedContextTokens counts the ticket text, the files it touches, and about 20K of system and tool overhead). The tool rejects a ticket estimated above the target; split it.
 - For wide refactors use expand-contract: add the new path, migrate callers in small tickets, then remove the old path.
 - whatToBuild states the end-to-end behavior. implementation is the technical how: the files to create or change, the functions, types and signatures to add (with names), how they wire into existing code, and the tests to write. Name real paths and symbols from the code you read.
 - List "files" for every file the ticket will touch (ownership hints; overlapping tickets are serialized).
 - id is a two-digit ordinal ("01"). blockedBy lists ids of tickets that must finish first. No cycles. Every ticket needs at least one acceptance criterion.
-${local ? "- difficulty: see LOCAL MODE TICKETS below. Set it on every ticket. Every ticket runs on the same local model, and one that still fails stops the build for you to fix." : "- difficulty (low, medium or high) picks the model that builds the ticket: low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting, tricky logic, concurrency, or a large blast radius. Rate a ticket high when it touches auth, secrets, untrusted input, or egress; the difficulty picks the implementer. Set it on every ticket. A failed ticket is retried on the next stronger model."}
+- difficulty (low, medium or high) picks the model that builds the ticket: low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting, tricky logic, concurrency, or a large blast radius. Rate a ticket high when it touches auth, secrets, untrusted input, or egress; the difficulty picks the implementer. Set it on every ticket. A failed ticket is retried on the next stronger model.
 - checks is optional: command lines /build runs in the repo root after the ticket, one command per entry with plain space-separated arguments. There is no shell: no &&, |, ;, redirects, quotes, $VARS or globs (use two entries instead of &&). Destructive commands are refused. Verification steps that are not a command belong in implementation.
-- Before plan_tickets, call plan_consult with the draft \`tickets\` and 2-3 specific \`questions\` about the riskiest parts (design risks, ordering, missing cases). Every advisor answers in parallel. Resolve any disagreement yourself, then call plan_tickets with the final tickets and \`advisorResolution\`: what you accepted, what you rejected, and why. plan_tickets refuses without it. plan_consult runs once per draft.
 plan_tickets shows the user the full plan (spec and tickets) for review. If they request changes, revise and call plan_tickets again. Once saved, end your turn with a short summary; the user approves on the review screen (or later with /show-plan) and then runs /build. Do not implement anything.`;
 
-/** What the planner is told about the local model, from `localProfile`. */
-export interface LocalPlanTarget {
-  label: string;
-  small: boolean;
-  difficulties: string[];
-  maxFiles: number;
+/** One difficulty whose model is a local model with a known context window (`routing.localLimits`). */
+export interface LocalLimit {
+  difficulty: string;
+  /** `local/<id>`. */
+  model: string;
+  contextWindow: number;
+  /** What a ticket of this difficulty must fit: half the window, the system prompt and tools included. */
   targetTokens: number;
-  /** A hybrid plan (localMode.difficulties): only tickets of these difficulties go to the local model. */
-  only?: string[];
 }
 
-/** Docs-only tickets go to the local model too: rated the lowest difficulty it takes. */
-const DOCS_RULE = (level: string) => `- A ticket that only changes documentation (README, docs/, changelog) is ${level}. It is not sent the spec or the other tickets' code, so its steps list exactly what to write: each heading to add or change, and every name, flag, default and behavior to describe, copied from the spec. It needs no check.`;
-
-/** Added to every planning prompt of a local-mode task, so the spec is shaped for the local model from the start. */
-export const LOCAL_PLAN_NOTE = (target: LocalPlanTarget) => `[LOCAL MODE]
-${target.only ? `The ${target.only.join(" and ")} tickets of this plan will be built by a ${target.label} running locally; the rest by cloud models.` : `This plan will be built by a ${target.label} running locally, not by you.`} It follows instructions literally, has a small context window, explores little, and is not sent the spec. Make the approach concrete enough to hand over as small, exact steps: decide every name, type, signature, error message and edge case in the spec.`;
-
-/** The ticket rules for a local-mode plan, sized to the local model: replaces the cloud difficulty rule. */
-export const LOCAL_TICKET_RULES = (target: LocalPlanTarget) => `[LOCAL MODE TICKETS]
-${
-  target.only
-    ? `Tickets rated ${target.only.join(" or ")} are built by a ${target.label}; the others by the cloud models, under the rules above. Rate a ticket ${target.only.join(" or ")} only when the local model can finish it alone in one try, and write those tickets as follows (the rest as usual):`
-    : `Every ticket is built by the same ${target.label}. Write each one so it can finish it alone in one try:
-- difficulty: ${target.difficulties.join(" or ")} only; plan_tickets rejects anything else. ${target.small ? "low = one mechanical change in one or two files. Split anything bigger until every piece is that small." : "low = one mechanical change; medium = one contained behavior. Split anything harder until every piece is low or medium."}`
-}
-- files lists every file the ticket touches, at most ${target.maxFiles}. The context target is ${target.targetTokens} tokens, system prompt and tools included, so keep tickets small${target.small ? " and prefer more, smaller tickets" : ""}.
-- implementation is a numbered list ("1. ", "2. ", at least two steps), one change per step, in order. Each step names the file and the exact function, type, export or test to add or edit, with its full signature, and says where it goes (after which function, inside which describe block). Quote the existing lines the change attaches to (an import, a signature), so the model does not have to search.
-- Leave no decision to the implementer: names, types, return values, error messages and edge cases are written in the ticket. Repeat any spec detail the ticket needs; the spec is not sent.
-- whatToBuild is 2-4 sentences. acceptanceCriteria are observable and covered by the checks.
-- checks: at least one targeted test command for the ticket (for example \`npx vitest run tests/parser.test.ts\`) unless the config sets checks.
-${DOCS_RULE(target.only?.[0] ?? "low")}`;
+/** Added to the ticket-stage planning prompt when a difficulty is built by a local model: its tickets must fit that model's window. */
+export const LOCAL_SIZE_RULES = (limits: LocalLimit[]) => `[LOCAL MODEL LIMITS]
+${limits.map((item) => `- ${item.difficulty} tickets are built by ${item.model}, a local model with a ${item.contextWindow}-token context window. Each must fit in about ${item.targetTokens} tokens (estimatedContextTokens; the tool rejects more): few files, one change per step, small tickets.`).join("\n")}
+A local model follows instructions literally and explores little. For those tickets write implementation as numbered steps that name the file and the exact function, type or test to change, and repeat any spec detail the ticket needs.`;
 
 export interface TicketPromptInput {
   ticket: { id: string; title: string; whatToBuild: string; implementation?: string; acceptanceCriteria: string[]; files?: string[]; checks?: string[] };
@@ -87,20 +68,15 @@ export interface TicketPromptInput {
   previousFailure?: string;
   /** Earlier work from a previous version of this ticket is already on the branch (the plan was revised). */
   priorWork?: boolean | string;
-  /** A local model builds it: no spec, shorter context, and step-by-step instructions. */
-  local?: boolean;
 }
 
 export const TICKET_PROMPT_LIMITS = { spec: 12000, blocker: 1500, rules: 6000, failure: 4000 };
-/** Smaller limits for a local model's context window. The spec is not sent: local tickets are written self-contained. */
-export const LOCAL_TICKET_PROMPT_LIMITS = { blocker: 600, rules: 2000, failure: 2500 };
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n[truncated]` : text);
 
 /** The prompt for one /build ticket. Pure: callers pass already-redacted text. */
 export function ticketPrompt(input: TicketPromptInput): string {
   const { ticket } = input;
-  const limits = input.local ? { ...TICKET_PROMPT_LIMITS, ...LOCAL_TICKET_PROMPT_LIMITS } : TICKET_PROMPT_LIMITS;
   const parts = [
     `# Ticket ${ticket.id}: ${ticket.title}`,
     "",
@@ -115,30 +91,20 @@ export function ticketPrompt(input: TicketPromptInput): string {
   ];
   if (ticket.files?.length) parts.push("", "## Files (ownership hints)", "", ...ticket.files.map((file) => `- ${file}`));
   if (ticket.checks?.length) parts.push("", "## Checks to run", "", ...ticket.checks.map((check) => `- ${check}`));
-  if (input.spec && !input.local) parts.push("", "## Spec (technical plan and decisions)", "", clip(input.spec, limits.spec));
+  if (input.spec) parts.push("", "## Spec (technical plan and decisions)", "", clip(input.spec, TICKET_PROMPT_LIMITS.spec));
   if (input.blockers.length) {
     parts.push("", "## Completed blocking tickets (already on the branch)", "");
-    for (const blocker of input.blockers) parts.push(`### ${blocker.id}: ${blocker.title}`, clip(blocker.summary || "(no summary recorded)", limits.blocker), "");
+    for (const blocker of input.blockers) parts.push(`### ${blocker.id}: ${blocker.title}`, clip(blocker.summary || "(no summary recorded)", TICKET_PROMPT_LIMITS.blocker), "");
   }
-  if (input.previousFailure) parts.push("", "## Previous attempt failed", "", "A cheaper model already tried this ticket. Build on its changes where they are sound.", "", clip(input.previousFailure, limits.failure));
+  if (input.previousFailure) parts.push("", "## Previous attempt failed", "", "A cheaper model already tried this ticket. Build on its changes where they are sound.", "", clip(input.previousFailure, TICKET_PROMPT_LIMITS.failure));
   else if (input.priorWork) parts.push("", "## Earlier work on this branch", "", typeof input.priorWork === "string" ? input.priorWork : "An earlier version of this ticket already made changes here (see `git log`). The ticket was revised since: build on what still fits the ticket as written above, and change or remove what no longer does.");
-  if (input.repoRules) parts.push("", "## Repo rules (AGENTS.md)", "", clip(input.repoRules, limits.rules));
+  if (input.repoRules) parts.push("", "## Repo rules (AGENTS.md)", "", clip(input.repoRules, TICKET_PROMPT_LIMITS.rules));
   parts.push(
     "",
     "## Instructions",
     "",
-    ...(input.local
-      ? [
-          "1. Read each file under Files before you change it.",
-          "2. Do the Implementation steps in order, one at a time. Change only the files listed unless a step names another.",
-          "3. Do not rename, reformat or refactor code the steps do not mention.",
-          "4. Run every command under Checks to run. If one fails, read the error, fix the code, and run it again.",
-          '5. Finish with one line per acceptance criterion, "- [x]" (met) or "- [ ]" (not met), then "Files changed:" and the files.',
-        ]
-      : [
-          "Implement only this ticket and keep changes scoped. Write or adjust tests for the acceptance criteria and run the checks.",
-          'Finish with a summary that lists each acceptance criterion as "- [x]" (met) or "- [ ]" (not met), then the files you changed.',
-        ]),
+    "Implement only this ticket and keep changes scoped. Write or adjust tests for the acceptance criteria and run the checks.",
+    'Finish with a summary that lists each acceptance criterion as "- [x]" (met) or "- [ ]" (not met), then the files you changed.',
   );
   return parts.join("\n");
 }

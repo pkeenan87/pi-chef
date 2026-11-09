@@ -122,11 +122,5 @@ describe("task store", () => {
     expect(store.readLedger()).toHaveLength(1);
     store.appendLedger(rec);
     expect(store.readLedger()).toHaveLength(2);
-    mkdirSync(path.join(root, "metrics"), { recursive: true });
-    await Promise.all([store.bumpMetric("bug", "cheap", true), store.bumpMetric("bug", "cheap", false), store.bumpMetric("bug", "cheap", true)]);
-    const cell = store.readMetrics().bug.cheap;
-    expect(cell).toMatchObject({ success: 2, failure: 1 });
-    expect(cell.recent).toHaveLength(3);
-    expect(cell.recent?.every((item) => typeof item.at === "string")).toBe(true);
   });
 });

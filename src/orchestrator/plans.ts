@@ -1,11 +1,10 @@
 import type { CommandResult, TaskState } from "../domain.js";
-import { samePath } from "../git/workspace.js";
 import { dirtyPaths } from "./build.js";
 import { done, fail, guard, type WorkflowContext } from "./context.js";
-import { cell, mdTable } from "./format.js";
+import { budgetState } from "./budget.js";
+import { cell, clock, formatUsdShort, mdTable } from "./format.js";
 import { showTaskPlan } from "./planning.js";
-import { clock, taskState } from "./state-label.js";
-import { activeTask, closeTask, displayName, findTask, isClosed, listTasks, unfinishedTasks } from "./tasks.js";
+import { activeTask, closeTask, displayName, findTask, isClosed, listTasks, stateText, unfinishedTasks } from "./tasks.js";
 
 /** `/plans`: list tasks. `/plans <name>`: switch to one. `/plans close <name>`: close one. */
 export function plans(ctx: WorkflowContext, arg = ""): Promise<CommandResult> {
@@ -40,6 +39,13 @@ function ticketCount(task: TaskState): string {
   return `${finished}/${tickets.length || Object.keys(runs).length}`;
 }
 
+/** The active task in one phrase: name, state, tickets done and failed, spend against its budget. */
+function activeSummary(ctx: WorkflowContext, task: TaskState): string {
+  const failed = Object.values(task.ticketRuns ?? {}).filter((run) => run.status === "failed").length;
+  const { task: spend } = budgetState(ctx, task.taskId);
+  return `${displayName(task)} · ${stateText(task)} · tickets ${ticketCount(task)} done${failed > 0 ? `, ${failed} failed` : ""} · ${formatUsdShort(spend.knownUsd)}${spend.unknownRecords > 0 ? "+?" : ""} of $${ctx.config.budgets.taskUsd}`;
+}
+
 async function listPlans(ctx: WorkflowContext, all: boolean): Promise<CommandResult> {
   const current = await activeTask(ctx);
   const everything = listTasks(ctx);
@@ -50,13 +56,13 @@ async function listPlans(ctx: WorkflowContext, all: boolean): Promise<CommandRes
   const rows = shown.map((task) => [
     task.taskId === current?.taskId ? "●" : "",
     cell(displayName(task), 40),
-    cell(taskState(task, task.review).line, 100),
+    cell(stateText(task), 100),
     ticketCount(task),
     cell(task.build?.branch ?? "-", 60),
     updated(ctx, task.updatedAt),
   ]);
   const markdown = ["## Tasks", "", ...mdTable(["", "Name", "State", "Tickets", "Branch", "Updated"], rows), "", "● is the active task. /plans <name> switches; /plans close <name> closes."].join("\n");
-  const summary = `${open.length} open task(s)${all ? ` and ${closedCount} closed` : closedCount > 0 ? ` (${closedCount} closed; /plans --all)` : ""}. ${current && !isClosed(current) ? `Active: ${displayName(current)}.` : "No active task."} /plans <name> switches.`;
+  const summary = `${open.length} open task(s)${all ? ` and ${closedCount} closed` : closedCount > 0 ? ` (${closedCount} closed; /plans --all)` : ""}. ${current && !isClosed(current) ? `Active: ${activeSummary(ctx, current)}.` : "No active task."} /plans <name> switches.`;
   // The chat block holds the table; the result stays one line. Without a UI the result is the table.
   ctx.report?.(markdown);
   return done(ctx.report ? summary : markdown, { tasks: shown.map((task) => task.taskId), active: current?.taskId });
@@ -66,9 +72,6 @@ async function listPlans(ctx: WorkflowContext, all: boolean): Promise<CommandRes
 async function followBranch(ctx: WorkflowContext, task: TaskState): Promise<string | undefined> {
   const branch = task.build?.branch;
   if (!branch) return undefined;
-  // A worktree build's branch is checked out in its worktree, where git will not let this checkout take it too.
-  const worktree = task.build?.worktree;
-  if (worktree && !samePath(worktree, ctx.git.repoRoot)) return `Its branch ${branch} is checked out in ${worktree}; /build moves Pi there, or run pi in that folder.`;
   let current: string;
   try {
     current = await ctx.git.currentBranch();
@@ -103,7 +106,7 @@ async function switchPlan(ctx: WorkflowContext, ref: string): Promise<CommandRes
   } catch {
     /* not a repository: the pointer alone is enough */
   }
-  const line = `Switched to ${name} (${taskState(task, task.review).line}).${note ? ` ${note}` : ""}`;
+  const line = `Switched to ${name} (${stateText(task)}).${note ? ` ${note}` : ""}`;
   if (!task.plan) return done(`${line} It has no plan yet.`, { taskId: task.taskId });
   const shown = await showTaskPlan(ctx, task);
   return { ok: shown.ok, code: shown.code, text: `${line} ${shown.ok ? shown.text.split("\n")[0]! : shown.text}`, data: { taskId: task.taskId } };
@@ -136,6 +139,5 @@ async function closePlan(ctx: WorkflowContext, ref: string): Promise<CommandResu
       moved = " No active task.";
     }
   }
-  const tree = task.build?.worktree ? ` Its worktree ${task.build.worktree} is kept too; \`git worktree remove ${task.build.worktree}\` deletes it.` : "";
-  return done(`Closed ${name}. Its files${task.build ? ` and branch ${task.build.branch}` : ""} are kept.${tree}${moved}`, { taskId: task.taskId });
+  return done(`Closed ${name}. Its files${task.build ? ` and branch ${task.build.branch}` : ""} are kept.${moved}`, { taskId: task.taskId });
 }

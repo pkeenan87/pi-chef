@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ReviewReport } from "../src/domain.js";
 import { Workflow } from "../src/orchestrator/service.js";
 import { runBuild } from "../src/orchestrator/build.js";
-import { builtWorkflow, checkRunner, readyAuth, sampleSpec, sampleTicket, tempRepo, testConfig, tieredConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
+import { builtWorkflow, checkRunner, sampleSpec, sampleTicket, tempRepo, testConfig, tieredConfig, ticketWorkflow, workflow, writingDriver } from "./helpers.js";
 
 const exec = promisify(execFile);
 
@@ -38,12 +38,8 @@ describe("workflow", () => {
     expect(readFileSync(approvedFile, "utf8")).toBe(first);
 
     rmSync(path.join(frozen, taskDir, "state.json"));
-    const restarted = new Workflow({ cwd, config: testConfig(), auth: readyAuth(), now: () => new Date("2026-10-14T12:00:00.000Z"), confirm: async () => true, runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })) });
-    const status = await restarted.status();
-    expect(status.text).toContain("| Task | ");
-    expect(status.text).toMatch(/\| Task \| \S+ \(task-\d{14}-[^)]+\) \|/);
-    expect(status.text).toMatch(/\| Plan \| v1 approved \d\d:\d\d \|/);
-    expect(status.text).toContain("## Status · Approved v1 · run /build");
+    const restarted = new Workflow({ cwd, config: testConfig(), now: () => new Date("2026-10-14T12:00:00.000Z"), confirm: async () => true, runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })) });
+    expect((await restarted.plans("")).text).toContain("plan approved, run /build");
   });
 
   it("keeps secrets out of artifacts", async () => {
@@ -80,16 +76,19 @@ describe("workflow", () => {
     expect((await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout).toBe(head);
   });
 
-  it("pauses a security-sensitive plan until a person confirms", async () => {
+  it("does not scan the request for security keywords or ask again before /build: plan approval is the gate", async () => {
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, confirm: async () => false });
+    let prompts = 0;
+    const app = workflow(cwd, { config: tieredConfig(), startTurn: () => undefined, confirm: async () => (prompts += 1, false) });
     await app.startPlan("change auth and permissions for the ingest parser production secrets");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01")]);
     await app.approveDraft();
+    expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "general", source: "default" });
     const result = await app.startBuild();
-    expect(result.code).toBe("SECURITY_PAUSE");
-    expect((await app.status()).text).toContain("## Status · Paused · ");
+    expect(result.ok, result.text).toBe(true);
+    expect(prompts).toBe(0);
+    expect(app.store.load(app.activeTaskId()!)!.phase).toBe("IMPLEMENTING");
   });
 });
 
@@ -102,7 +101,7 @@ describe("a new /plan closes a finished task", () => {
     const firstId = app.activeTaskId()!;
     expect((await app.startPlan(request)).ok).toBe(true);
     expect(app.store.load(firstId)!.phase).toBe("IMPLEMENTING");
-    expect(lines.some((line) => line.startsWith(`Parked ${app.store.load(firstId)!.name} (Built · `))).toBe(true);
+    expect(lines.some((line) => line.startsWith(`Parked ${app.store.load(firstId)!.name} (built, `))).toBe(true);
   });
 
   it("closes a task whose tickets are all built and whose review passed, and goes on to plan", async () => {
@@ -121,18 +120,6 @@ describe("a new /plan closes a finished task", () => {
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("PLANNING");
   });
 
-  it("closes a task an older version left in PUBLISHED, AUTOPILOT, or MERGE_READY", async () => {
-    for (const phase of ["PUBLISHED", "AUTOPILOT", "MERGE_READY"] as const) {
-      const lines: string[] = [];
-      const { app } = await builtWorkflow({ progress: (line) => void lines.push(line), startTurn: () => undefined });
-      const firstId = app.activeTaskId()!;
-      await app.store.update(firstId, "old file", (task) => ({ ...task, phase }));
-      expect((await app.startPlan(request)).ok).toBe(true);
-      expect(app.store.load(firstId)!.phase).toBe("COMPLETE");
-      expect(lines).toContain(`Closed ${app.store.load(firstId)!.name}.`);
-    }
-  });
-
   it("parks, rather than closes or revises, a task that still has unfinished tickets", async () => {
     const cwd = await tempRepo();
     const lines: string[] = [];
@@ -147,7 +134,7 @@ describe("a new /plan closes a finished task", () => {
     expect(app.store.load(app.activeTaskId()!)!.request).toBe(request);
     expect(app.store.load(id)).toEqual(before);
     const parked = lines.find((line) => line.startsWith("Parked "))!;
-    expect(parked).toBe(`Parked ${before.name} (Approved v1 · run /build). /plans ${before.name} switches back.`);
+    expect(parked).toBe(`Parked ${before.name} (plan approved, run /build). /plans ${before.name} switches back.`);
   });
 
   it("never replans another task: the same request twice makes two tasks", async () => {
@@ -162,13 +149,13 @@ describe("a new /plan closes a finished task", () => {
 });
 
 describe("build and review robustness", () => {
-  it("warns on a soft budget and refuses a hard one before the security prompt", async () => {
+  it("warns on a soft budget and refuses a hard one", async () => {
     const cwd = await tempRepo();
     const messages: string[] = [];
     let prompts = 0;
     const config = tieredConfig();
     config.budgets.taskUsd = 1;
-    const app = workflow(cwd, { config, rng: () => 0.5, startTurn: () => undefined, notify: (message) => messages.push(message), confirm: async () => (prompts += 1, false) });
+    const app = workflow(cwd, { config, startTurn: () => undefined, notify: (message) => messages.push(message), confirm: async () => (prompts += 1, false) });
     await app.startPlan("change auth and permissions for the ingest parser production secrets");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01")]);
@@ -180,21 +167,13 @@ describe("build and review robustness", () => {
         requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd, usageKnown: true, outcome: "success", retries: 0, reason: "test",
       });
     spend(0.9);
-    expect((await app.startBuild()).code).toBe("SECURITY_PAUSE");
+    expect((await app.startBuild()).ok).toBe(true);
     expect(messages.some((message) => /Budget warning/.test(message))).toBe(true);
     spend(0.5);
     prompts = 0;
     const hard = await app.startBuild();
     expect(hard.code).toBe("BUDGET");
     expect(prompts).toBe(0);
-  });
-
-  it("reports corrupt event lines in status", async () => {
-    const { app, cwd } = await ticketWorkflow([sampleTicket("01")]);
-    const dir = path.join(cwd, ".pi-workflows", "tasks", app.activeTaskId()!);
-    const events = path.join(dir, "events.jsonl");
-    writeFileSync(events, `${readFileSync(events, "utf8").replace(/\n$/, "")}\nnot json\n{"seq":99}\n`);
-    expect((await app.status()).text).toMatch(/### Warnings\n\n- 1 corrupt line|### Warnings[\s\S]*corrupt line/);
   });
 
   it("rejects a dependency cycle at plan time", async () => {

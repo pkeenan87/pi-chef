@@ -1,14 +1,13 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { setBillingResolver } from "../src/config.js";
+import { describe, expect, it } from "vitest";
 import { summarize, unpricedModels } from "../src/cost/ledger.js";
 import { type CostRecord, type PlanDocument, type ReviewReport, type TaskState, type Ticket } from "../src/domain.js";
 import { forNewPlan, sameTicket } from "../src/orchestrator/plan.js";
 import { ticketPrompt } from "../src/orchestrator/prompts.js";
 import { modelReviewPrompt, parseModelFindings } from "../src/review/model-review.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
-import { formatDuration, formatTokens } from "../src/orchestrator/format.js";
+import { formatDuration } from "../src/orchestrator/format.js";
 import { splitDiff } from "../src/review/model-review.js";
 import { blank } from "../src/orchestrator/planning.js";
 import { TICKET_RULES } from "../src/orchestrator/prompts.js";
@@ -139,17 +138,15 @@ describe("state carried into a new plan version", () => {
 });
 
 describe("phantom spend", () => {
-  afterEach(() => setBillingResolver(undefined));
   const pricing = [
     { provider: "anthropic", model: "cheap", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 },
-    { provider: "anthropic", model: "cheap", billing: "api-key" as const, effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 },
+    { provider: "anthropic", model: "dear", effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 },
   ];
   const unknown: CostRecord = { id: "1", at: "2026-10-15T10:00:00.000Z", taskId: "t", phase: "IDLE", provider: "anthropic", model: "other", tier: "interactive", requests: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, actualUsd: null, usageKnown: false, outcome: "unknown", retries: 0, reason: "observed assistant usage" };
 
-  it("estimates an unpriced subscription model from subscription rows only, and api-key rows while on a key", () => {
-    expect(summarize([unknown], { pricing }).estimatedUnknownUsd).toBe(0);
-    setBillingResolver(() => "api-key");
+  it("estimates an unpriced model at the provider's dearest row", () => {
     expect(summarize([unknown], { pricing }).estimatedUnknownUsd).toBe(10);
+    expect(summarize([unknown], { pricing: [pricing[0]!] }).estimatedUnknownUsd).toBe(0);
   });
 
   it("names the models in the ledger that have no pricing row", () => {
@@ -161,10 +158,10 @@ describe("phantom spend", () => {
 describe("model review", () => {
   const plan: PlanDocument = { version: 1, createdAt: "2026-10-15T00:00:00.000Z", summary: "Add retry.", risks: [], acceptance: ["retry works"], groups: [], overlap: [], securitySensitive: false, tickets: [ticket("01", "retry", { acceptanceCriteria: ["retry works"] })] };
 
-  it("parses a JSON list out of chatty output, fills defaults, and sorts by severity", () => {
-    const text = 'Here you go:\n[{"severity":"LOW","category":"tests","message":"No test for the empty case.","file":"src/a.ts"},{"severity":"high","message":"retry() loops forever when attempts is 0.","evidence":"while (true)"},{"message":""},"junk"]';
+  it("parses a JSON list out of chatty output, fills defaults, reads the scores and leaves a missing one out", () => {
+    const text = 'Here you go:\n[{"likelihood":"3","severity":2.6,"category":"tests","message":"No test for the empty case.","file":"src/a.ts"},{"likelihood":9,"severity":11,"message":"retry() loops forever when attempts is 0.","evidence":"while (true)"},{"severity":9,"message":"no likelihood"},{"message":""},"junk"]';
     const findings = parseModelFindings(text)!;
-    expect(findings.map((item) => item.severity)).toEqual(["low", "high"]);
+    expect(findings.map((item) => [item.likelihood, item.severity])).toEqual([[3, 3], [9, 10], [undefined, 9]]);
     expect(findings[1]).toMatchObject({ category: "general", evidence: "while (true)" });
     expect(parseModelFindings("I found nothing.")).toBeUndefined();
     expect(parseModelFindings("[]")).toEqual([]);
@@ -172,15 +169,14 @@ describe("model review", () => {
 
   it("puts the plan before the diff and truncates the diff at the limit", () => {
     const prompt = modelReviewPrompt(plan, "x".repeat(2000), 1000);
-    expect(prompt.truncated).toBe(true);
-    expect(prompt.text.indexOf("# Plan")).toBeLessThan(prompt.text.indexOf("# Diff"));
-    expect(prompt.text).toContain("- 01 T01: retry works");
-    expect(prompt.text).toContain("1000 more not shown");
-    expect(modelReviewPrompt(plan, "short", 1000).truncated).toBe(false);
+    expect(prompt.indexOf("# Plan")).toBeLessThan(prompt.indexOf("# Diff"));
+    expect(prompt).toContain("- 01 T01: retry works");
+    expect(prompt).toContain("1000 more not shown");
+    expect(modelReviewPrompt(plan, "short", 1000)).not.toContain("more not shown");
   });
 
   it("lists the review model's findings in /review, ledgers the call, and keeps the pass deterministic", async () => {
-    const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: "high", category: "correctness", file: "src/ingest.ts", message: "ingest() throws on empty input but the plan asks for a skip.", evidence: 'throw new Error("empty")' }]));
+    const { chat, calls } = fakeChat(() => JSON.stringify([{ likelihood: 8, severity: 8, category: "correctness", file: "src/ingest.ts", message: "ingest() throws on empty input but the plan asks for a skip.", evidence: 'throw new Error("empty")' }]));
     const cwd = await tempRepo();
     const app = workflow(cwd, { config: tieredConfig(), chat });
     await adHocChange(cwd);
@@ -188,7 +184,7 @@ describe("model review", () => {
     expect(review.ok, review.text).toBe(true);
     const text = reportText(app);
     expect(text).toMatch(/\| Model review \| \S+\/\S+ · 1 finding \| 0\.0s \| (<\$0\.01|\$\d+\.\d{2}) \|/);
-    expect(text).toMatch(/\| 1 \| HIGH \| src\/ingest\.ts \| ingest\(\) throws on empty input/);
+    expect(text).toMatch(/\| 1 \| L8×S8=64 \| src\/ingest\.ts \| ingest\(\) throws on empty input/);
     expect(text).toMatch(/^## Review passed · 0\.0s · (<\$0\.01|\$\d+\.\d{2})\n/);
     expect(text).toContain("| Checks | 1 of 1 passed | 0.0s | — |");
     expect(text).toContain("| npm test | ✓ pass | 0.0s |");
@@ -268,10 +264,9 @@ describe("model review", () => {
 });
 
 describe("verbose output", () => {
-  it("formats durations and token counts", () => {
+  it("formats durations", () => {
     expect([formatDuration(800), formatDuration(12_340), formatDuration(261_000), formatDuration(3_720_000)]).toEqual(["0.8s", "12.3s", "4m21s", "1h02m"]);
     expect([formatDuration(59_970), formatDuration(119_600), formatDuration(3_599_700)]).toEqual(["1m00s", "2m00s", "1h00m"]);
-    expect([formatTokens(512), formatTokens(81_000), formatTokens(1_654_094)]).toEqual(["512", "81k", "1.7M"]);
   });
 
   it("splits a large diff at file boundaries and cuts only an oversized file", () => {
@@ -289,7 +284,7 @@ describe("verbose output", () => {
 
   it("reviews a large diff in parts, reports progress per part, and says when parts were left out", async () => {
     let call = 0;
-    const { chat, calls } = fakeChat(() => JSON.stringify([{ severity: call++ === 0 ? "low" : "high", category: "tests", message: `finding from part ${call}` }]));
+    const { chat, calls } = fakeChat(() => JSON.stringify([{ likelihood: call++ === 0 ? 2 : 8, severity: 3, category: "tests", message: `finding from part ${call}` }]));
     const progress: string[] = [];
     const config = tieredConfig("review: { maxDiffChars: 2000, maxChunks: 2 }");
     const cwd = await tempRepo();
@@ -308,7 +303,7 @@ describe("verbose output", () => {
     expect(progress.some((line) => /^Review: model pass done: \d+ finding\(s\) in 0\.0s, \$0\.\d{4}$/.test(line))).toBe(true);
     // Severity order across parts, and the top line says how the pass ran.
     expect(text).toMatch(/\| Model review \| \S+\/\S+ · 2 parts · 2 findings · part of the diff was not reviewed \| 0\.0s \|/);
-    expect(text.indexOf("| HIGH |")).toBeLessThan(text.indexOf("| LOW |"));
+    expect(text.indexOf("| L8×S3=24 |")).toBeLessThan(text.indexOf("| L2×S3=6 |"));
     const data = savedReport(app) as unknown as { modelReview: { chunks: number; truncated: boolean; error?: string } };
     expect(data.modelReview.chunks).toBe(2);
     // The padded file is larger than one part, so it was cut: the header says so.

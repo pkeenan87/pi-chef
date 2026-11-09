@@ -1,15 +1,14 @@
-import { WorkflowError, type CommandResult, type Phase, type TaskState, type TokenUsage } from "../domain.js";
+import { WorkflowError, type CommandResult, type Phase, type TaskState } from "../domain.js";
 import type { WorkflowConfig } from "../config.js";
-import { samePath, type GitWorkspace } from "../git/workspace.js";
-import type { AuthProbe } from "../providers/auth.js";
+import type { GitWorkspace } from "../git/workspace.js";
+import type { HerdrClient } from "../herdr/client.js";
+import type { TabTimings } from "../runner/tab.js";
 import type { ChatFn } from "../providers/pi-chat.js";
-import type { AzRunner } from "./status-foundry.js";
 import type { UsableRegistry } from "../providers/usable.js";
 import type { CheckRunner } from "../review/review.js";
 import { redact } from "../redact.js";
 import type { TaskStore } from "../storage/store.js";
 import { move } from "./machine.js";
-import type { Indicator } from "./progress.js";
 import type { PlanReviewFn } from "./types.js";
 
 /** Everything the orchestrator modules share. The UI hooks are mutable: `Workflow.bind` swaps them per command. */
@@ -21,13 +20,9 @@ export interface WorkflowContext {
   readonly git: GitWorkspace;
   readonly now: () => Date;
   readonly id: () => string;
-  authProbe: AuthProbe;
-  /** Runs the Azure CLI (argv, never a shell). Only `/status foundry` uses it. */
-  azure: AzRunner;
-  readonly rng?: () => number;
   /** Check runner that skips a check already passed on an identical clean tree. */
   readonly checkRunner: CheckRunner;
-  /** Aborted by `Workflow.dispose`; the advisory model review passes its signal so a running call is stopped. */
+  /** Aborted by `Workflow.dispose`; the model review passes its signal so a running call is stopped. */
   shutdown: AbortController;
   /** Keys of warnings already shown, so each appears once. */
   readonly warned: Set<string>;
@@ -39,11 +34,11 @@ export interface WorkflowContext {
   progress?: (message: string) => void;
   /** Multi-line markdown blocks kept in the chat transcript. Absent without a UI. */
   report?: (markdown: string) => void;
-  /** Live one-line progress while work runs and no model streams (/review, /build between turns). A no-op without a UI. */
-  indicator?: Indicator;
   chat?: ChatFn;
-  /** Advisor calls as read-only Pi sessions in the repository (`advisors.tools`); absent when Pi cannot open them. */
-  advisorChat?: ChatFn;
+  /** The herdr client: agent reviews open a tab through it. Absent outside Pi; a test binds a fake. */
+  herdr?: HerdrClient;
+  /** Timings and sleeps of the herdr tab waits; a test seam (the defaults are right for a person). */
+  herdrTimings?: TabTimings;
   /** Pi's model registry for the live session. When bound, routing skips candidates it does not know or holds no credentials for. */
   registry?: UsableRegistry;
   status?: (text: string | undefined) => void;
@@ -59,19 +54,12 @@ export interface WorkflowContext {
   show?: (markdown: string) => void;
 }
 
-/** Phases of tasks from older versions that tracked a published pull request. */
-export const PUBLISHED_PHASES: Phase[] = ["PUBLISHED", "AUTOPILOT", "MERGE_READY"];
-
 export function fail(code: string, text: string): CommandResult {
   return { ok: false, code, text };
 }
 
 export function done(text: string, data?: unknown): CommandResult {
   return { ok: true, text, data };
-}
-
-export function knownZero(): TokenUsage {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };
 }
 
 export function iso(ctx: WorkflowContext): string {
@@ -113,12 +101,7 @@ export function workspaceName(ctx: WorkflowContext): string {
   return ctx.config.workspaceDir.replace(/^\.\//, "").replace(/\/$/, "");
 }
 
-/**
- * Repo-relative paths that are never the user's code: the workspace dir, and in a build's worktree what /build copied
- * there from the main checkout (Pi's untracked `.pi/` project folder). Commits, diffs and the dirty-tree test skip them.
- */
+/** Repo-relative paths that are never the user's code: the workspace dir. Commits, diffs and the dirty-tree test skip them. */
 export function excludedPaths(ctx: WorkflowContext): string[] {
-  const build = active(ctx)?.build;
-  const copied = build?.worktree && build.copied?.length && samePath(build.worktree, ctx.git.repoRoot) ? build.copied : [];
-  return [workspaceName(ctx), ...copied];
+  return [workspaceName(ctx)];
 }

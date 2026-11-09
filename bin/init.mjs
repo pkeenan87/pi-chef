@@ -117,8 +117,8 @@ function writeUserConfig(opts, log) {
   const dir = path.join(homedir(), ".pi", "agent");
   const target = path.join(dir, "chef.yaml");
   const shown = "~/.pi/agent/chef.yaml";
-  if (["chef.yaml", "chef.yml", "cost-workflow.yaml", "cost-workflow.yml"].some((name) => existsSync(path.join(dir, name)))) {
-    log(`${shown} (or an older user config) exists; kept it`);
+  if (["chef.yaml", "chef.yml"].some((name) => existsSync(path.join(dir, name)))) {
+    log(`${shown} exists; kept it`);
     return;
   }
   log(`create ${shown} (every setting commented out; uncomment what you want to change)`);
@@ -160,9 +160,9 @@ export function run(argv, log = console.log) {
 
   log(`
 Next:
-  1. Edit .pi-workflows/config.yaml: set checks:, setup:, and pricing rows.
-  2. Your own settings (budgets, models, endpoints) go in ~/.pi/agent/chef.yaml: uncomment and edit.
-  3. In Pi: /login openai, /login anthropic (and az login for Foundry), then /auth status.
+  1. Edit .pi-workflows/config.yaml: set checks: and setup:.
+  2. Your own settings (models, budgets, a local server, pricing rows) go in ~/.pi/agent/chef.yaml: uncomment and edit.
+  3. In Pi: /login for the providers your models use (for example /login anthropic).
   4. Grant project trust when Pi asks, so it reads .pi/settings.json.`);
   return installed ? 0 : 1;
 }

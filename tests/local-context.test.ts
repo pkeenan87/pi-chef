@@ -57,7 +57,7 @@ describe("contextMismatch", () => {
 });
 
 describe("warnLocalContext", () => {
-  const config = parseConfig(`providers:\n  local:\n    type: openai-compatible\n    baseUrl: "http://127.0.0.1:11434/v1"\ntiers:\n  local:\n    - { provider: local, model: "qwen3.5:9b", contextWindow: 65536 }\n`);
+  const config = parseConfig(`local:\n  baseUrl: "http://127.0.0.1:11434/v1"\n  models:\n    - { id: "qwen3.5:9b", contextWindow: 65536 }\n`);
   const ui = () => {
     const notices: string[] = [];
     return { notices, ctx: { hasUI: true, ui: { notify: (message: string) => void notices.push(message) } } as never };

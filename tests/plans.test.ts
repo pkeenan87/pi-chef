@@ -31,12 +31,12 @@ describe("/plans", () => {
     const t = await setup();
     const result = await t.app.plans("");
     expect(result.ok).toBe(true);
-    expect(result.text).toBe("2 open task(s) (1 closed; /plans --all). Active: beta. /plans <name> switches.");
+    expect(result.text).toBe("2 open task(s) (1 closed; /plans --all). Active: beta · planning (interview) · tickets 0/0 done · $0.00 of $20. /plans <name> switches.");
     const table = t.reports[0]!;
     expect(table).toContain("|  | Name | State | Tickets | Branch | Updated |");
     const rows = table.split("\n").filter((line) => /^\| (●)? ?\| (alpha|beta|gamma) /.test(line));
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatch(/^\| ● \| beta \| Planning · interview \| 0\/0 \| - \| \d\d:\d\d \|$/);
+    expect(rows[0]).toMatch(/^\| ● \| beta \| planning \(interview\) \| 0\/0 \| - \| \d\d:\d\d \|$/);
     expect(rows[1]).toMatch(/^\|  \| alpha \| .* \| 0\/0 \| chef\/alpha \| \d{4}-\d\d-\d\d \|$/);
     expect(table).not.toContain("gamma");
   });
@@ -45,7 +45,7 @@ describe("/plans", () => {
     const t = await setup();
     const result = await t.app.plans("--all");
     expect(result.text).toContain("2 open task(s) and 1 closed");
-    expect(t.reports[0]).toContain("| gamma | Complete |");
+    expect(t.reports[0]).toContain("| gamma | complete |");
   });
 
   it("returns the table itself when there is no chat to post it in", async () => {
@@ -104,7 +104,7 @@ describe("/plans", () => {
   it("posts the plan of a draft with the approve picker", async () => {
     const seen: PlanReviewRequest[] = [];
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined });
+    const app = workflow(cwd, { config: tieredConfig(), startTurn: () => undefined });
     await app.startPlan("Add retry to the ingest parser");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01")]);
@@ -118,7 +118,7 @@ describe("/plans", () => {
     expect(app.activeTaskId()).toBe(draft);
     expect(seen).toHaveLength(1);
     expect(seen[0]!.title).toBe("retry-ingest-parser · Plan v1 (draft)");
-    expect(seen[0]!.markdown.startsWith("**Task retry-ingest-parser** · Draft v1")).toBe(true);
+    expect(seen[0]!.markdown.startsWith("**Task retry-ingest-parser** · plan draft")).toBe(true);
     expect(seen[0]!.actions.map((action) => action.value)).toEqual(["approve", "revise", "close"]);
     expect(app.store.load(draft)!.approvedVersion).toBe(1);
     expect(result.text).toContain("Approved plan v1");
@@ -129,7 +129,7 @@ describe("/plans close", () => {
   it("asks first when the task has unfinished tickets, and keeps it open when declined", async () => {
     const asked: string[] = [];
     const cwd = await tempRepo();
-    const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined });
+    const app = workflow(cwd, { config: tieredConfig(), startTurn: () => undefined });
     await app.startPlan("Add retry to the ingest parser");
     await app.savePlanSpec(sampleSpec);
     await app.commitTickets([sampleTicket("01"), sampleTicket("02")]);
@@ -183,38 +183,5 @@ describe("/plans close", () => {
     expect(t.app.activeTaskId()).toBe(t.b.taskId);
     expect((await t.app.plans("close")).code).toBe("USAGE");
     expect((await t.app.plans("close gamma")).text).toContain("already closed");
-  });
-});
-
-describe("/status with several tasks", () => {
-  it("shows name (id) and an Also open line only when other unfinished tasks exist", async () => {
-    const t = await setup();
-    const text = (await t.app.status()).text;
-    expect(text).toBeDefined();
-    const markdown = t.reports.at(-1)!;
-    expect(markdown).toContain(`| Task | beta (${t.b.taskId}) |`);
-    expect(markdown).toContain("\n\nAlso open: 1 task(s) — /plans\n");
-    await t.app.plans("close alpha");
-    await t.app.status();
-    expect(t.reports.at(-1)).not.toContain("Also open");
-  });
-
-  it("returns the state line without markdown escapes, and escapes only inside table cells", async () => {
-    const t = await setup();
-    await t.ctx.store.update(t.b.taskId, "test", (task: TaskState) => ({ ...task, phase: "BLOCKED", blockedReason: "waiting on a | b" }));
-    const result = await t.app.status();
-    expect(result.text).toBe("Blocked · waiting on a | b");
-    expect(result.text).not.toContain("\\");
-    expect(t.reports.at(-1)).toContain("waiting on a \\| b");
-    const plans = await t.app.plans("");
-    expect(plans.text).not.toContain("\\");
-    expect(t.reports.at(-1)).toContain("Blocked · waiting on a \\| b");
-  });
-
-  it("follows the checked-out branch", async () => {
-    const t = await setup();
-    await git(t.cwd, "switch", "chef/alpha");
-    await t.app.status();
-    expect(t.reports.at(-1)).toContain(`| Task | alpha (${t.a.taskId}) |`);
   });
 });
