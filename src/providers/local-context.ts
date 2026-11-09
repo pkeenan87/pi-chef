@@ -47,7 +47,7 @@ export function contextMismatch(model: string, configured: number | undefined, a
   if (actual === undefined) return undefined;
   const told = configured ?? 128_000;
   if (told === actual) return undefined;
-  const where = configured === undefined ? `no contextWindow is set for it, so Pi assumes ${told}` : `tiers.local says contextWindow: ${told}`;
+  const where = configured === undefined ? `no contextWindow is set for it, so Pi assumes ${told}` : `local.models says contextWindow: ${told}`;
   const risk = told > actual ? "Pi may send more than the server keeps, which silently drops the start of the conversation" : "tickets are planned smaller than the server could take";
-  return `The local server runs ${model} with a ${actual}-token context window, but ${where}: ${risk}. Set contextWindow: ${actual} on its tiers.local entry.`;
+  return `The local server runs ${model} with a ${actual}-token context window, but ${where}: ${risk}. Set contextWindow: ${actual} on its local.models entry.`;
 }

@@ -1,6 +1,8 @@
+import { ranModelText } from "../agents.js";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import type { CheckEvidence, ReviewReport, ReviewStage } from "../domain.js";
-import { acceptedLines, rejectedLines, shortModel, unresolvedConcernLines } from "../review/review-resolution.js";
+import { droppedNote } from "../review/scored-json.js";
+import { riskLabel, scoreLabel } from "../review/risk.js";
 import { cell, formatDuration, formatUsdShort, mdTable } from "./format.js";
 
 /** The text of a /review: the tables of the chat block and of the saved report, and the numbered items the findings dialog and "Fix all" use. */
@@ -31,27 +33,24 @@ function setupHint(report: ReviewReport, setupConfigured: boolean): string | und
 
 /** One numbered, fixable finding from the report. */
 export interface ReviewItem {
-  kind: "static" | "check" | "model";
+  kind: "static" | "check" | "model" | "carried";
   text: string;
 }
 
-/** One row of the Findings table. `item` is set for the numbered rows, the ones "Fix all" sends. */
+/** One row of the Findings table. Every row is numbered and sent by "Fix all". */
 export interface ReviewRow {
   kind: ReviewItem["kind"];
-  item?: ReviewItem;
-  /** The row's number; absent for rejected or unresolved findings, which show "–". */
+  item: ReviewItem;
   n?: number;
-  severity: string;
+  /** The Risk column: `L7×S8=56` for a model finding, "BLOCKING" or "SUGGESTION" for a static one or a failed check. */
+  risk: string;
   where: string;
   finding: string;
-  raisedBy: string;
-  /** The Decision column: "kept · Astra agrees", "kept", "kept (Astra's finding)", "dropped: why", "unresolved", or "—" when there was no decision. */
-  verdict: string;
 }
 
 /**
  * Everything the review found, in the order the person sees and numbers it: static blocking findings, failed checks
- * (Where is the command), static suggestions, then the model's findings. A blocking `tests` finding is its failed
+ * (Where is the command), static suggestions, the model's findings, then the findings the tickets' reviews carried from /build. A blocking `tests` finding is its failed
  * check, so it is not listed twice. The numbers are the ones the Findings table, the dialog and "Fix all" share.
  */
 export function reviewRows(report: ReviewReport): ReviewRow[] {
@@ -63,11 +62,9 @@ export function reviewRows(report: ReviewReport): ReviewRow[] {
     return {
       kind: "static",
       item: { kind: "static", text: `${blocking ? "BLOCKING" : "suggestion"} ${finding.category}: ${finding.message}${evidence ? ` (${evidence})` : ""}` },
-      severity: blocking ? "BLOCKING" : "SUGGESTION",
+      risk: blocking ? "BLOCKING" : "SUGGESTION",
       where: finding.category,
       finding: `${finding.message}${evidence ? ` (${evidence})` : ""}`,
-      raisedBy: "Static scan",
-      verdict: NONE,
     };
   };
   for (const finding of statics.filter((item) => item.severity === "blocking")) rows.push(staticRow(finding));
@@ -77,84 +74,53 @@ export function reviewRows(report: ReviewReport): ReviewRow[] {
     rows.push({
       kind: "check",
       item: { kind: "check", text: `Check failed: ${check.name} (\`${command}\`)${check.ran ? ` exit ${check.exitCode}` : " did not run"}: ${checkTail(check) || "no output"}` },
-      severity: "BLOCKING",
+      risk: "BLOCKING",
       where: command,
       finding: `${check.name} ${check.ran ? `failed with exit ${check.exitCode}` : "did not run"}: ${checkTail(check) || "no output"}`,
-      raisedBy: "Check",
-      verdict: NONE,
     });
   }
   for (const finding of statics.filter((item) => item.severity !== "blocking")) rows.push(staticRow(finding));
 
-  const model = report.modelReview;
-  if (model?.resolution) {
-    // After the advisors answered, the reviewer's accepted findings are the model findings; rejected ones are notes.
-    const name = (source: string) => (source === "opus" ? shortModel(model.model) : shortModel(source));
-    for (const { finding, text } of acceptedLines(model)) {
-      const agrees = finding.agreedBy.map(name);
-      rows.push({
-        kind: "model",
-        item: { kind: "model", text },
-        severity: finding.severity.toUpperCase(),
-        where: finding.file ?? NONE,
-        finding: finding.message,
-        raisedBy: name(finding.source),
-        verdict: finding.source === "opus" ? (agrees.length > 0 ? `kept · ${agrees.join(" and ")} agrees` : "kept") : `kept (${name(finding.source)}'s finding)`,
-      });
-    }
-    for (const finding of model.resolution.findings.filter((item) => item.status === "rejected")) {
-      rows.push({ kind: "model", severity: finding.severity.toUpperCase(), where: finding.file ?? NONE, finding: finding.message, raisedBy: name(finding.source), verdict: `dropped: ${finding.rationale || "no reason given"}` });
-    }
-  } else if (model) {
-    for (const finding of model.findings) {
-      const evidence = finding.evidence ? ` (evidence: ${finding.evidence.replace(/\s+/g, " ").slice(0, 200)})` : "";
-      rows.push({
-        kind: "model",
-        item: { kind: "model", text: `${finding.severity.toUpperCase()} ${finding.file ? `${finding.file}: ` : ""}${finding.message}${evidence}` },
-        severity: finding.severity.toUpperCase(),
-        where: finding.file ?? NONE,
-        finding: finding.message,
-        raisedBy: shortModel(model.model),
-        verdict: NONE,
-      });
-    }
-    if (model.resolutionError) {
-      for (const advisor of model.advisors ?? []) {
-        for (const concern of advisor.concerns) {
-          rows.push({ kind: "model", severity: concern.severity.toUpperCase(), where: concern.file ?? NONE, finding: concern.issue, raisedBy: shortModel(advisor.model), verdict: "unresolved" });
-        }
-      }
-    }
+  for (const finding of report.modelReview?.findings ?? []) {
+    const evidence = finding.evidence ? ` (evidence: ${finding.evidence.replace(/\s+/g, " ").slice(0, 200)})` : "";
+    rows.push({
+      kind: "model",
+      item: { kind: "model", text: `${scoreLabel(finding)} ${finding.file ? `${finding.file}: ` : ""}${finding.message}${evidence}` },
+      risk: riskLabel(finding),
+      where: finding.file ?? NONE,
+      finding: finding.message,
+    });
+  }
+  for (const finding of report.carried ?? []) {
+    rows.push({
+      kind: "carried",
+      item: { kind: "carried", text: `${scoreLabel(finding)} ${finding.file ? `${finding.file}: ` : ""}${finding.issue} (carried from build, ticket ${finding.ticket})` },
+      risk: riskLabel(finding),
+      where: finding.file ?? NONE,
+      finding: `${finding.issue} (carried from build, ticket ${finding.ticket})`,
+    });
   }
   let n = 0;
-  for (const row of rows) if (row.item) row.n = ++n;
+  for (const row of rows) row.n = ++n;
   return rows;
 }
 
 /** The numbered items, in table order. */
 export function reviewItems(report: ReviewReport): ReviewItem[] {
-  return reviewRows(report).flatMap((row) => (row.item ? [row.item] : []));
+  return reviewRows(report).map((row) => row.item);
 }
-
-/** Findings that are listed but not numbered and not sent by "Fix all": rejected by the reviewer, or advisor concerns it could not weigh. Dimmed `> ` lines. */
-export function reviewNotes(report: ReviewReport): string[] {
-  const model = report.modelReview;
-  if (!model) return [];
-  return model.resolution ? rejectedLines(model) : model.resolutionError ? unresolvedConcernLines(model.advisors ?? []) : [];
-}
-
 
 /** The Findings table, shared by the chat block and the findings dialog so the numbers match. */
 export function findingsTable(report: ReviewReport): string[] {
-  const lines = mdTable(
-    ["#", "Severity", "Where", "Finding", "Raised by", "Decision"],
-    reviewRows(report).map((row) => [row.n === undefined ? "–" : String(row.n), row.severity, cell(row.where, 80), cell(row.finding, FINDING_CELL), cell(row.raisedBy, 40), cell(row.verdict, 120)]),
+  return mdTable(
+    ["#", "Risk", "Where", "Finding"],
+    reviewRows(report).map((row) => [String(row.n), row.risk, cell(row.where, 80), cell(row.finding, FINDING_CELL)]),
   );
-  return report.modelReview?.advisors?.length ? [...lines, "", "Decision = the reviewer's call after the advisors; dropped findings are not sent by Fix all."] : lines;
 }
 
 /** "$0.14", "unknown" for a call with no known price, "—" when the stage billed nothing. */
 function stageCost(stage: ReviewStage | undefined): string {
+  if (stage?.notMetered && stage.costUsd === undefined) return "not metered";
   return stage === undefined || stage.costUsd === undefined ? NONE : stage.costUsd === null ? "unknown" : formatUsdShort(stage.costUsd);
 }
 
@@ -162,7 +128,7 @@ const stageTime = (stage: ReviewStage | undefined) => (stage?.elapsedMs === unde
 
 /** The header's total: the sum of the stage costs, or "≥ $x (some unknown)". Undefined when no stage billed anything. */
 function totalCost(report: ReviewReport): string | undefined {
-  const stages = [report.stages?.model, report.stages?.advisors].filter((stage): stage is ReviewStage => stage?.costUsd !== undefined);
+  const stages = [report.stages?.model].filter((stage): stage is ReviewStage => stage?.costUsd !== undefined);
   if (stages.length === 0) return undefined;
   const known = stages.reduce((sum, stage) => sum + (stage.costUsd === null || stage.costUsd === undefined ? 0 : toMicroUsd(stage.costUsd)), 0);
   const total = formatUsdShort(fromMicroUsd(known));
@@ -183,20 +149,10 @@ function modelRow(report: ReviewReport, found: number): string {
   const model = report.modelReview;
   if (!model) return "did not run";
   const reviewers = [...new Set((model.parts ?? []).flatMap((part) => (part.reviewedBy ? [part.reviewedBy] : [])))];
-  const who = reviewers.length > 0 ? reviewers.join(", ") : `${model.provider}/${model.model}`;
+  const who = reviewers.length > 0 ? reviewers.join(", ") : ranModelText(model.provider, model.model);
   if (model.error && found === 0) return `${who} · no findings: ${model.error}`;
   const retried = (model.parts ?? []).filter((part) => part.reviewedBy && part.failures.length > 0).map((part) => `part ${part.index} retried (after ${part.failures.join("; ")})`);
-  return [who, ...(model.chunks && model.chunks > 1 ? [`${model.chunks} parts`] : []), plural(found, "finding"), ...retried, ...(model.truncated ? ["part of the diff was not reviewed"] : []), ...(model.error ? [`note: ${model.error}`] : [])].join(" · ");
-}
-
-/** The advisors stage's row: who was consulted and why, or none and why. */
-function advisorsRow(report: ReviewReport): string | undefined {
-  const model = report.modelReview;
-  const rule = model?.advisorRule;
-  if (!model || !rule) return undefined;
-  if (rule.planned.length === 0) return `none (${rule.reason})`;
-  const names = model.advisors?.length ? model.advisors.map((item) => `${item.provider}/${item.model}${item.error ? " (no answer)" : ""}`) : rule.planned;
-  return `${names.join(", ")} (${rule.reason})${model.advisorsSkipped ? `; not consulted: ${model.advisorsSkipped}` : ""}${model.resolutionError ? `; ${shortModel(model.model)} could not weigh their answers (${model.resolutionError})` : ""}`;
+  return [who, ...(model.chunks && model.chunks > 1 ? [`${model.chunks} parts`] : []), `${plural(found, "finding")}${droppedNote(model.dropped ?? 0)}`, ...retried, ...(model.truncated ? ["part of the diff was not reviewed"] : []), ...(model.error ? [`note: ${model.error}`] : [])].join(" · ");
 }
 
 /** The failed checks' output tails, each a short fenced block headed by the check name. */
@@ -229,8 +185,6 @@ export function reviewMarkdown(report: ReviewReport, options: { setupConfigured:
     ["Static scan", `${blocking} blocking, ${plural(suggestions, "suggestion")}`, NONE, NONE],
     ["Model review", cell(modelRow(report, rows.filter((row) => row.kind === "model").length), 400), stageTime(report.stages?.model), stageCost(report.stages?.model)],
   ];
-  const advisors = advisorsRow(report);
-  if (advisors) stageRows.push(["Advisors", cell(advisors, 240), stageTime(report.stages?.advisors), stageCost(report.stages?.advisors)]);
 
   const total = totalCost(report);
   const checkRows = checks.map((check) => [

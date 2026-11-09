@@ -4,9 +4,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { Ticket } from "../src/domain.js";
-import { BUILD_CHUNK_RULES, runBuild, TURN_GRACE, turnBudget, type BuildDriver, type ChunkLimits, type ModelRef } from "../src/orchestrator/build.js";
-import { checkRunner, contextOf, readyAuth, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
-import type { WorkflowOptions } from "../src/orchestrator/types.js";
+import { BUILD_CHUNK_RULES, runBuild, type BuildDriver, type ChunkLimits, type ModelRef } from "../src/orchestrator/build.js";
+import { TURN_GRACE, turnBudget } from "../src/orchestrator/turn-budget.js";
+import { checkRunner, contextOf, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, workflow } from "./helpers.js";
+import { modelFor } from "../src/orchestrator/routing.js";
 import { layerConfigs, parseConfig } from "../src/config.js";
 
 const exec = promisify(execFile);
@@ -31,11 +32,12 @@ interface Reply {
 /** A driver whose "sessions" run a script: it may write files into the checkout, like a model would. */
 function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<Reply | void>) {
   const sends: Send[] = [];
-  const state: { fresh: number; finished: number; limits?: ChunkLimits } = { fresh: 0, finished: 0 };
+  const state: { fresh: number; limits?: ChunkLimits; attempts: (number | undefined)[] } = { fresh: 0, attempts: [] };
   const driver: BuildDriver = {
-    async fresh(model, run, _ticketId, limits) {
+    async fresh(model, run, _ticketId, limits, attempt) {
       state.fresh += 1;
       state.limits = limits;
+      state.attempts.push(attempt);
       let current = "";
       let turn = 0;
       await run({
@@ -48,15 +50,12 @@ function fakeDriver(cwd: string, script: (send: Send) => Reply | void | Promise<
         },
       });
     },
-    async finish() {
-      state.finished += 1;
-    },
   };
   const write = (name: string, body = "x\n") => writeFileSync(path.join(cwd, name), body);
   return { driver, sends, state, write };
 }
 
-async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string; confirm?: (title: string, message: string) => Promise<boolean>; auth?: WorkflowOptions["auth"] } = {}) {
+async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<typeof checkRunner>; mutate?: (config: ReturnType<typeof tieredConfig>) => void; approve?: boolean; branch?: string; confirm?: (title: string, message: string) => Promise<boolean> } = {}) {
   const cwd = await tempRepo();
   if (options.branch) await git(cwd, "switch", "-c", options.branch);
   const progress: string[] = [];
@@ -73,7 +72,6 @@ async function buildTask(options: { tickets?: Ticket[]; runner?: ReturnType<type
       report: (markdown) => void reports.push(markdown),
       notify: (message) => void notices.push(message),
       ...(options.confirm ? { confirm: options.confirm } : {}),
-      ...(options.auth ? { auth: options.auth } : {}),
       runner: options.runner ?? checkRunner(async () => (passing.ok ? { code: 0, stdout: "ok", stderr: "" } : { code: 1, stdout: "", stderr: "AssertionError: expected 1" })),
     },
     { approve: options.approve, cwd },
@@ -104,7 +102,7 @@ describe("/build order and routing", () => {
     expect(d.sends[0]!.text).toContain("Do not commit, push, merge, or switch branches");
     expect(d.sends[1]!.text).toContain("### 01: Ticket 01");
     expect(d.sends[1]!.text).toContain("Added the retry loop in ticket 01.");
-    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "ticketMedium", provider: "anthropic", model: "claude-sonnet-5-5", attempts: 1 });
+    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "medium", provider: "anthropic", model: "claude-sonnet-5-5", attempts: 1 });
   });
 });
 
@@ -124,7 +122,7 @@ describe("/build turn budget", () => {
     expect(first.code).toBe("TURN_LIMIT");
     expect(first.text).toContain("Ran out of turns");
     expect(runs).toEqual([]);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed", failedBy: "turns", tier: "ticketLow" });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed", failedBy: "turns", tier: "low" });
     expect(t.load().ticketRuns!["01"]!.attemptLog?.at(-1)).toMatchObject({ outcome: "failure", failedBy: "turns" });
     const next = fakeDriver(t.cwd, (send) => next.write(`f${send.ticket}.txt`));
     expect((await t.run(next.driver)).ok).toBe(true);
@@ -155,22 +153,22 @@ describe("/build turn budget", () => {
     expect(none.stopped()).toBe(false);
   });
 
-  it("validates routing.maxTicketTurns, and a project can only lower it", () => {
+  it("validates routing.maxTicketTurns; a project's routing replaces the user's section", () => {
     expect(() => parseConfig("routing: { maxTicketTurns: 2 }\n")).toThrow(/maxTicketTurns/);
     expect(parseConfig("{}\n").routing.maxTicketTurns).toBe(100);
-    const routing = (user: Record<string, unknown> | undefined, project: Record<string, unknown>) => (layerConfigs(user, { routing: project }, []) as { routing: { maxTicketTurns: number } }).routing.maxTicketTurns;
-    expect(routing(undefined, { maxTicketTurns: 40 })).toBe(40);
-    expect(routing(undefined, { maxTicketTurns: 400 })).toBe(100);
-    expect(routing({ routing: { maxTicketTurns: 30 } }, { maxTicketTurns: 60 })).toBe(30);
+    const routing = (user: Record<string, unknown> | undefined, project: Record<string, unknown>) => (layerConfigs(user, { routing: project }, []).routing as { maxTicketTurns?: number; maxEscalations?: number });
+    expect(routing(undefined, { maxTicketTurns: 40 }).maxTicketTurns).toBe(40);
+    expect(routing({ routing: { maxTicketTurns: 30 } }, { maxTicketTurns: 60 }).maxTicketTurns).toBe(60);
+    expect(routing({ routing: { maxEscalations: 1 } }, { maxTicketTurns: 60 }).maxEscalations).toBeUndefined();
   });
 });
 
 describe("/build thinking levels", () => {
-  it("hands the driver the tier entry's thinking level, and none when the entry sets none", async () => {
+  it("hands the driver the model's thinking level, and none when the model sets none", async () => {
     const t = await buildTask({
       tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })],
       mutate: (config) => {
-        config.tiers.ticketLow = [{ provider: "xai", model: "grok-4.7", thinking: "low" }];
+        config.models.low = "xai/grok-4.7:low";
       },
     });
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
@@ -179,10 +177,10 @@ describe("/build thinking levels", () => {
     expect("thinking" in d.sends[1]!.model).toBe(false);
   });
 
-  it("validates tiers.*[].thinking", () => {
-    const yaml = (value: string) => `tiers:\n  ticketLow:\n    - { provider: xai, model: grok-4.7, thinking: ${value} }\n`;
-    expect(parseConfig(yaml("high")).tiers.ticketLow?.[0]?.thinking).toBe("high");
-    expect(() => parseConfig(yaml("extreme"))).toThrow(/thinking/);
+  it("reads the thinking level from the :thinking suffix of the model, and keeps any other suffix in the id", () => {
+    expect(parseConfig("models: { low: 'xai/grok-4.7:high' }\n").models.low).toBe("xai/grok-4.7:high");
+    expect(modelFor(parseConfig("models: { low: 'xai/grok-4.7:high' }\n"), "low")).toEqual({ kind: "pi", provider: "xai", id: "grok-4.7", thinking: "high" });
+    expect(modelFor(parseConfig("models: { low: 'xai/grok-4.7:extreme' }\n"), "low")).toEqual({ kind: "pi", provider: "xai", id: "grok-4.7:extreme" });
   });
 });
 
@@ -206,16 +204,14 @@ describe("/build commits", () => {
     const file = readFileSync(path.join(t.app.store.taskDir(t.taskId), "tickets", "01-t01.md"), "utf8");
     expect(file).toContain("## Status: done");
     expect(file).toContain("- [x] retry works");
-    expect(t.app.store.readMetrics().general?.ticketMedium ?? t.app.store.readMetrics().general?.ticketLow).toBeDefined();
-    expect(d.state.finished).toBe(1);
   });
 
   it("posts a progress line per ticket and a final table", async () => {
     const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })] });
     const d = fakeDriver(t.cwd, (send) => {
       d.write("f.txt");
-      // The main-session turn is ledgered as that ticket's spend.
-      t.app.observeUsage({ provider: "anthropic", model: "claude-sonnet-5-5", usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } });
+      // A runner ledgers the ticket's tab under the ticket's id.
+      t.app.observeUsage({ provider: "anthropic", model: "claude-sonnet-5-5", usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } }, { ticketId: "01" });
       expect(send.ticket).toBe("01");
     });
     expect((await t.run(d.driver)).ok).toBe(true);
@@ -228,16 +224,6 @@ describe("/build commits", () => {
     expect(t.reports[0]).toContain("| 01 | Ticket 01 | medium | anthropic/claude-sonnet-5-5 |");
     expect(t.reports[0]).toContain(`done ${sha}`);
     expect(t.reports[0]).toContain("Next: /review");
-  });
-
-  it("clears the running ticket while no chunk runs, so branch rules lift", async () => {
-    const t = await buildTask({ tickets: [ticket("01")] });
-    const d = fakeDriver(t.cwd, () => {
-      expect(t.app.buildingTicket()).toBe("01");
-      d.write("f.txt");
-    });
-    await t.run(d.driver);
-    expect(t.app.buildingTicket()).toBeUndefined();
   });
 });
 
@@ -255,9 +241,7 @@ describe("/build failures", () => {
     expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed" });
     expect(t.load().ticketRuns!["02"]).toBeUndefined();
     expect(t.load().build!.currentTicket).toBeUndefined();
-    expect(t.app.store.readMetrics().general?.ticketLow).toMatchObject({ failure: 1 });
     expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
-    expect(d.state.finished).toBe(1);
     expect(t.reports[0]).toContain("| 01 | Ticket 01 | low | xai/grok-4.7 |");
     expect(t.reports[0]).toContain("failed");
   });
@@ -292,7 +276,6 @@ describe("/build failures", () => {
     expect(t.progress.some((line) => line.includes("Ticket 01 · checks passed on your changes"))).toBe(true);
     expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done" });
     // No credit to the model for a fix it did not make.
-    expect(t.app.store.readMetrics().general?.standard?.success ?? 0).toBe(0);
   });
 
   it("sends a ticket that is still failing to the next tier up", async () => {
@@ -309,7 +292,7 @@ describe("/build failures", () => {
     expect(second.sends[0]!.model).toEqual({ provider: "anthropic", id: "claude-sonnet-5-5" });
     expect(second.sends[0]!.text).toContain("AssertionError: expected 1");
     expect(result.ok, result.text).toBe(true);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", attempts: 2, tier: "ticketMedium" });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", attempts: 2, tier: "medium" });
   });
 
   it("starts low, medium and high tickets on grok, sonnet and sol", async () => {
@@ -317,32 +300,33 @@ describe("/build failures", () => {
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
     expect(d.sends.map((item) => `${item.model.provider}/${item.model.id}`)).toEqual(["xai/grok-4.7", "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"]);
-    expect(["01", "02", "03"].map((id) => t.load().ticketRuns![id]!.tier)).toEqual(["ticketLow", "ticketMedium", "ticketHigh"]);
+    expect(["01", "02", "03"].map((id) => t.load().ticketRuns![id]!.tier)).toEqual(["low", "medium", "high"]);
   });
 
-  it("maps old suggestedTier-only tickets and prefers difficulty when both are set", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { suggestedTier: "deterministic" }), ticket("02", { suggestedTier: "standard" }), ticket("03", { suggestedTier: "premium" }), ticket("04", { suggestedTier: "premium", difficulty: "low" }), ticket("05")] });
+  it("builds a ticket the planner gave no difficulty on the medium model", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02")] });
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends.map((item) => item.model.id)).toEqual(["grok-4.7", "claude-sonnet-5-5", "gpt-6.1-sol", "grok-4.7", "claude-sonnet-5-5"]);
+    expect(d.sends.map((item) => item.model.id)).toEqual(["grok-4.7", "claude-sonnet-5-5"]);
   });
 
-  it("escalates grok, sonnet, sol, opus on repeated failures", async () => {
-    // As in the sample config, premium lists Opus alone.
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]) });
+  it("escalates grok, sonnet, sol on repeated failures, then stops: there is no rung above high", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
     t.passing.ok = false;
     const used: string[] = [];
+    let last;
     for (let attempt = 0; attempt < 4; attempt++) {
       const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
-      await t.run(d.driver);
-      used.push(d.sends[0]!.model.id);
+      last = await t.run(d.driver);
+      used.push(d.sends[0]?.model.id ?? "none");
     }
-    expect(used).toEqual(["grok-4.7", "claude-sonnet-5-5", "gpt-6.1-sol", "claude-opus-5-5"]);
-    expect(t.load().ticketRuns!["01"]!.tier).toBe("premium");
+    expect(used).toEqual(["grok-4.7", "claude-sonnet-5-5", "gpt-6.1-sol", "none"]);
+    expect(t.load().ticketRuns!["01"]!.tier).toBe("high");
+    expect(last!.code).toBe("MAX_ESCALATIONS");
   });
 
-  it("stops a ticket still failing on premium instead of re-running premium on every /build", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "high" })], mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]) });
+  it("stops a ticket still failing on high instead of re-running high on every /build", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "high" })] });
     t.passing.ok = false;
     const used: string[] = [];
     let last;
@@ -351,9 +335,21 @@ describe("/build failures", () => {
       last = await t.run(d.driver);
       used.push(d.sends[0]?.model.id ?? "none");
     }
-    expect(used).toEqual(["gpt-6.1-sol", "claude-opus-5-5", "none"]);
+    expect(used).toEqual(["gpt-6.1-sol", "none", "none"]);
     expect(last!.code).toBe("MAX_ESCALATIONS");
     expect(last!.text).toContain("top of the ladder");
+  });
+
+  it("skips a rung that names the same model as the one that failed", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => void (config.models.medium = config.models.low) });
+    t.passing.ok = false;
+    const used: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const d = fakeDriver(t.cwd, () => d.write(`f${attempt}.txt`));
+      await t.run(d.driver);
+      used.push(d.sends[0]?.model.id ?? "none");
+    }
+    expect(used).toEqual(["grok-4.7", "gpt-6.1-sol", "none"]);
   });
 
   it("starts a security-sensitive plan's tickets on their own difficulty tier", async () => {
@@ -377,11 +373,10 @@ describe("/build failures", () => {
     expect(result.code).toBe("CHECKS_UNRUNNABLE");
     expect(d.sends).toHaveLength(1);
     expect(t.load().ticketRuns!["01"]!.status).toBe("failed");
-    expect(t.app.store.readMetrics().general?.ticketLow).toBeUndefined();
   });
 
-  it("stops at routing.maxTier instead of re-running the capped tier", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })], mutate: (config) => void (config.routing.maxTier = "ticketHigh") });
+  it("stops at routing.maxEscalations instead of climbing further", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })], mutate: (config) => void (config.routing.maxEscalations = 0) });
     t.passing.ok = false;
     const used: string[] = [];
     let last;
@@ -390,9 +385,9 @@ describe("/build failures", () => {
       last = await t.run(d.driver);
       used.push(d.sends[0]?.model.id ?? "none");
     }
-    expect(used).toEqual(["claude-sonnet-5-5", "gpt-6.1-sol", "none"]);
+    expect(used).toEqual(["claude-sonnet-5-5", "none", "none"]);
     expect(last!.code).toBe("MAX_ESCALATIONS");
-    expect(last!.text).toContain("routing.maxTier is ticketHigh");
+    expect(last!.text).toContain("routing.maxEscalations (0)");
   });
 
   it("keeps a ticket whose check could not run on its tier once the check is fixed", async () => {
@@ -404,41 +399,13 @@ describe("/build failures", () => {
     });
     const first = fakeDriver(t.cwd, () => first.write("f.txt"));
     const stopped = await t.run(first.driver);
-    expect(stopped.text).toContain("stays on ticketLow");
+    expect(stopped.text).toContain("stays on low");
     t.app.config.checks = [{ name: "unit", command: "npm", args: ["test"] }];
     rmSync(path.join(t.cwd, "f.txt"));
     const second = fakeDriver(t.cwd, () => second.write("f.txt"));
     expect((await t.run(second.driver)).ok).toBe(true);
     expect(second.sends[0]!.model.id).toBe("grok-4.7");
-    expect(t.load().ticketRuns!["01"]!.tier).toBe("ticketLow");
-  });
-
-  it("shows one ticket's attempts and reviews with /status <ticket>", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
-    t.passing.ok = false;
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    await t.run(d.driver);
-    const result = await t.app.status("1");
-    expect(result.ok, result.text).toBe(true);
-    expect(result.text).toMatch(/^Ticket 01 · failed: Checks failed after a retry: ### unit \(exit 1\)/);
-    expect(result.text).not.toContain("\n");
-    const markdown = t.reports.at(-1)!;
-    expect(markdown).toContain("## Ticket 01 · ");
-    expect(markdown).toMatch(/\| 1 \| ticketLow \| xai\/grok-4\.7 \| .+ \| failed \(checks\)/);
-    expect((await t.app.status("09")).text).toContain("/status <ticket id> (01)");
-    expect((await t.app.status("")).text).toContain("/status 01 shows its attempts");
-  });
-
-  it("counts a web_search made during a ticket toward that ticket's cost", async () => {
-    const t = await buildTask({ tickets: [ticket("01")] });
-    const d = fakeDriver(t.cwd, () => {
-      d.write("f.txt");
-      // An unpriced model: once it counts toward the ticket, the ticket's cost is unknown, not the session's known $0.
-      t.app.recordWebSearch({ provider: "anthropic", model: "unpriced-search", inputTokens: 1, outputTokens: 0, webSearchRequests: 1 });
-    });
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.app.store.readLedger().find((item) => item.reason.startsWith("web_search"))!.reason).toMatch(/ · ticket 01$/);
-    expect(t.load().ticketRuns!["01"]!.costSplit!.implementer).toBeNull();
+    expect(t.load().ticketRuns!["01"]!.tier).toBe("low");
   });
 
   it("passes with a warning when no checks exist at all", async () => {
@@ -481,8 +448,6 @@ describe("/build stops", () => {
     expect(t.load().ticketRuns!["01"]!.status).toBe("in-progress");
     expect(t.load().build!.currentTicket).toBeUndefined();
     expect(await git(t.cwd, "log", "--format=%s")).toBe("base");
-    expect(d.state.finished).toBe(1);
-    expect(t.app.store.readMetrics().general).toBeUndefined();
     // An interruption is not a failure: the resumed ticket stays on the same tier.
     const again = fakeDriver(t.cwd, (send) => again.write(`f${send.ticket}.txt`));
     expect((await t.run(again.driver)).ok).toBe(true);
@@ -534,21 +499,16 @@ describe("/build stops", () => {
     expect(t.load().ticketRuns!["01"]!.status).toBe("done");
   });
 
-  it("always restores the model, even when the session cannot be opened", async () => {
+  it("stops cleanly when the session cannot be opened", async () => {
     const t = await buildTask({ tickets: [ticket("01")] });
-    const state = { finished: 0 };
     const driver: BuildDriver = {
       async fresh() {
         throw new Error("Pi did not open a new session (cancelled).");
-      },
-      async finish() {
-        state.finished += 1;
       },
     };
     const result = await t.run(driver);
     expect(result.ok).toBe(false);
     expect(result.text).toContain("did not open a new session");
-    expect(state.finished).toBe(1);
     expect(t.load().build!.currentTicket).toBeUndefined();
     // The session never took a turn, so the ticket is back to not started.
     expect(t.load().ticketRuns!["01"]).toBeUndefined();
@@ -560,7 +520,6 @@ describe("/build stops", () => {
       async fresh() {
         return { stopped: "The new session is on anthropic/claude-opus-5-5, not the routed openai/gpt-6.1-sol." };
       },
-      async finish() {},
     };
     const result = await t.run(driver);
     expect(result).toMatchObject({ ok: false, code: "BUILD_STOPPED" });
@@ -568,11 +527,10 @@ describe("/build stops", () => {
     const state = t.load();
     expect(state.ticketRuns?.["01"]).toBeUndefined();
     expect(state.build!.currentTicket).toBeUndefined();
-    expect(t.app.store.readMetrics()).toEqual({});
     // The next /build starts it fresh on its own tier, as attempt 1.
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "ticketHigh", attempts: 1 });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "high", attempts: 1 });
   });
 
   it("records a ticket committed just before /build stopped as done, without building it again", async () => {
@@ -616,7 +574,7 @@ describe("/build stops", () => {
     await t.run(first.driver);
     const failed = t.load().ticketRuns!["01"]!;
     expect(failed.status).toBe("failed");
-    const driver: BuildDriver = { async fresh() { return { stopped: "nope" }; }, async finish() {} };
+    const driver: BuildDriver = { async fresh() { return { stopped: "nope" }; } };
     await t.run(driver);
     // The run is as it was, except that the re-run checks on the tree left their fresh output as the error.
     const { error, ...rest } = t.load().ticketRuns!["01"]!;
@@ -632,7 +590,6 @@ describe("/build stops", () => {
         await run({ send: async () => ({ lastText: "", aborted: true }) });
         return { stopped: "the session closed" };
       },
-      async finish() {},
     };
     await t.run(driver);
     expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", attempts: 1 });
@@ -640,12 +597,12 @@ describe("/build stops", () => {
 
   it("treats an in-progress attempt with no turn, usage or time as not started, so the next /build routes it fresh", async () => {
     const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })] });
-    const stuck = { status: "in-progress" as const, tier: "ticketHigh" as const, provider: "openai", model: "", attempts: 1, turns: 0, tokens: 0, costUsd: 0, maxContextTokens: 0, crossedTarget: false };
+    const stuck = { status: "in-progress" as const, tier: "high" as const, provider: "openai", model: "", attempts: 1, turns: 0, tokens: 0, costUsd: 0, maxContextTokens: 0, crossedTarget: false };
     await t.app.store.update(t.taskId, "stuck", (task) => ({ ...task, ticketRuns: { "01": stuck } }));
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
     expect(d.sends[0]!.model).toEqual({ provider: "anthropic", id: "claude-sonnet-5-5" });
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "ticketMedium", attempts: 1 });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "medium", attempts: 1 });
   });
 
   it("re-resolves the workflow on every step", async () => {
@@ -834,74 +791,63 @@ describe("/build branch and approval", () => {
   });
 });
 
-describe("/build in local mode", () => {
-  const localTask = async (tickets: Ticket[], extra: Parameters<typeof buildTask>[0] = {}) => {
-    const t = await buildTask({ tickets, ...extra });
-    await t.app.store.update(t.taskId, "local", (state) => ({ ...state, localMode: true }));
-    return t;
-  };
+describe("/build with a local model, an agent, and a model Pi does not know", () => {
+  const LOCAL = "local:\n  baseUrl: 'http://127.0.0.1:8081/v1'\n  models: [{ id: Qwen3.8-27B, contextWindow: 131072 }]\n";
 
-  it("builds every ticket, whatever its difficulty, on the one local model, with the local rules and no spec", async () => {
-    const t = await localTask([ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })]);
+  it("builds on a local model like on any Pi model: the same prompt, with the spec", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })], mutate: (config) => { config.models.low = "local/Qwen3.8-27B"; } });
     const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends.map((send) => `${send.model.provider}/${send.model.id}`)).toEqual(["local/qwen3.5:9b", "local/qwen3.5:9b"]);
-    expect(d.sends[0]!.text).toContain("[BUILD CHUNK · LOCAL MODEL]");
-    expect(d.sends[0]!.text).toContain("Do the Implementation steps in order");
-    expect(d.sends[0]!.text).not.toContain("## Spec (technical plan and decisions)");
+    expect(d.sends[0]!.model).toEqual({ provider: "local", id: "Qwen3.8-27B" });
+    expect(d.sends[0]!.text).toContain("[BUILD CHUNK]");
+    expect(d.sends[0]!.text).toContain("## Spec (technical plan and decisions)");
+    expect(LOCAL).toContain("Qwen3.8-27B");
   });
 
-  it("gives the local model three review rounds, then has Opus finish the ticket from its changes, in the same /build", async () => {
-    let reviews = 0;
-    const t = await localTask([ticket("01", { difficulty: "low" })], {
-      mutate: (config) => void (config.tiers.premium = [{ provider: "anthropic", model: "claude-opus-5-5" }]),
-    });
-    const ctx = contextOf(t.app);
-    const systems: string[] = [];
-    ctx.chat = async (candidate, request) => {
-      reviews += 1;
-      systems.push(request.messages.find((message) => message.role === "system")?.content ?? "");
-      // Rounds 1-3 review the local model's work; round 4 reviews Opus's.
-      const pass = reviews > 3;
-      return { text: JSON.stringify({ verdict: pass ? "pass" : "fail", summary: "s", findings: pass ? [] : [{ severity: "high", file: "f01.txt", issue: "in f01.txt write ok" }], questions: [] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, requests: 1 }, provider: candidate.provider, model: candidate.model };
-    };
-    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}-${send.model.id.replace(/[^a-z0-9]/gi, "")}-${send.turn}.txt`));
+  it("routes a ticket to an agent: the driver gets the agent ref and the attempt, and the run records provider agent", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "high" })], mutate: (config) => { config.models.high = "agent:claude/opus"; } });
+    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
     const result = await t.run(d.driver);
-    expect(d.sends.map((send) => `${send.model.id}:${send.turn}`)).toEqual(["qwen3.5:9b:0", "qwen3.5:9b:1", "qwen3.5:9b:2", "claude-opus-5-5:0"]);
-    // The local model got the exact-edit rule; Opus got the full prompt with the review's findings.
-    expect(d.sends[1]!.text).toContain("Make each of these edits exactly as written");
-    expect(d.sends[3]!.text).toContain("## Previous attempt failed");
-    expect(d.sends[3]!.text).toContain("in f01.txt write ok");
-    expect(d.sends[3]!.text).not.toContain("[BUILD CHUNK · LOCAL MODEL]");
-    expect(t.progress.some((line) => line.includes("the local model did not pass (review); Opus finishes it"))).toBe(true);
-    expect(result.ok, result.text).toBe(true);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", tier: "premium" });
-    expect(reviews).toBe(4);
-    // Rounds 1-3 judged a small model: only real problems fail it, as exact edits. Opus's work got the normal review.
-    expect(systems.slice(0, 3).every((text) => text.includes("The implementer is a small local model"))).toBe(true);
-    expect(systems[3]).not.toContain("The implementer is a small local model");
+    expect(result.ok).toBe(true);
+    expect(d.sends[0]!.model).toEqual({ provider: "agent", id: "claude/opus", agent: { name: "claude", model: "opus" } });
+    expect(d.state.attempts).toEqual([1]);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "done", provider: "agent", model: "claude/opus", tier: "high" });
+    expect(t.progress.some((line) => line.includes("agent:claude/opus") && line.includes("committed"))).toBe(true);
   });
 
-  it("with localMode.difficulties, builds only those tickets locally and the rest on the cloud ticket tiers", async () => {
-    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" }), ticket("02", { difficulty: "medium", blockedBy: ["01"] })] });
-    await t.app.store.update(t.taskId, "hybrid", (state) => ({ ...state, localMode: true, localDifficulties: ["low"] }));
-    const d = fakeDriver(t.cwd, (send) => d.write(`f${send.ticket}.txt`));
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(d.sends[0]!.model).toEqual({ provider: "local", id: "qwen3.5:9b" });
-    expect(d.sends[0]!.text).toContain("[BUILD CHUNK · LOCAL MODEL]");
-    expect(d.sends[1]!.model.provider).not.toBe("local");
-    expect(d.sends[1]!.text).not.toContain("[BUILD CHUNK · LOCAL MODEL]");
-    expect(t.load().ticketRuns!["02"]).toMatchObject({ status: "done", tier: "ticketMedium" });
+  it("a failed ticket climbs to an agent rung like to any other, with the next attempt number", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "medium" })], mutate: (config) => { config.models.high = "agent:codex"; } });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("a.txt"));
+    await t.run(first.driver);
+    const second = fakeDriver(t.cwd, () => second.write("b.txt"));
+    await t.run(second.driver);
+    expect(second.sends[0]!.model).toMatchObject({ provider: "agent", id: "codex", agent: { name: "codex" } });
+    expect(second.state.attempts).toEqual([2]);
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "failed", tier: "high", provider: "agent", model: "codex" });
   });
 
-  it("stops with a clear reason when the local server is down, instead of using a cloud model", async () => {
-    const down = readyAuth();
-    const auth = { inspect: async (provider: Parameters<NonNullable<typeof down>["inspect"]>[0]) => (provider === "local" ? { provider, status: "unavailable" as const, method: "local" as const, detail: "Local endpoint is not reachable." } : down!.inspect(provider)) };
-    const t = await localTask([ticket("01", { difficulty: "low" })], { auth: auth as WorkflowOptions["auth"] });
+  it("stops before the build touches git when the driver's preflight says no ticket can run here", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
+    const branch = await git(t.cwd, "rev-parse", "--abbrev-ref", "HEAD");
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    const result = await t.run({ ...d.driver, preflight: async () => "/build runs each ticket in a herdr tab; start Pi inside herdr and run /build again." });
+    expect(result).toMatchObject({ ok: false, code: "NEEDS_HERDR" });
+    expect(result.text).toContain("start Pi inside herdr");
+    expect(d.sends).toEqual([]);
+    expect(t.load().build).toBeUndefined();
+    expect(await git(t.cwd, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branch);
+  });
+
+  it("stops with Pi's reason when it does not know the model, without starting the ticket", async () => {
+    const t = await buildTask({ tickets: [ticket("01", { difficulty: "low" })] });
+    contextOf(t.app).registry = { find: () => undefined };
     const d = fakeDriver(t.cwd, () => d.write("f.txt"));
     const result = await t.run(d.driver);
     expect(d.sends).toEqual([]);
     expect(result.code).toBe("NO_CANDIDATE");
-    expect(result.text).toContain("not reachable");
+    expect(result.text).toContain("xai/grok-4.7");
+    expect(result.text).toContain("models.low");
+    expect(t.load().ticketRuns?.["01"]).toBeUndefined();
   });
 });

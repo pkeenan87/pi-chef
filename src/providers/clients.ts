@@ -44,18 +44,3 @@ export class ProviderCallError extends Error {
 export function failedUsage(error: unknown): TokenUsage {
   return error instanceof ProviderCallError && error.usage ? error.usage : { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 };
 }
-
-export interface FoundryConfig {
-  endpoint: string;
-  apiVersion?: string;
-  audience: string;
-  api: "openai-responses" | "openai-completions" | "azure-openai-responses";
-  /** "v1" is `<endpoint>/openai/v1/...` with the deployment in `model` and no api-version. Omitted means the legacy deployments route. */
-  style?: "v1" | "deployments";
-}
-
-/** `<resource>/openai/v1` for the current Foundry route (the endpoint may already end with it). */
-export function foundryV1Base(endpoint: string): string {
-  const base = endpoint.replace(/\/+$/, "");
-  return /\/openai\/v1$/.test(base) ? base : `${base}/openai/v1`;
-}

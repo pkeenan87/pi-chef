@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadConfig, tierCandidates } from "../src/config.js";
+import { loadConfig } from "../src/config.js";
 import { bindWorkflow, registerWorkflow } from "../src/extension.js";
 
 const priorHome = process.env.HOME;
@@ -12,10 +12,9 @@ afterEach(() => {
   bindWorkflow(undefined);
 });
 
-const FOUNDRY = `providers:
-  foundry:
-    endpoint: "https://res.services.ai.azure.com"
-    routeStyle: v1
+const LOCAL = `local:
+  baseUrl: "http://127.0.0.1:8081/v1"
+  models: [{ id: Qwen3.8-27B, contextWindow: 131072 }]
 `;
 
 function home(yaml: string): string {
@@ -45,83 +44,119 @@ function fakePi(options: { failProvider?: string } = {}) {
   return { handlers, registered };
 }
 const ui = (cwd: string, notes: string[]) => ({ cwd, hasUI: true, ui: { notify: (m: string, level?: string) => notes.push(`${level}:${m}`), setStatus() {}, confirm: async () => false } });
+const project = () => mkdtempSync(path.join(tmpdir(), "pi-proj-"));
 
-describe("config errors are shown, and a bad section drops only itself", () => {
-  it("an invalid tier entry drops that tier (built-ins apply), names file and key, and Foundry still registers", () => {
-    const dir = home(`${FOUNDRY}tiers:\n  ticketHigh:\n    - { provider: foundry, model: "" }\n  cheap:\n    - { provider: foundry, model: my-cheap }\n`);
-    const config = loadConfig(mkdtempSync(path.join(tmpdir(), "pi-proj-")));
-    expect(config.tiers.ticketHigh).toBeUndefined();
-    expect(tierCandidates(config, "ticketHigh")[0]?.provider).toBe("openai");
-    expect(tierCandidates(config, "cheap")[0]?.model).toBe("my-cheap");
-    const warning = config.warnings?.find((item) => item.includes("tiers.ticketHigh[0].model")) ?? "";
-    expect(warning).toContain(path.join(dir, ".pi", "agent", "chef.yaml"));
-    expect(warning).toContain("tiers.ticketHigh was dropped, so the built-in ticketHigh tier applies");
-    const { handlers, registered } = fakePi();
-    const notes: string[] = [];
-    handlers.get("session_start")!({}, ui(mkdtempSync(path.join(tmpdir(), "pi-proj-")), notes));
-    expect(registered).toContain("foundry");
-    expect(notes.join("\n")).toContain("tiers.ticketHigh[0].model");
-    expect(notes.every((note) => note.startsWith("warning:"))).toBe(true);
+describe("config errors are shown", () => {
+  it("names the file a model error came from: the project's when it sets models, else the user's", () => {
+    const fileOf = (user: string, projectYaml: string | undefined): string | undefined => {
+      home(user);
+      const dir = project();
+      if (projectYaml !== undefined) {
+        mkdirSync(path.join(dir, ".pi-workflows"), { recursive: true });
+        writeFileSync(path.join(dir, ".pi-workflows", "config.yaml"), projectYaml);
+      }
+      try {
+        loadConfig(dir);
+      } catch (error) {
+        return (error as { file?: string }).file;
+      }
+      return undefined;
+    };
+    // The project's models replace the user's whole section: an agent the user file does not define is the project file's problem.
+    expect(fileOf("budgets: { taskUsd: 5 }\n", "models: { high: 'agent:nope' }\n")).toMatch(/\.pi-workflows\/config\.yaml$/);
+    // A project file with no models section leaves the user's models in force: the error is the user file's.
+    expect(fileOf("models: { high: 'agent:nope' }\n", "budgets: { taskUsd: 5 }\n")).toMatch(/\.pi\/agent\/chef\.yaml$/);
+    expect(fileOf("models: { high: 'agent:nope' }\n", undefined)).toMatch(/\.pi\/agent\/chef\.yaml$/);
   });
 
-  it("a tier that names a provider the file does not define is dropped, not fatal", () => {
-    home(`${FOUNDRY}tiers:\n  cheap:\n    - { provider: local, model: m }\n`);
-    const config = loadConfig(mkdtempSync(path.join(tmpdir(), "pi-proj-")));
-    expect(config.tiers.cheap).toBeUndefined();
-    expect(config.warnings?.join("\n")).toMatch(/tiers\.cheap\[0\]\.provider references provider "local"/);
-    expect(config.providers.foundry?.endpoint).toBe("https://res.services.ai.azure.com");
+  it("an invalid model rejects the file and the session start names it", () => {
+    const dir = home("models: { high: 'not a ref' }\n");
+    expect(() => loadConfig(project())).toThrow(/models\.high is not valid/);
+    const { handlers } = fakePi();
+    const notes: string[] = [];
+    handlers.get("session_start")!({}, ui(project(), notes));
+    const text = notes.join("\n");
+    expect(text).toContain("warning:~/.pi/agent/chef.yaml was ignored; built-in defaults are in use");
+    expect(text).toContain("models.high");
+    expect(dir).toBeTruthy();
+  });
+
+  it("an unknown agent in models is a config error", () => {
+    home("models: { high: 'agent:nope' }\n");
+    expect(() => loadConfig(project())).toThrow(/unknown agent/);
+  });
+
+  it("a bad local section rejects the file", () => {
+    home("local: { baseUrl: 'http://example.com/v1', models: [{ id: m, contextWindow: 8192 }] }\n");
+    expect(() => loadConfig(project())).toThrow(/local\.baseUrl must be an https URL, or http only for localhost/);
+    home("local: { baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: m }] }\n");
+    expect(() => loadConfig(project())).toThrow(/local\.models\[0\]\.contextWindow/);
   });
 
   it("a YAML error rejects the file and the session start says which file was ignored and why", () => {
-    home("providers: [unclosed\n");
-    const cwd = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
+    home("models: [unclosed\n");
+    const cwd = project();
     expect(() => loadConfig(cwd)).toThrow(/YAML could not be read/);
     const { handlers } = fakePi();
     const notes: string[] = [];
     expect(() => handlers.get("session_start")!({}, ui(cwd, notes))).not.toThrow();
     const text = notes.join("\n");
-    expect(text).toContain("warning:~/.pi/agent/chef.yaml was ignored; built-in tiers are in use");
+    expect(text).toContain("warning:~/.pi/agent/chef.yaml was ignored; built-in defaults are in use");
     expect(text).toContain("YAML could not be read");
     // Shown once, though two steps of session start hit the same error.
     expect(notes.filter((note) => note.includes("was ignored")).length).toBe(1);
   });
 
-  it("policy rejections are as strict as before: a secret and a non-manual merge reject the whole file", () => {
-    home(`${FOUNDRY}apiKey: sk-abcdefghijklmnopqrstuvwxyz0123456789\n`);
-    const cwd = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
+  it("a secret rejects the whole file and is never shown", () => {
+    home(`${LOCAL}apiKey: sk-abcdefghijklmnopqrstuvwxyz0123456789\n`);
+    const cwd = project();
     expect(() => loadConfig(cwd)).toThrow(/contains a secret/);
     const { handlers } = fakePi();
     const notes: string[] = [];
     handlers.get("session_start")!({}, ui(cwd, notes));
     expect(notes.join("\n")).toContain("chef.yaml was ignored");
     expect(notes.join("\n")).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
-    home(`${FOUNDRY}approvals: { merge: auto }\n`);
-    expect(() => loadConfig(cwd)).toThrow(/approvals\.merge must stay manual/);
-    home(`${FOUNDRY}routing: { maxTier: bogus }\n`);
-    expect(() => loadConfig(cwd)).toThrow(/routing\.maxTier/);
   });
 
-  it("a provider Pi refuses is reported at session start, redacted, while the others still register", () => {
-    home(`${FOUNDRY}  local: { baseUrl: "http://127.0.0.1:1/v1", model: m }\ntiers:\n  cheap:\n    - { provider: local, model: m }\n    - { provider: foundry, model: f }\n`);
-    const { handlers, registered } = fakePi({ failProvider: "foundry" });
+  it("registers the local provider at session start, and reports a refusal redacted", () => {
+    home(LOCAL);
+    const ok = fakePi();
+    ok.handlers.get("session_start")!({}, ui(project(), []));
+    expect(ok.registered).toEqual(["local"]);
+    bindWorkflow(undefined);
+    const refused = fakePi({ failProvider: "local" });
     const notes: string[] = [];
-    handlers.get("session_start")!({}, ui(mkdtempSync(path.join(tmpdir(), "pi-proj-")), notes));
+    refused.handlers.get("session_start")!({}, ui(project(), notes));
     const text = notes.join("\n");
-    expect(text).toContain("provider foundry could not be registered with Pi: Pi refused");
+    expect(text).toContain("provider local could not be registered with Pi: Pi refused");
     expect(text).not.toContain("abcdefghijklmnopqrstuvwxyz0123");
-    expect(registered).toContain("local");
+  });
+});
+
+describe("old settings", () => {
+  it("one warning lists every ignored key and points at the docs; the rest of the file still loads", () => {
+    home("tiers: { cheap: [] }\nproviders: { foundry: {} }\nlocalMode: { default: true }\nquota: {}\napprovals: { merge: manual }\nrouting: { selection: adaptive, maxEscalations: 1 }\nbranchPrefix: kept\n");
+    const config = loadConfig(project());
+    expect(config.branchPrefix).toBe("kept");
+    expect(config.routing.maxEscalations).toBe(1);
+    const ignored = (config.warnings ?? []).filter((item) => item.startsWith("Ignored settings"));
+    expect(ignored).toHaveLength(1);
+    for (const key of ["tiers", "providers", "localMode", "quota", "approvals", "routing.selection"]) expect(ignored[0]).toContain(key);
+    expect(ignored[0]).toContain("docs/configuration.md");
   });
 
-  it("a project file with a bad tier or quota section keeps the user's providers and drops just those sections", () => {
-    home(`${FOUNDRY}`);
-    const cwd = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
-    mkdirSync(path.join(cwd, ".pi-workflows"), { recursive: true });
-    writeFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "tiers:\n  nope: [{ provider: openai, model: m }]\n  premium: [{ provider: anthropic, model: claude-opus-5-5 }]\nquota: { overCapMultiplier: 0 }\n");
-    const config = loadConfig(cwd);
-    // An account provider needs no providers block, so a tier naming one stays.
-    expect(config.tiers.premium).toEqual([{ provider: "anthropic", model: "claude-opus-5-5" }]);
-    expect(config.warnings?.join("\n")).toMatch(/tiers\.nope is not a known tier.*built-in nope tier applies/);
-    expect(config.warnings?.join("\n")).toMatch(/quota\.overCapMultiplier.*quota section was dropped/);
-    expect(config.providers.foundry?.endpoint).toBe("https://res.services.ai.azure.com");
+  it("lists a key once even when both files carry it", () => {
+    home("tiers: {}\n");
+    const cwd = project();
+    mkdirSync(path.join(cwd, ".pi-workflows"));
+    writeFileSync(path.join(cwd, ".pi-workflows", "config.yaml"), "tiers: {}\nworkers: {}\n");
+    const warning = (loadConfig(cwd).warnings ?? []).find((item) => item.startsWith("Ignored settings"))!;
+    expect(warning).toBe("Ignored settings that are no longer used: tiers, workers. See docs/configuration.md for the current settings.");
+  });
+
+  it("an old cost-workflow.yaml is not read", () => {
+    const dir = home("");
+    writeFileSync(path.join(dir, ".pi", "agent", "cost-workflow.yaml"), "branchPrefix: old\n");
+    expect(loadConfig(project()).branchPrefix).toBe("chef");
   });
 });

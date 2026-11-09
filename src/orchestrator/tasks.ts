@@ -1,5 +1,5 @@
 import { WorkflowError, type TaskState } from "../domain.js";
-import { PUBLISHED_PHASES, active, iso, type WorkflowContext } from "./context.js";
+import { active, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 
 /** Words that carry no meaning in a task name. */
@@ -83,11 +83,11 @@ export function allTicketsDone(task: TaskState): boolean {
   return tickets.length > 0 && tickets.every((ticket) => task.ticketRuns?.[ticket.id]?.status === "done");
 }
 
-/** Closed, published by an older version, or built to the last ticket with a passed review: a new /plan closes it rather than parking it. */
+/** Closed, or built to the last ticket with a passed review: a new /plan closes it rather than parking it. */
 export function isFinished(task: TaskState): boolean {
-  if (isClosed(task) || PUBLISHED_PHASES.includes(task.phase)) return true;
+  if (isClosed(task)) return true;
   // Built is not finished: the work counts as done once its review passed, so a new /plan parks an unreviewed task.
-  return ["IMPLEMENTING", "REVIEWING", "AWAITING_PUBLISH_APPROVAL"].includes(task.phase) && allTicketsDone(task) && task.review?.passed === true;
+  return ["IMPLEMENTING", "REVIEWING"].includes(task.phase) && allTicketsDone(task) && task.review?.passed === true;
 }
 
 /** Tasks still being worked on: not closed and not finished. */
@@ -152,4 +152,32 @@ export async function requireActiveTask(ctx: WorkflowContext): Promise<TaskState
   const task = await activeTask(ctx);
   if (!task) throw new WorkflowError("NO_TASK", "No active task.");
   return task;
+}
+
+/** The task's state in a few words, from its phase and ticket runs: "building 2 of 5 tickets", "built, run /review". */
+export function stateText(state: TaskState | undefined): string {
+  if (!state || state.phase === "IDLE") return "no active task";
+  const reason = state.blockedReason ? ` (${state.blockedReason.replace(/\s+/g, " ").slice(0, 80)})` : "";
+  switch (state.phase) {
+    case "PLANNING":
+      return `planning (${state.planning?.stage === "tickets" ? "writing tickets" : "interview"})`;
+    case "AWAITING_PLAN_APPROVAL":
+      return state.approvedVersion && state.approvedVersion === state.plan?.version ? "plan approved, run /build" : "plan draft, /show-plan";
+    case "COMPLETE":
+      return "complete";
+    case "BLOCKED":
+    case "PAUSED":
+    case "FAILED":
+      return `${state.phase.toLowerCase()}${reason}`;
+  }
+  const runs = state.ticketRuns ?? {};
+  const total = state.plan?.tickets?.length || Object.keys(runs).length;
+  const finished = Object.values(runs).filter((run) => run.status === "done").length;
+  const failed = Object.values(runs).filter((run) => run.status === "failed").length;
+  if (state.review) return state.review.passed ? "reviewed, passed" : "reviewed, findings to fix";
+  if (!state.build && Object.keys(runs).length === 0) return "plan approved, run /build";
+  if (state.build?.currentTicket) return `building ticket ${state.build.currentTicket} of ${total}`;
+  if (failed > 0) return `stopped, ${finished} of ${total} tickets done, ${failed} failed; /build resumes`;
+  if (finished >= total && total > 0) return `built, ${total} tickets done; run /review`;
+  return `building, ${finished} of ${total} tickets done`;
 }

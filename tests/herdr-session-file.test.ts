@@ -133,12 +133,6 @@ describe("ledgerChildSession", () => {
     const compaction = rows.find((row) => row.reason.startsWith("Pi compaction"))!;
     expect([compaction.provider, compaction.model]).toEqual(["anthropic", "claude-sonnet"]);
   });
-
-  it("leaves entries older than since alone", async () => {
-    const { dir, ctx } = await setup();
-    session(dir, [assistant("a")]);
-    expect(ledgerChildSession(ctx, readChildSession(dir), { ticketId: "01", since: new Date(Date.now() + 60_000) })).toEqual([]);
-  });
 });
 
 describe("lastAssistantText", () => {

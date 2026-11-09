@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parseConfig, type WorkflowConfig } from "../src/config.js";
-import type { ProviderAuthView } from "../src/providers/auth.js";
-import type { ProviderId, TaskState, Ticket, TokenUsage } from "../src/domain.js";
+import type { TaskState, Ticket, TokenUsage } from "../src/domain.js";
 import { GitWorkspace } from "../src/git/workspace.js";
 import type { WorkflowContext } from "../src/orchestrator/context.js";
 import type { ChatFn } from "../src/providers/pi-chat.js";
@@ -33,45 +32,23 @@ export async function tempRepo(): Promise<string> {
 
 export function testConfig(): WorkflowConfig {
   return parseConfig(`
-providers:
-  openai: { type: openai, auth: account-login, model: gpt-5.4 }
-  anthropic: { type: anthropic, auth: account-login, model: claude-sonnet }
-  foundry:
-    type: azure-foundry
-    auth: azure-cli
-    endpointEnv: AZURE_AI_ENDPOINT
-  local: { type: openai-compatible, baseUrl: http://127.0.0.1:11434/v1, model: local-coder }
-tiers:
-  cheap: [{ provider: foundry, model: classifier }]
-  standard: [{ provider: anthropic, model: claude-sonnet }]
-  premium: [{ provider: openai, model: gpt-5.4 }]
-routing: { maxEscalations: 2, maxTier: premium, requirePremiumReviewFor: [auth, permissions, secrets, security-sensitive], circuitBreakerFailures: 3 }
-workers: { tokenBudget: 8000 }
+models: { low: anthropic/claude-sonnet, medium: anthropic/claude-sonnet, high: openai/gpt-5.4, review: openai/gpt-5.4 }
+routing: { maxEscalations: 2 }
 budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 }
 checks:
   - name: unit
     command: npm
     args: ["test"]
 pricing:
-  - { provider: foundry, model: classifier, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0.15, outputPerMillionUsd: 0.6 }
   - { provider: anthropic, model: claude-sonnet, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
   - { provider: openai, model: gpt-5.4, effectiveFrom: "2026-01-01", inputPerMillionUsd: 2.5, outputPerMillionUsd: 15 }
 `);
-}
-
-export function readyAuth(status: ProviderAuthView["status"] = "ready"): WorkflowOptions["auth"] {
-  return {
-    async inspect(provider: ProviderId): Promise<ProviderAuthView> {
-      return { provider, status, method: provider === "foundry" ? "azure-cli" : provider === "local" ? "local" : "oauth", detail: status };
-    },
-  };
 }
 
 export function workflow(cwd: string, extras: Partial<WorkflowOptions> = {}): Workflow {
   return new Workflow({
     cwd,
     config: testConfig(),
-    auth: readyAuth(),
     now: () => new Date("2026-10-14T12:00:00.000Z"),
     confirm: async () => true,
     runner: checkRunner(async () => ({ code: 0, stdout: "ok", stderr: "" })),
@@ -93,7 +70,6 @@ export function writingDriver(cwd: string, files: Record<string, string> = { "sr
         },
       });
     },
-    async finish() {},
   };
 }
 
@@ -106,71 +82,21 @@ export async function builtWorkflow(extras: Partial<WorkflowOptions> = {}) {
   return { cwd, app };
 }
 
-/** A config that uses the multi-candidate `tiers` map (see .pi-workflows/config.yaml). Prices are test values. */
+/** The default `models` (xai low, sonnet medium, sol high, opus review) with test prices. */
 export function tieredYaml(extraYaml = ""): string {
   return `
-providers:
-  openai: { type: openai, auth: account-login }
-  anthropic: { type: anthropic, auth: account-login }
-  xai: { type: xai, auth: account-login }
-  foundry: { type: azure-foundry, auth: azure-cli, endpoint: "https://res.services.ai.azure.com", routeStyle: v1, audience: "https://ai.azure.com" }
-  vercel: { type: vercel-ai-gateway, auth: vercel-cli, projectDir: ".", envFile: .env.local }
-  local: { type: openai-compatible, baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b" }
-tiers:
-  cheap:
-    - { provider: openai, model: gpt-6-luna }
-    - { provider: anthropic, model: claude-haiku-5-5 }
-  standard:
-    - { provider: anthropic, model: claude-sonnet-5-5 }
-    - { provider: foundry, model: grok-4-7 }
-  premium:
-    - { provider: anthropic, model: claude-opus-5-5 }
-    - { provider: openai, model: "gpt-6.1-sol" }
-  ticketLow:
-    - { provider: xai, model: grok-4.7 }
-  ticketMedium:
-    - { provider: anthropic, model: claude-sonnet-5-5 }
-  ticketHigh:
-    - { provider: openai, model: "gpt-6.1-sol" }
-  advisor:
-    - { provider: anthropic, model: claude-fable-5-1 }
-    - { provider: foundry, model: gpt-6-astra }
-workers: { tokenBudget: 8000 }
 checks:
   - { name: unit, command: npm, args: ["test"] }
 pricing:
-  - { provider: local, model: "qwen2.5-coder:7b", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
-  - { provider: openai, model: gpt-6-luna, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
-  - { provider: anthropic, model: claude-haiku-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
   - { provider: anthropic, model: claude-sonnet-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 3, outputPerMillionUsd: 15 }
   - { provider: xai, model: grok-4.7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 }
-  - { provider: foundry, model: grok-4-7, effectiveFrom: "2026-01-01", inputPerMillionUsd: 1, outputPerMillionUsd: 4 }
   - { provider: anthropic, model: claude-opus-5-5, effectiveFrom: "2026-01-01", inputPerMillionUsd: 15, outputPerMillionUsd: 75 }
   - { provider: openai, model: "gpt-6.1-sol", effectiveFrom: "2026-01-01", inputPerMillionUsd: 10, outputPerMillionUsd: 50 }
-  - { provider: anthropic, model: claude-fable-5-1, effectiveFrom: "2026-01-01", inputPerMillionUsd: 20, outputPerMillionUsd: 100 }
-  - { provider: foundry, model: gpt-6-astra, effectiveFrom: "2026-01-01", inputPerMillionUsd: 5, outputPerMillionUsd: 25 }
 ${extraYaml}`;
 }
 
 export function tieredConfig(extraYaml = ""): WorkflowConfig {
   return parseConfig(tieredYaml(extraYaml));
-}
-
-/** Small seeded generator (mulberry32) so Thompson sampling is reproducible in tests. */
-export function seededRng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export function unsignedJwt(expSeconds: number): string {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${part({ alg: "none" })}.${part({ exp: expSeconds })}.sig`;
 }
 
 /** A Pi registry fake in which every model asked for exists and has credentials. */
@@ -196,7 +122,7 @@ export const sampleSpec = { summary: "Retry failed ingests.", context: "src/inge
 /** A workflow in a fresh repo with a ticket plan saved through the /plan tools and, unless `approve` is false, approved. */
 export async function ticketWorkflow(tickets: Ticket[], extras: Partial<WorkflowOptions> = {}, options: { approve?: boolean; cwd?: string; request?: string } = {}) {
   const cwd = options.cwd ?? (await tempRepo());
-  const app = workflow(cwd, { config: tieredConfig(), rng: () => 0.5, startTurn: () => undefined, ...extras });
+  const app = workflow(cwd, { config: tieredConfig(), startTurn: () => undefined, ...extras });
   if (!(await app.startPlan(options.request ?? "Add retry to the ingest parser")).ok) throw new Error("startPlan failed in fixture");
   await app.savePlanSpec(sampleSpec);
   await app.commitTickets(tickets);
@@ -207,19 +133,6 @@ export async function ticketWorkflow(tickets: Ticket[], extras: Partial<Workflow
 /** The context a Workflow holds, for tests of the modules that take one. */
 export function contextOf(app: Workflow): WorkflowContext {
   return (app as unknown as { ctx: WorkflowContext }).ctx;
-}
-
-/** The sample advisor tier of the real config (Astra on OpenAI, then Fable), priced: Astra at $0 (ChatGPT), Fable per token. */
-export function withAdvisors(config: WorkflowConfig): WorkflowConfig {
-  config.tiers.advisor = [
-    { provider: "openai", model: "gpt-6-astra" },
-    { provider: "anthropic", model: "claude-fable-5-1" },
-    { provider: "foundry", model: "gpt-6-astra" },
-  ];
-  config.pricing.push({ provider: "openai", model: "gpt-6-astra", effectiveFrom: "2026-01-01", inputPerMillionUsd: 0, outputPerMillionUsd: 0 });
-  // The advisor tests cover medium tickets too; the default (high only) has its own tests.
-  config.advisors.fromDifficulty = "medium";
-  return config;
 }
 
 export interface FakeCall {

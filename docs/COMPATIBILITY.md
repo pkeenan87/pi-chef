@@ -1,189 +1,77 @@
-# Pi compatibility
+# Pi and herdr compatibility
 
-Inspected on 2026-10-14 from the published npm tarballs, not from memory and not from the stale Mintlify mirror.
+The Pi and herdr surface pi-chef uses, and what has not been run live. Read from the published `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` 1.2.0 packages (`dist/*.d.ts` and `docs/`). The herdr checks of 2026-11-08 ran against Pi 1.5.0. `@mariozechner/pi-coding-agent` is the frozen predecessor; its docs do not match.
 
-| Package | Version | Published | Repository |
-|---|---|---|---|
-| `@earendil-works/pi-coding-agent` | **1.2.0** | 2026-10-12 | `earendil-works/pi` |
-| `@earendil-works/pi-ai` | **1.2.0** | 2026-10-12 | same monorepo |
-| `@mariozechner/pi-coding-agent` | 0.73.1 | 2026-05-07 | `badlogic/pi-mono` (frozen) |
+## Pi extension API
 
-This extension targets `@earendil-works/pi-coding-agent` 1.2.0. The Mario package is the predecessor. Docs that import `@mariozechner/pi-coding-agent` or describe an `Extension.init(context)` lifecycle are older than the API shipped in 1.2.0.
-
-Pi's own docs in the 1.2.0 tarball (`package/docs/extensions.md`, `providers.md`, `models.md`, `compaction.md`, `packages.md`, `slash-commands.md`) and the `.d.ts` files are the source of truth below. A test imports the installed providers and checks the auth objects without calling them.
-
-## Account login (OpenAI and Anthropic)
-
-Pi implements both account logins. This project does not implement either OAuth flow and does not fall back to an API key stored in Pi unless the user config sets `providers.<name>.apiKeyFallback: true`.
-
-### OpenAI
-
-`openaiProvider()` in `@earendil-works/pi-ai` 1.2.0 (`dist/providers/openai.js`) registers:
-
-- `auth.apiKey` — `OPENAI_API_KEY` prompt. **Rejected by this extension.**
-- `auth.oauth` — name `OpenAI (ChatGPT subscription)`, `isSubscription: true`, `loginLabel: "Sign in with ChatGPT"`, loader `loadOpenAIChatGPTOAuth`.
-
-The ChatGPT flow (`dist/auth/oauth/openai-chatgpt.js`) is a public client. Its comment says the user access token is sent to `api.openai.com`. Scope includes `chatgpt.tokens.use.direct`. The provider filters classifier models out when the credential type is `oauth`, and `docs/models.md` says ChatGPT sign-in does not work with the Decisions API (`gpt-6-luna`).
-
-A second provider, `openai-codex` (`dist/providers/openai-codex.js`), is named `OpenAI Codex (legacy)`. It has **oauth only** (no `apiKey`): `OpenAI (ChatGPT Plus/Pro)`, `isSubscription: true`, API `openai-codex-responses`, base URL `https://chatgpt.com/backend-api`.
-
-Built-in command: `/login` and `/login [provider]` (`docs/slash-commands.md`). Credentials land in `~/.pi/agent/auth.json`. There is no `ExtensionAPI.login()`.
-
-**Assumption this project does not make:** a ChatGPT or Codex subscription grants API quota. Pi labels the method `isSubscription` and then sends the token to an API. Entitlement has to be verified by a real request after `/login`, which this repo's tests do not perform.
-
-### Anthropic
-
-`anthropicProvider()` registers:
-
-- `auth.apiKey` — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, and workload-identity env vars. **Rejected by this extension.**
-- `auth.oauth` — name `Anthropic (Claude Pro/Max)`, `isSubscription: true`, loader `loadAnthropicOAuth`.
-
-The flow (`dist/auth/oauth/anthropic.js`) uses `https://claude.ai/oauth/authorize` and `https://platform.claude.com/v1/oauth/token`. Scopes include `user:inference`. `docs/settings.md` has `warnings.anthropicExtraUsage` (default true): "Warn when Anthropic subscription authentication may use paid extra usage."
-
-**Assumption this project does not make:** Claude Pro/Max includes free third-party harness usage. Pi ships the login and also warns that it may bill extra usage. This extension will use that login when an oauth credential is present, and it will not substitute an API key. A live call is required to confirm the account's entitlement. Tests do not make one.
-
-### What "callable" means here
-
-| Check | OpenAI | Anthropic |
+| Need | API | Where |
 |---|---|---|
-| Account-login implementation present in Pi 1.2.0 | Yes (`openai` ChatGPT oauth and legacy `openai-codex`) | Yes (Claude Pro/Max oauth) |
-| API-key path also present | Yes, and **disabled by this extension** | Yes, and **disabled by this extension** |
-| Extension API to start the browser flow | **No.** User runs Pi's `/login`. `/auth login` only explains that and re-reads status | Same |
-| Proven by a live completion in this environment | **No.** No interactive login and no paid calls in tests | **No.** Same |
+| Load | default export `(pi: ExtensionAPI) => void`; `package.json` `"pi": { "extensions", "skills" }` and the `pi-package` keyword; host packages are optional peers | `src/extension.ts` |
+| Commands | `pi.registerCommand(name, { description, handler, getArgumentCompletions })` | `src/commands.ts`, `extension.ts` |
+| Tools | `pi.registerTool` (`web_search`, `web_fetch`, `plan_questions`, `plan_spec`, `plan_tickets`); `pi.getActiveTools`, `getAllTools`, `setActiveTools` to limit tools during `/plan` | `src/tools/` |
+| Local provider | `pi.registerProvider("local", { name, baseUrl, api: "openai-completions", apiKey, models })` at load, at `session_start`, and when the `local` section changes | `src/providers/runtime.ts` |
+| Lifecycle | `session_start`, `session_shutdown`, `session_tree`, `session_compact`, `before_agent_start`, `agent_end`, `agent_settled` | `extension.ts` |
+| Usage | `message_end` (token counts for the ledger; message text is not copied); `ctx.sessionManager.getEntries()` and `getSessionId()` to sweep Pi's own usage entries into the ledger once per entry | `extension.ts`, `orchestrator/budget.ts` |
+| Block a tool | `pi.on("tool_call")` returning `{ block, reason }` (destructive bash; non-read-only bash during `/plan`; `git push`, branch switches and worktree changes in a Pi ticket child); `user_bash` for commands you type | `extension.ts`, `src/sandbox.ts` |
+| Model calls | `ctx.modelRegistry.find`, `hasConfiguredAuth`, `complete` for the review calls; the model must be known with credentials | `src/providers/` |
+| Session | `pi.appendEntry` (active task pointer), `pi.sendMessage` (reports), `pi.sendUserMessage` (fix requests) | `extension.ts` |
+| UI | `ctx.ui.notify`, `confirm`, `select`, `editor`, `setStatus`, guarded by `ctx.hasUI` | `extension.ts` |
+| Ticket child | `pi -ne -e <repo>/src/ticket-mode.ts --model provider/id[:thinking] --session-dir <dir>`; `ctx.abort`, `agent_start` | `src/ticket-mode.ts`, `src/runner/pi-ticket.ts` |
 
-`/auth status` reads credential **metadata** only (`type`, `expires`). It never copies `access`, `refresh`, or `key` into task files, logs, or prompts. `type: "api_key"` or an `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` environment with no oauth credential is `blocked`, not a fallback. An oauth credential past `expires` is `expired` and the workflow pauses.
+Not subscribed on purpose: `before_provider_headers`, `context`. Pi has no extension call for `/login`; the user runs it. pi-chef never calls `pi.setModel`.
 
-## Azure AI Foundry
+Pi 1.2.0 declares `node >= 22.19.0`; this package typechecks on Node 20.
 
-Pi's built-in `azure` provider (`dist/providers/azure.js`) is **API-key only**: `AZURE_OPENAI_API_KEY`, plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`, optional `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` and `AZURE_OPENAI_API_VERSION` (`docs/providers.md`). `auth.oauth` is absent. The provider serves OpenAI models through Responses and other Foundry models through Chat Completions.
+### Local server registration
 
-This extension does **not** use that API key. Foundry calls go through an isolated client:
+From `ProviderConfig` and Pi's `docs/models.md`: `apiKey` is a literal, `$ENV_VAR`, or `!command`, and is required when defining models. pi-chef passes `$<apiKeyEnv>` when named, else the placeholder `local`. `models` replaces the provider's models; each entry carries `id`, `name`, `input`, `reasoning`, `cost`, `contextWindow` and `maxTokens`. A repeat `registerProvider` for a name takes effect at once.
 
-- Token source: `az account get-access-token` (Azure CLI / Entra). The token is held in memory for the request and is never written to YAML, prompts, events, or git.
-- Endpoint: environment variable named by `endpointEnv` (default `AZURE_AI_ENDPOINT`).
-- Deployment, API version, audience, and wire shape (`openai-responses`, `openai-completions`, or `azure-openai-responses`) come from config. One shape is not assumed.
+## Pi session files
 
-`az` is not invoked by the test suite. A missing CLI or an `az login` failure pauses the Foundry provider.
+`src/herdr/session-file.ts` reads the files a Pi ticket child writes in its `--session-dir` (Pi 1.2.0 `SessionManager`):
 
-## Local inference
+- One `<timestamp>_<sessionId>.jsonl` per session, appended; the file appears once the session holds a message, so a reader can meet a missing file or a half-written last line.
+- Line 1 is `{type: "session", version: 3, id, timestamp, cwd}`. Other entries have `type`, `id`, `parentId`, `timestamp`.
+- `{type: "message", message}`: an assistant message has `provider`, `model`, `usage` `{input, output, cacheRead, cacheWrite, totalTokens, cost: {...}}` and `stopReason`.
+- `{type: "usage", kind, provider, model, usage}` records Pi's own calls.
+- The ledger id is `pi-<sessionId>-<entryId>`; entry ids repeat across sessions, so the session id is part of the key.
 
-Documented Pi options (`docs/models.md`, `docs/llama-cpp.md`):
+## herdr (`hc`)
 
-- llama.cpp router via `/login llama.cpp` and `/llama` (Pi's own provider; not reimplemented here).
-- OpenAI-compatible endpoints (Ollama, vLLM, LM Studio) via `models.json` with `api: "openai-completions"`. Pi's Ollama example uses a dummy non-secret `apiKey` because the client requires a field. This extension's local client talks to `baseUrl` and sends a bearer only when `apiKeyEnv` is set. The key value is never copied into the repo.
+`src/herdr/client.ts` runs `hc` with argv arrays, never a shell: `run --bg --json --no-notify [--name] [--cwd] [--label k=v] -- argv`, `send --json --wait --timeout <s> <t> -- text`, `wait <t> --json --timeout`, `read <t> --json --lines N`, `get <t> --json` (to find its own space), `kill`. Pi must itself run in herdr (the client asks herdr which terminal and space it is in).
 
-No local server is started in tests. The client is injected.
+Checked live on 2026-11-08 (herdr mechanics only, not a `/build`): env reaches a child `pi`; `waitIdle` returns `idle` once Pi is up and `done` after a turn; a tab reads `working` about a second after `send`; the session file is complete at idle; the deny hook blocks `git push` in the child; `kill` removes the tab.
 
-## Documented extension APIs this project uses
+`hc wait --json` on an idle Claude Code tab returned `{ended: true, reason: "status", status: "idle", turn, ...}`. `hc send --if idle` refuses a tab that reads `done` (an agent finished a turn and nobody looked), so sends do not use it. Before a send the runner waits until the tab is neither `working` nor `blocked`; `send --wait` then waits for the turn that send started, and a check-in that finds the tab still working is followed by `hc wait`, up to the wall-clock limit. `idle` and `done` both count as finished, `blocked` is waited for, `error` or a dead tab stops the ticket. The shape of `send --wait --json` is read like `wait --json`; an answer with no status is treated as a check-in.
 
-From `dist/core/extensions/types.d.ts` and `docs/extensions.md` in coding-agent 1.2.0:
+## External agent logs
 
-| Need | Documented API | How we use it |
-|---|---|---|
-| Load the extension | Default export `(pi: ExtensionAPI) => void` | `src/extension.ts` |
-| Slash commands | `pi.registerCommand(name, { description, handler, getArgumentCompletions })` | Every command in the spec. Completions are the documented tab-completion hook |
-| Help text | `description` on the command, shown in Pi's `/` menu | Plus an in-command `help` argument |
-| Session start / stop | `pi.on("session_start")`, `pi.on("session_shutdown")` | Bind cwd; read the model slot that sets the chunk model on a `/build` session, else pin the session to `session.model` with `setModel`. `session_shutdown` disposes the workflow. The factory starts no timer (docs forbid that) |
-| Fresh context | `ExtensionCommandContext.newSession({ withSession })` | `/build` opens one per ticket, from the command ctx. `docs/extensions.md`: session replacement invalidates the old context; keep only plain data and continue in `withSession`. **Unverified live**, including a second `newSession` from the replacement ctx |
-| Move into a worktree | `ExtensionCommandContext.switchSession(file, { withSession })`, `SessionManager.create(dir).getHeader()` | A worktree `/build` writes a header-only session file whose `cwd` is the task's worktree and switches to it once, before the first ticket; later tickets use `newSession` from there. A Pi without `switchSession` builds in the main checkout. **Unverified live** |
-| Send a turn | `sendUserMessage(text)` on the replacement ctx | `/build` sends the ticket prompt, then the one retry message. Assumed to resolve when the run ends. **Unverified live** |
-| Wait for the run | `waitForIdle()` on the replacement ctx | After each `sendUserMessage`. The order against `agent_settled`, and Esc while a command awaits, are **unverified live** |
-| Run finished | `pi.on("agent_settled")` | Records `aborted` so Esc stops the build after that turn. `message_end` keeps the last assistant text for the criteria checklist |
-| Runtime model switch | `pi.setModel(model): Promise<boolean>` | False when the provider has no auth. `session_start` calls it with `registry.find(session.model)` when `session.pin` is on and no `/build` model is pending, and warns once on a miss or a false. `/build` sets each ticket's model through the `session_start` slot (the replacement ctx has no `setModel`), then puts `session.model` (or, with pinning off, the user's model) back with the newest instance's `setModel`. **Unverified live** |
-| Compaction summary | `pi.on("session_before_compact")` returning `{ compaction: { summary, firstKeptEntryId, tokensBefore, usage } }` (`SessionBeforeCompactResult`; `docs/compaction.md`) | The messages in `event.preparation.messagesToSummarize` (plus `turnPrefixMessages` for a split turn) go through `serializeConversation(convertToLlm(...))` to a `session.compactionTier` model via `modelRegistry.complete`. The hook returns `undefined`, so Pi compacts with the session model, on any failure or a hard budget. **Unverified live**: that Pi accepts the injected summary and counts `usage` |
-| Budget gate | `pi.on("input")` returning `{ action: "handled" }` or `{ action: "continue" }` (`InputEventResult`) | A hard budget handles a prompt whose `source` is not `extension` and whose first word is not a command (`/name` or `/plugin:name`; a path such as `/tmp/x` is not one); commands always continue. **Unverified live**: that `handled` stops the prompt before any model call and that `/` commands reach their handlers whatever this hook returns |
-| Nested model calls (advisor, compaction summary, `/review` model pass) | `ctx.modelRegistry.streamSimple`, `find`, `hasConfiguredAuth`, `isUsingOAuth`, `getProviderAuthStatus` | OpenAI and Anthropic session calls only when `isUsingOAuth` is true |
-| Observe usage | `pi.on("message_end")` | Record token metadata. Message text is not copied |
-| Block a tool | `pi.on("tool_call")` returning `{ block: true, reason }` | Destructive shell commands, non-read-only bash while `/plan` runs, and `git push` and branch switches while a `/build` ticket runs. `user_bash` is the documented hook for commands typed by the user |
-| Durable session notes | `pi.appendEntry` | Pointer to the active task id. Task truth lives in `.pi-workflows`, not in the transcript |
-| UI | `ctx.ui.notify`, `ctx.ui.confirm`, `ctx.ui.setStatus` | `ctx.hasUI` guards dialogs. Non-interactive mode fails closed when a required confirmation has no UI |
-| Package layout | `package.json` `"pi": { "extensions", "skills" }` and `"pi-package"` keyword | Host packages (`pi-coding-agent`, `pi-ai`, `typebox`) are optional peers, not dependencies (`docs/packages.md`) |
+`src/runner/agent-usage.ts` snapshots the agent's log directory before its tab opens and reads only new or grown files afterwards.
 
-Events we deliberately do not subscribe to: `before_provider_headers` (would be a place to inject secrets), `context` / `context_with_system` (would let us rewrite the transcript into a fake reset).
+- **Claude Code:** `~/.claude/projects/<cwd with every non-alphanumeric character replaced by "-">/<session>.jsonl` (sub-agents in `<session>/subagents/*.jsonl`). `type: "assistant"` lines carry `message.id`, `message.model` and `message.usage` (`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`). One message repeats per content block, so each id is counted once.
+- **Codex:** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Line 1 is `session_meta` with `payload.cwd`; `turn_context` carries `payload.model`; `event_msg` lines with `payload.type: "token_count"` carry the session's cumulative `payload.info.total_token_usage`. `output_tokens` includes reasoning and `input_tokens` includes cached.
+- Other agents (Cursor, Antigravity, Grok, Gemini, opencode) are recorded as "not metered".
+- Default agent commands were chosen from each CLI's `--help` on 2026-11-08 (claude 2.1.319, codex-cli 0.167.0, cursor-agent 2026.10.01, grok 1.0.77, agy 1.5.3, gemini, opencode).
 
-## Documented APIs we considered and did not pretend to have
+## Verified live (2026-11-08, Claude Code on Haiku in a herdr tab)
 
-| Idea | Finding |
-|---|---|
-| Programmatic `/login` from an extension | Not on `ExtensionAPI`. `/auth login` prints the exact `/login` command and re-reads status |
-| Unregister a tool | Docs: tools cannot be unregistered; re-register with `exposure: "hidden"` if needed. We do not hide Pi's tools |
-| Auto-merge | Not implemented. `approvals.merge` is `manual`. Nothing in the extension pushes, opens a PR, or merges |
-| Reset that deletes the transcript in place | `newSession` starts a new session file. `compact` summarizes. Neither deletes `.pi-workflows` artifacts |
-| A hook that swaps providers per tool call inside one assistant turn | None. The main session stays on one model (`session.model`). Advisor, compaction, and review calls use isolated registry calls so they do not change `pi.setModel` under the user and so Foundry's Azure CLI token never becomes a Pi `apiKey` |
-| Forking Pi | Not required. Stop condition in the spec is not hit |
+- `hc send --wait --json` prints `{started, status, turn, wait: {status, turn, reason, ended, exit_code}}`. The top-level `status` is the terminal's state before the send; the turn's outcome is `wait`. The client reads `wait`.
+- A send with `--wait` into a tab that reads `done` is accepted and waits for the new turn (`--if` takes only `idle`/`working`, so it is not used).
+- Claude Code's first-run "trust this folder?" dialog reports no status at all (not `blocked`). The runner never types before a ready report, and after 20 s tells the person the tab needs them. Pressing Enter there would pick "No, exit".
+- The Claude Code meter: a snapshot, one turn, then `collect()` gave exactly one call (`anthropic/claude-haiku-5-5`) with its cache tokens; a second `collect()` gave nothing.
 
-## Runtime model switching
+## Unverified live
 
-Pi supports it.
+Unit tests cover the code around these with fakes; none ran against a live service.
 
-- `pi.setModel` changes the session model and returns false when auth is missing.
-- The extension used to register a virtual model (`cost-opt/auto`) that routed each request. It no longer does. The main session is a normal Pi model: `session_start` sets `session.model` (default `anthropic/claude-opus-5-5`) unless `session.pin` is false or `/build` has a ticket model pending.
-- `/build` switches each fresh session to the ticket's model through the `session_start` slot, and puts `session.model` back at the end.
-- Nested calls to OpenAI, Anthropic and xAI models go through an account login (or a key the user allowed with `apiKeyFallback`); a missing login is a clear error.
-
-Isolated registry calls exist for the nested calls (advisors, the compaction summary, the `/review` model pass). They do not change the model under the user.
-
-## Ticket mode (`src/ticket-mode.ts`)
-
-The herdr runner starts a ticket child as `pi -ne -e <pi-chef>/src/ticket-mode.ts`. It relies on these parts of Pi's surface:
-
-- **`-e <file>` entry loading:** Pi loads a `.ts` extension file by path with built-in extensions off. Tests load it through `DefaultResourceLoader` `additionalExtensionPaths`.
-- **`tool_result` content replacement:** a handler returns `{ content, structuredContent }` to append a syntax note to an `edit` or `write` result. `structuredContent` is passed along because replacing `content` alone drops it. The `tool_call` event's `toolCallId` pairs the before and after states.
-- **`ctx.abort()` from `message_end`:** the turn budget aborts the run from that handler. `agent_start` and `agent_settled` (`event.aborted`) bound the run, and `agent_settled` is the final word on `aborted`.
-- **`pi.sendMessage(..., { deliverAs: "steer" })`** for the one steer at the limit.
-- **`user_bash` and `tool_call` (`bash`, `powershell`)** for the deny rules.
-- **`session_start`** (`reason: "startup" | "new" | …`, `SessionStartEvent`): ticket mode resets its turn count and status file on every one, which the review tab relies on after its `/new`.
-
-## Session files (`src/herdr/session-file.ts`)
-
-The herdr runner learns a ticket child's spend and its last answer from the child's Pi session files. Confirmed against Pi 1.2.0's `SessionManager` (`dist/core/session-manager.js`) and written back by its real `create`/`appendMessage`/`appendUsage`/`appendCompaction` in `tests/herdr-session-file.test.ts`:
-
-- **Files:** one `<timestamp>_<sessionId>.jsonl` per session in `--session-dir`; `/new` in the child starts another file in the same dir. JSON Lines, appended with `appendFileSync`. Pi creates the file only once the session holds a user or assistant message, then writes every entry so far in one go, so a reader can meet a missing file or a half-written last line.
-- **Header (line 1):** `{type: "session", version: 3, id, timestamp, cwd, parentSession?}`. `id` is the session id.
-- **Entries:** all have `type`, `id` (short, unique within the session, not across sessions), `parentId` (`null` or an entry id), `timestamp` (ISO string).
-- **`message`:** `{type: "message", message}`. An assistant `message` is pi-ai's `AssistantMessage`: `role: "assistant"`, `content` (parts: `text` with `text`, `thinking`, `toolCall`), `api`, `provider`, `model`, `usage` `{input, output, cacheRead, cacheWrite, totalTokens, cost: {input, output, cacheRead, cacheWrite, total}}`, `stopReason` (`pending`, `stop`, `length`, `toolUse`, `error`, `aborted`, `deferred`), `timestamp`. Other roles in the same entry type: `user`, `toolResult`.
-- **Pi's own calls:** `{type: "usage", kind, provider, model, usage, note?}` (cache warming); `{type: "compaction", summary, firstKeptEntryId, tokensBefore, details?, usage?, fromHook?, systemMessage?}`; `{type: "branch_summary", fromId, summary, usage?, fromHook?}`. Same as the entries `recordPiUsage` reads from `getEntries()` in the main session.
-- **Ledger id:** `pi-<sessionId>-<entryId>`, the one `recordPiUsage` uses, for assistant messages as well. Entry ids repeat across sessions, so the session id is part of the key.
-- **Not confirmed live:** (the file was complete at idle in the 2026-11-08 check below) what a real TUI child writes for an aborted or retried turn, and whether a written assistant message can carry `stopReason` `pending` or `deferred` (pi-ai's `StopReason` lists both besides `stop`, `length`, `toolUse`, `error`, `aborted`; `usageOfMessage` bills any value other than a zero-token `error`/`aborted` like a normal turn). Compaction and branch-summary entries carry no provider or model, so the ledger takes the runner's launch model, else the nearest preceding assistant message's (the shapes above are Pi's source; the fixtures use the real writer, not a running child).
-
-## Live check of the herdr mechanics (2026-11-08)
-
-Herdr mechanics only, not a `/build`. A script over the built `createHerdrClient` started one child the way `runInHerdr` does (`hc run --bg … -- env PI_CHEF_TICKET=99 PI_CHEF_STATUS=… PI_CHEF_MAX_TURNS=8 pi -ne -e src/ticket-mode.ts --model anthropic/claude-haiku-5-5 --session-dir …`, a throwaway git repo as cwd, the three labels, no notify) with Pi 1.5.0 and sent three messages (two model prompts, plus `/new`). Confirmed:
-
-- **Env reaches Pi:** the status file at `PI_CHEF_STATUS` appeared after the first turn with `{turns: 2, turnLimit: false, aborted: false}`. It does not exist right after startup (nothing writes it before a turn). Only the status path proves the env; `PI_CHEF_MAX_TURNS` was never reached, so it is not shown to bind.
-- **`waitIdle` after `hc run`:** returned `idle`, turn 0, once Pi was up. After a send it returned `done` (turn 1) only after the turn finished.
-- **Working soon after send:** the tab read `working` on the first poll that succeeded, 1087 ms after `hc send` returned (200 ms polls, each an `hc get`). No early idle was seen.
-- **Session file at idle:** one `*.jsonl` in `--session-dir` with model_change, thinking_level_change, system, user, assistant (`stopReason: toolUse`, tool `write`), toolResult, assistant (`stopReason: stop`). Assistant entries carried `provider: anthropic`, `model: claude-haiku-5-5` and `usage` with cost (0.000488525 and 0.00005037). A re-read 2 s later was identical. `lastAssistantText` gave `DONE`, and `hello.txt` held `hi`.
-- **`/new` through `client.command`:** the status file went back to `turns: 0`, so `session_start` fired in the child. No second session file existed right after `/new`; it appeared with the next message, with new session id and fresh entry ids.
-- **Deny hook live:** asked to run `git push origin main`, the child's bash returned `/build commits each ticket; do not push or switch branches during a ticket.`; the model then ran two read-only git commands. Nothing was pushed (the repo has no remote). The status after three turns of that session was `turns: 3`.
-- **Kill:** `hc kill` of the tab succeeded and `hc ls --label pi-chef.ticket=99` listed nothing afterwards.
-
-Not covered: the `/build` loop with the herdr runner, `PI_CHEF_MAX_TURNS` biting, `ctx.abort()` and the steer at the limit in a live child, `--outlive-parent` tabs found by label from a later Pi session, kill-then-run under the same name, and a reviewer on read-only tools.
-
-## Assumptions that still need a live Pi session
-
-These are labeled assumptions. Unit tests cover the code around them; they do not boot the TUI.
-
-1. `newSession()` from a command handler (and again from inside `withSession`) leaves the new session empty of the previous transcript. The type says "Start a new session". `/build` depends on it: if it no-ops, a ticket would start with the previous ticket's transcript, and the model check in the driver would not notice.
-2. `switchSession(file)` into a session file pi-chef wrote (one header line, its `cwd` the task's worktree) rebuilds the session in that directory, so the tools, `ctx.cwd` and every later `newSession` work in the worktree. `agent-session-runtime.js` reads the cwd from the header (`SessionManager.open`); a live run has not confirmed it. If it does not move, the driver sees `ctx.cwd` is not the worktree and stops before any ticket. Pi loads project packages from that cwd's `.pi/settings.json`, so /build copies an untracked `.pi/` there; that Pi then loads them (and asks to trust a folder outside a trusted parent) is also unverified. If pi-chef's `session_start` does not run in the new session, the driver stops with "pi-chef is not loaded" and switches back to the session it started from.
-3. `getArgumentCompletions` is what Tab calls. The field exists on `RegisteredCommand`. A live TUI check is still the way to see the menu.
-4. `isUsingOAuth(model)` matches the credential Pi will actually send. We also read `auth.json` `type` ourselves when outside a session.
-5. `message_end` usage objects are the provider's counts. Missing fields stay unknown in our ledger. Pi's own `Usage.cost` type requires numbers, so a Pi transcript is not our ledger. Our ledger uses `null` for unknown charge.
-6. `az account get-access-token` output shape (`accessToken`, `expiresOn`) matches current Azure CLI. The parser accepts that JSON and fails closed otherwise.
-7. Pushing and opening the pull request are yours: `git push`, then the `origin` CLI or `gh`. The extension has no forge client.
-8. Anthropic extra-usage billing and ChatGPT token-sharing entitlement can change without a Pi release. Re-read Pi's provider docs before relying on a subscription.
-
-## Implementation plan
-
-Shipped as library modules plus `src/extension.ts`. No hosted coordinator, database, or forked runtime. Policy and transitions are code. Models only fill a validated schema: the planner's rating in `plan_spec`, ticket fields, review findings.
-
-| Milestone | Slice |
-|---|---|
-| M1 | Config, redaction, locked journal, auth gate for the four providers, `/status`, `/cost`, `/auth`. Compatibility test asserts Pi's oauth objects exist and Azure's does not |
-| M2 | `/plan`, keyword classification and the planner's rating, approval freeze, versioned plans |
-| M3 | `/build` refuses without approval. Tickets in dependency order, each in a fresh session on a routed model, checks, one commit per ticket on one branch, resume, restart-safe state |
-| M4 | `/review` with tool evidence (setup, checks, static scan, advisory model pass), numbered findings with Fix all / Fix… in the current session, security and failing-check fixtures. Works for ad-hoc branches; never commits or pushes |
-| M5 | Plan review screen with approval, `/show-plan`, a new `/plan` closes a finished task. No merge: `approvals.merge` stays `manual` |
-| M6 | Expected cost-to-success, escalation cap, circuit breaker, budget hard stop, CSV/JSON export, baseline comparison fields |
-
-Context boundaries: `/build` starts every ticket in a fresh session (`newSession`), so the ticket prompt carries the spec, the blockers' summaries, and the repo rules. State lives in `.pi-workflows`, not in the transcript. A reset never deletes artifacts.
+- The whole `/build` loop: a herdr tab per ticket, Pi children and agents, `send --wait` and the check-in loop. If it deadlocks, run one ticket per `/build`.
+- `PI_CHEF_MAX_TURNS` biting, and the steer and `ctx.abort()` at the turn limit in a live child.
+- A ticket child's session file after an aborted or retried turn, and whether an assistant message can carry `stopReason` `pending` or `deferred`.
+- That `hc send` of a long multi-line prompt pastes cleanly into each agent (it did for Pi), and that each agent reports `blocked` when it asks for approval.
+- That the Codex rollout is flushed by the time the agent reports idle (a late flush lands on the next read or is missed on the last), and that Claude Code's `output_tokens` is final on long multi-block turns (the meter takes the largest per field).
+- Each built-in agent's default command against a real ticket.
+- The `local` registration (including the Qwen 3.8 27B preset) against a live llama-server through `registerProvider`.
+- `getArgumentCompletions` in the live TUI menu.
+- That the `ctx` Pi passes to `message_end` can draw the footer (`ui.setStatus`) mid-run, and that `message_end` usage fields (and `usage.cost.total`) are the provider's counts.
+- Account entitlement: ChatGPT and Claude subscription logins, and Anthropic's extra-usage billing, can change without a Pi release.
+- The herdr side panel's rendering and the layout docking in a live herdr app.

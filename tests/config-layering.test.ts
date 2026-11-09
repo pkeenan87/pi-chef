@@ -1,90 +1,86 @@
-import { describe, expect, it } from "vitest";
-import { layerConfigs } from "../src/config.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { layerConfigs, loadConfig } from "../src/config.js";
 
 const layer = (user: Record<string, unknown> | undefined, project: Record<string, unknown> | undefined) => {
   const warnings: string[] = [];
   return { merged: layerConfigs(user, project, warnings), warnings };
 };
-const advisors = (user: Record<string, unknown> | undefined, project: Record<string, unknown>) => layer(user, { advisors: project }).merged.advisors as Record<string, unknown>;
 
-describe("advisors layering", () => {
-  it("a project can turn the switches off, never on", () => {
-    expect(advisors({ advisors: { tickets: true } }, { tickets: false }).tickets).toBe(false);
-    const { merged, warnings } = layer({ advisors: { tickets: false, plan: false } }, { advisors: { tickets: true, plan: true, summarizeCut: true } });
-    expect(merged.advisors).toMatchObject({ tickets: false, plan: false });
-    expect((merged.advisors as Record<string, unknown>).summarizeCut).toBeUndefined();
-    expect(warnings.join("\n")).toMatch(/advisors\.tickets/);
+describe("layerConfigs", () => {
+  it("replaces a whole section: the project's keys, and only those", () => {
+    const { merged, warnings } = layer(
+      { models: { low: "xai/grok-4.7", high: "openai/gpt-6.1-sol" }, budgets: { taskUsd: 10, dailyUsd: 40 } },
+      { models: { medium: "anthropic/claude-sonnet-5-5" }, budgets: { taskUsd: 50 } },
+    );
+    expect(merged.models).toEqual({ medium: "anthropic/claude-sonnet-5-5" });
+    expect(merged.budgets).toEqual({ taskUsd: 50 });
+    expect(warnings).toEqual([]);
   });
 
-  it("limits take the lower of user and project, the default when the user sets none", () => {
-    expect(advisors({ advisors: { maxDiffChars: 20000 } }, { maxDiffChars: 30000 }).maxDiffChars).toBe(20000);
-    expect(advisors({ advisors: { maxDiffChars: 20000 } }, { maxDiffChars: 10000 }).maxDiffChars).toBe(10000);
-    expect(advisors(undefined, { maxDiffChars: 90000 }).maxDiffChars).toBeUndefined();
-    expect(advisors(undefined, { maxOutputTokens: 500, timeoutMs: 999999, maxPlanConsults: 5 })).toEqual({ maxOutputTokens: 500 });
-    expect(advisors(undefined, { maxPlanConsults: 1 }).maxPlanConsults).toBe(1);
+  it("keeps the user's sections the project does not mention", () => {
+    const { merged } = layer({ routing: { maxEscalations: 1 }, branchPrefix: "mine" }, { checks: [{ name: "t", command: "npm", args: [] }] });
+    expect(merged.routing).toEqual({ maxEscalations: 1 });
+    expect(merged.branchPrefix).toBe("mine");
+    expect(merged.checks).toHaveLength(1);
   });
 
-  it("adHocMinLines can only go up", () => {
-    expect(advisors(undefined, { adHocMinLines: 100 }).adHocMinLines).toBeUndefined();
-    expect(advisors(undefined, { adHocMinLines: 900 }).adHocMinLines).toBe(900);
-    expect(advisors({ advisors: { adHocMinLines: 50 } }, { adHocMinLines: 20 }).adHocMinLines).toBe(50);
-  });
-});
-
-describe("session layering", () => {
-  it("model and compactionTier are user-only, with a warning", () => {
-    const { merged, warnings } = layer({ session: { model: "anthropic/a" } }, { session: { model: "openai/b", compactionTier: "premium" } });
-    expect(merged.session).toEqual({ model: "anthropic/a" });
-    expect(warnings.join("\n")).toMatch(/session\.model/);
-    expect(warnings.join("\n")).toMatch(/session\.compactionTier/);
+  it("does not tighten budgets: a project value replaces the user's, higher or lower", () => {
+    expect(layer({ budgets: { taskUsd: 100 } }, { budgets: { taskUsd: 500 } }).merged.budgets).toEqual({ taskUsd: 500 });
+    expect(layer({ budgets: { taskUsd: 100 } }, { budgets: { taskUsd: 5 } }).merged.budgets).toEqual({ taskUsd: 5 });
   });
 
-  it("a project may unpin but not pin", () => {
-    expect((layer({ session: { pin: true } }, { session: { pin: false } }).merged.session as Record<string, unknown>).pin).toBe(false);
-    expect((layer({ session: { pin: false } }, { session: { pin: true } }).merged.session as Record<string, unknown>).pin).toBe(false);
+  it("reads local, agents, pricing and workspaceDir from the user file only, with one warning", () => {
+    const { merged, warnings } = layer(
+      { local: { baseUrl: "http://127.0.0.1:8081/v1" }, pricing: [{ model: "mine" }], workspaceDir: ".mine" },
+      { local: { baseUrl: "http://evil.example/v1" }, agents: { claude: { run: ["curl"] } }, pricing: [{ model: "cheap" }], workspaceDir: "..", models: { low: "xai/grok-4.7" } },
+    );
+    expect(merged.local).toEqual({ baseUrl: "http://127.0.0.1:8081/v1" });
+    expect(merged.agents).toBeUndefined();
+    expect(merged.pricing).toEqual([{ model: "mine" }]);
+    expect(merged.workspaceDir).toBe(".mine");
+    expect(merged.models).toEqual({ low: "xai/grok-4.7" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Ignored project local, agents, pricing, workspaceDir");
   });
-});
 
-describe("budgets against the defaults", () => {
-  const budgets = (user: Record<string, unknown> | undefined, project: Record<string, unknown>) => layer(user, { budgets: project }).merged.budgets as Record<string, number>;
-  it("a project cannot raise taskUsd, dailyUsd or softWarningRatio above the default when the user sets none", () => {
-    expect(budgets(undefined, { taskUsd: 1000, dailyUsd: 5000, softWarningRatio: 0.99 })).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8 });
-    expect(budgets(undefined, { taskUsd: 5 }).taskUsd).toBe(5);
-  });
-  it("the user's value still wins as the base", () => {
-    expect(budgets({ budgets: { taskUsd: 100 } }, { taskUsd: 50 }).taskUsd).toBe(50);
-    expect(budgets({ budgets: { taskUsd: 100 } }, { taskUsd: 500 }).taskUsd).toBe(100);
+  it("is quiet when the project sets nothing user-only", () => {
+    expect(layer({ local: {} }, { checks: [] }).warnings).toEqual([]);
   });
 });
 
-describe("isolation layering", () => {
-  it("is read from the user config only: a project can neither move the worktrees nor turn them off", () => {
-    const off = layer(undefined, { isolation: { worktree: false } });
-    expect(off.merged.isolation).toBeUndefined();
-    expect(off.warnings.join("\n")).toContain("Ignored project isolation");
-    const moved = layer({ isolation: { dir: "../trees" } }, { isolation: { dir: "/tmp/x" } });
-    expect(moved.merged.isolation).toEqual({ dir: "../trees" });
-    expect(moved.warnings.join("\n")).toContain("Ignored project isolation");
-    // A project value that matches the user's is no change, so no warning.
-    expect(layer(undefined, { isolation: { worktree: true } }).warnings).toEqual([]);
+describe("loadConfig layering", () => {
+  let priorHome: string | undefined;
+  beforeEach(() => {
+    priorHome = process.env.HOME;
+    process.env.HOME = mkdtempSync(path.join(tmpdir(), "pi-home-"));
+    mkdirSync(path.join(process.env.HOME, ".pi", "agent"), { recursive: true });
   });
-});
-
-describe("tiers.local layering", () => {
-  const qwen = [{ provider: "local", model: "Qwen3.8-27B", contextWindow: 131072 }];
-  const small = [{ provider: "local", model: "qwen3.5:9b", contextWindow: 65536 }];
-
-  it("keeps the user's local model over a project's, and says so", () => {
-    const { merged, warnings } = layer({ tiers: { local: qwen } }, { tiers: { local: small, ticketLow: [{ provider: "openai", model: "gpt-6-luna" }] } });
-    const tiers = merged.tiers as Record<string, unknown>;
-    expect(tiers.local).toEqual(qwen);
-    // The project's other tiers still apply.
-    expect(tiers.ticketLow).toEqual([{ provider: "openai", model: "gpt-6-luna" }]);
-    expect(warnings.join("\n")).toContain("Ignored project tiers.local (qwen3.5:9b): the local model comes from the user config (~/.pi/agent/chef.yaml), which names Qwen3.8-27B.");
+  afterEach(() => {
+    process.env.HOME = priorHome;
   });
 
-  it("uses a project's local model when the user names none, and is quiet when they agree", () => {
-    expect((layer({}, { tiers: { local: small } }).merged.tiers as Record<string, unknown>).local).toEqual(small);
-    expect(layer({ tiers: { local: qwen } }, { tiers: { local: qwen } }).warnings).toEqual([]);
+  it("applies a project's models over the user's whole section, defaults filling the rest", () => {
+    writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "chef.yaml"), "models: { low: local/Qwen3.8-27B, high: anthropic/claude-opus-5-5 }\nlocal: { baseUrl: 'http://127.0.0.1:8081/v1', models: [{ id: Qwen3.8-27B, contextWindow: 131072 }] }\n");
+    const project = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
+    mkdirSync(path.join(project, ".pi-workflows"));
+    writeFileSync(path.join(project, ".pi-workflows", "config.yaml"), "models: { medium: openai/gpt-6.1-sol }\npricing: [{ provider: openai, model: gpt-6.1-sol, effectiveFrom: '2026-01-01', inputPerMillionUsd: 0, outputPerMillionUsd: 0 }]\n");
+    const config = loadConfig(project);
+    expect(config.models).toEqual({ low: "xai/grok-4.7", medium: "openai/gpt-6.1-sol", high: "openai/gpt-6.1-sol", review: "anthropic/claude-opus-5-5" });
+    expect(config.local?.models[0]?.id).toBe("Qwen3.8-27B");
+    expect(config.pricing).toEqual([]);
+    expect(config.warnings?.join("\n")).toContain("Ignored project pricing");
+  });
+
+  it("checks a project's agent: model against the agents the user file defines", () => {
+    writeFileSync(path.join(process.env.HOME!, ".pi", "agent", "chef.yaml"), "agents: { mine: { run: [mycli], modelFlag: --model } }\n");
+    const project = mkdtempSync(path.join(tmpdir(), "pi-proj-"));
+    mkdirSync(path.join(project, ".pi-workflows"));
+    writeFileSync(path.join(project, ".pi-workflows", "config.yaml"), "models: { high: 'agent:mine/x' }\n");
+    expect(loadConfig(project).models.high).toBe("agent:mine/x");
+    writeFileSync(path.join(project, ".pi-workflows", "config.yaml"), "models: { high: 'agent:nope' }\n");
+    expect(() => loadConfig(project)).toThrow(/unknown agent/);
   });
 });

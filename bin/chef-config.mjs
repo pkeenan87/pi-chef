@@ -14,5 +14,5 @@ if (!existsSync(entry)) {
   process.stdout.write(`${JSON.stringify({ ok: false, error: `run npm run build in ${root}` })}\n`);
 } else {
   const { main } = await import(pathToFileURL(entry).href);
-  process.exitCode = main(process.argv.slice(2));
+  process.exitCode = await main(process.argv.slice(2));
 }

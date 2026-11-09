@@ -1,26 +1,24 @@
 import path from "node:path";
-import { fromMicroUsd, tierCandidates, toMicroUsd } from "../config.js";
-import { ticketDifficulty, type AcceptedClassification, type CommandResult, type ModelReview, type PlanDocument, type ReviewStage, type RoutingDecision, type TaskState, type TierCandidate } from "../domain.js";
-import { availableAdvisors, reviewAdvisorsFor } from "../review/advisors.js";
+import { AGENT_PROVIDER, parseTicketModel, ranModelText, type TicketModel } from "../agents.js";
+import { fromMicroUsd, toMicroUsd } from "../config.js";
+import { ticketDifficulty, WorkflowError, type CommandResult, type ModelReview, type PlanDocument, type ReviewStage, type TaskState } from "../domain.js";
 import { runModelReview, unreviewedDiff } from "../review/model-review.js";
-import { advisorsHeader } from "../review/review-resolution.js";
+import { droppedNote } from "../review/scored-json.js";
 import { reviewDiff } from "../review/review.js";
-import { classifyKeywords } from "../router/classify.js";
-import { reviewMetricType } from "../router/stats.js";
 import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
 import { done, excludedPaths, guard, iso, type WorkflowContext } from "./context.js";
 import { activeTask } from "./tasks.js";
 import { formatDuration, formatUsd } from "./format.js";
-import { findingsTable, reviewItems, reviewMarkdown, reviewNotes, type ReviewItem, type ReviewTicketRow } from "./review-report.js";
+import { findingsTable, reviewItems, reviewMarkdown, type ReviewItem, type ReviewTicketRow } from "./review-report.js";
 import { costLabel, reviewLabel } from "./build.js";
-import { summarizeCutFiles } from "./cut-summary.js";
-import { adviseReview, changedFiles, changedLineCount, planMaxDifficulty } from "./review-advisors.js";
-import { announce, decide } from "./routing.js";
+import { announce, reviewModel, routeFor, type Route } from "./routing.js";
+import { carriedFindings } from "./ticket-review.js";
+import { runAgentReview, type ReviewAgent } from "./agent-review.js";
 import { splitCheckLine } from "./tickets.js";
 
-export { reviewItems, reviewMarkdown, reviewNotes, type ReviewItem };
+export { reviewItems, reviewMarkdown, type ReviewItem };
 
 /**
  * The checks a review runs: the configured ones, else every distinct check the plan's tickets carry (already
@@ -33,47 +31,41 @@ export function reviewChecks(ctx: WorkflowContext, plan?: PlanDocument): { name:
 }
 
 /**
- * The review tier in the order the model pass tries it: the routed candidate, then the other usable candidates of the
- * same tier (not excluded by policy, circuit, budget, or availability), another provider first, then by score, and
- * last the standard tier.
+ * The model that runs the /review model pass: `models.review`, or `override` (`/review --with`). A Pi model is a one-shot
+ * call on the diff; an agent reads the repository in a herdr tab (`agent-review.ts`).
  */
-export function reviewCandidates(ctx: WorkflowContext, decision: RoutingDecision): TierCandidate[] {
-  const primary = decision.candidate;
-  if (!primary) return [];
-  const key = (item: { provider: string; model: string }) => `${item.provider}/${item.model}`;
-  const usable = new Map((decision.considered ?? []).filter((item) => !item.excludedReason).map((item) => [key(item), item.score]));
-  const rest = tierCandidates(ctx.config, decision.tier)
-    .map((candidate, order) => ({ candidate, order, score: usable.get(key(candidate)) }))
-    .filter((row) => key(row.candidate) !== key(primary) && usable.has(key(row.candidate)));
-  rest.sort((a, b) => {
-    const otherA = a.candidate.provider === primary.provider ? 1 : 0;
-    const otherB = b.candidate.provider === primary.provider ? 1 : 0;
-    if (otherA !== otherB) return otherA - otherB;
-    if ((a.score === undefined) !== (b.score === undefined)) return a.score === undefined ? 1 : -1;
-    if (a.score !== undefined && b.score !== undefined && a.score !== b.score) return a.score - b.score;
-    return a.order - b.order;
-  });
-  const ordered = [primary, ...rest.map((row) => row.candidate)];
-  // A failed part stays within the review tier first; when none is left, standard-tier models take over.
-  if (decision.tier !== "standard") {
-    const standard = tierCandidates(ctx.config, "standard").filter((candidate) => !ordered.some((item) => key(item) === key(candidate)));
-    // Another provider first: a failed part is usually a provider problem.
-    ordered.push(...standard.filter((item) => item.provider !== primary.provider), ...standard.filter((item) => item.provider === primary.provider));
-  }
-  return ordered;
+function passModel(ctx: WorkflowContext, override?: TicketModel): { route: Route; candidate?: { provider: string; model: string }; agent?: ReviewAgent; problem?: string } {
+  const model = override ?? reviewModel(ctx.config);
+  const route = routeFor(ctx, "review", model);
+  if (model.kind === "agent") return { route, agent: { name: model.name, ...(model.model ? { model: model.model } : {}) } };
+  if (route.blocked) return { route, problem: route.blocked };
+  return { route, candidate: { provider: model.provider, model: model.id } };
+}
+
+/** `--with <ref>` from the arguments: the review model for this run. Throws a `USAGE`/`CONFIG_INVALID` error for anything else. */
+export function parseReviewArgs(ctx: WorkflowContext, args: string): TicketModel | undefined {
+  const words = args.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return undefined;
+  if (words[0] !== "--with" || words.length !== 2) throw new WorkflowError("USAGE", "Use /review, or /review --with <provider/id | agent:name[/model]> to review with another model for this run.");
+  return parseTicketModel(words[1]!, ctx.config);
 }
 
 /**
- * The model pass: the review-tier model reads the diff and lists advisory findings. A failed part is retried once on
- * the next review candidate. Budget-gated before every call, each call ledgered under REVIEWING with reason "model
- * review" and counted against its own candidate, and never a reason for the review to pass or fail. Returns undefined
- * when the pass is off in config.
+ * The model pass: the review model reads the diff and lists advisory findings. A failed part is retried once on the
+ * same model. Budget-gated before every call, each call ledgered under REVIEWING with reason "model review", and never
+ * a reason for the review to pass or fail. Returns undefined when the pass is off: `review.model: false`, unless `--with` names a model.
  */
-async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string, plan: PlanDocument, decision: RoutingDecision | undefined, diff: string, askQuestions = false): Promise<ModelReview | undefined> {
-  if (!ctx.config.review.model) return undefined;
-  const skip = (error: string): ModelReview => ({ provider: decision?.provider ?? "none", model: decision?.model ?? "none", findings: [], truncated: false, error });
-  if (!(ctx.reviewChat ?? ctx.chat)) return skip("no model connection (only available inside a Pi session).");
-  if (!decision?.candidate) return skip(decision?.blocked ?? "no review model is available.");
+async function modelPass(ctx: WorkflowContext, taskId: string, plan: PlanDocument, picked: ReturnType<typeof passModel>, enabled: boolean, diff: string, agentInput?: Omit<Parameters<typeof runAgentReview>[1], "taskId" | "plan" | "agent">): Promise<ModelReview | undefined> {
+  if (!enabled) return undefined;
+  const { candidate } = picked;
+  if (picked.agent) {
+    const exhausted = budgetState(ctx, taskId).status === "hard" ? "the task or daily budget is exhausted." : undefined;
+    if (exhausted) return { provider: AGENT_PROVIDER, model: picked.agent.name, findings: [], truncated: false, error: exhausted };
+    return runAgentReview(ctx, { ...agentInput!, taskId, plan, agent: picked.agent }, (line) => ctx.progress?.(`Review: ${line}`));
+  }
+  const skip = (error: string): ModelReview => ({ provider: candidate?.provider ?? "none", model: candidate?.model ?? picked.route.label, findings: [], truncated: false, error });
+  if (!ctx.chat) return skip("no model connection (only available inside a Pi session).");
+  if (!candidate) return skip(picked.problem ?? "no review model is available.");
   const exhausted = () => (budgetState(ctx, taskId).status === "hard" ? "the task or daily budget is exhausted." : undefined);
   const stop = exhausted();
   if (stop) return skip(stop);
@@ -83,15 +75,14 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
   let micro: number | null = 0;
   let review: ModelReview;
   try {
-    // Parts beyond review.maxChunks are not sent; the batch tier says in a line each what those files change.
+    // Parts beyond review.maxChunks are not sent; the report only names the files they hold.
     const skipped = unreviewedDiff(diff, ctx.config.review.maxDiffChars, ctx.config.review.maxChunks);
-    const sections = skipped.split(/(?=^diff --git )/m).flatMap((text) => {
+    const notSentFiles = skipped.split(/(?=^diff --git )/m).flatMap((text) => {
       const name = /^diff --git a\/.+? b\/(.+)$/m.exec(text.split("\n", 1)[0] ?? "")?.[1];
-      return name ? [{ name, label: name, text }] : [];
+      return name ? [name] : [];
     });
-    const lines = sections.length > 0 ? await summarizeCutFiles(ctx, taskId, sections) : new Map<string, string>();
-    review = await runModelReview((ctx.reviewChat ?? ctx.chat)!, reviewCandidates(ctx, decision), {
-      notSent: lines.size > 0 ? sections.map((item) => `- ${item.name}${lines.has(item.name) ? `: ${lines.get(item.name)}` : ""}`).join("\n") : undefined,
+    review = await runModelReview(ctx.chat!, candidate, {
+      notSent: notSentFiles.length > 0 ? notSentFiles.map((name) => `- ${name}`).join("\n") : undefined,
       plan,
       diff,
       maxDiffChars: ctx.config.review.maxDiffChars,
@@ -99,15 +90,11 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
       timeoutMs: ctx.config.review.timeoutMs,
       signal: ctx.shutdown.signal,
       onProgress: progress,
-      onStage: (text) => ctx.indicator?.stage(text),
-      askQuestions,
       stop: () => exhausted()?.replace(/\.$/, ""),
       onCall: async (call) => {
         // A failed call may or may not have been billed: its usage is unknown, never zero.
-        const entry = record(ctx, taskId, "REVIEWING", decision.tier, call.candidate.provider, call.candidate.model, call.usage, call.outcome === "success" ? "success" : "failure", call.retry, "model review");
+        const entry = record(ctx, taskId, "REVIEWING", "review", call.candidate.provider, call.candidate.model, call.usage, call.outcome === "success" ? "success" : "failure", call.retry, "model review");
         micro = micro === null || entry.actualUsd === null ? null : micro + toMicroUsd(entry.actualUsd);
-        // Only model-attributable outcomes count, and only against the candidate that made the call.
-        if (call.outcome !== "stopped") await ctx.store.bumpMetric(reviewMetricType(taskType), decision.tier, call.outcome === "success", ctx.now(), call.candidate);
       },
     });
   } catch (error) {
@@ -116,26 +103,26 @@ async function modelPass(ctx: WorkflowContext, taskId: string, taskType: string,
   }
   const costUsd = micro === null ? null : fromMicroUsd(micro);
   const elapsedMs = ctx.now().getTime() - started;
-  progress(`model pass done: ${review.findings.length} finding(s) in ${formatDuration(elapsedMs)}, ${formatUsd(costUsd)}`);
+  progress(`model pass done: ${review.findings.length} finding(s)${droppedNote(review.dropped ?? 0)} in ${formatDuration(elapsedMs)}, ${formatUsd(costUsd)}`);
   return { ...review, elapsedMs, costUsd };
 }
 
 /**
- * What the ledger entries of this review cost, by stage: the review model (its parts and the cut-file summaries) and
- * the advisors (their answers and the reviewer's resolve call). An unknown charge makes the stage unknown, never $0.
- * A stage with no entry is left out.
+ * What the ledger entries of this review cost: the model pass. An unknown charge makes the stage unknown, never $0.
+ * Undefined when the review made no billed call.
  */
-function stageCosts(ctx: WorkflowContext, taskId: string, sinceMs: number): { model?: ReviewStage; advisors?: ReviewStage } {
-  const sums: Record<"model" | "advisors", number | null | undefined> = { model: undefined, advisors: undefined };
+function modelCost(ctx: WorkflowContext, taskId: string, sinceMs: number): ReviewStage | undefined {
+  let sum: number | null | undefined;
+  let metered = false;
   for (const entry of ctx.store.readLedger()) {
-    if (entry.taskId !== taskId || new Date(entry.at).getTime() < sinceMs) continue;
-    const stage = entry.reason === "model review" || entry.reason === "batch summary" ? "model" : entry.reason === "model review resolve" || entry.reason.startsWith("advisor") ? "advisors" : undefined;
-    if (!stage) continue;
-    const before = sums[stage];
-    sums[stage] = before === null || entry.actualUsd === null ? null : (before ?? 0) + toMicroUsd(entry.actualUsd);
+    if (entry.taskId !== taskId || new Date(entry.at).getTime() < sinceMs || entry.reason !== "model review") continue;
+    // A subscription agent's "not metered" row is no dollar figure: the stage reads "not metered" unless something else billed.
+    if (entry.meter !== "not-metered") metered = true;
+    sum = sum === null || entry.actualUsd === null ? null : (sum ?? 0) + toMicroUsd(entry.actualUsd);
   }
-  const stageOf = (micro: number | null | undefined) => (micro === undefined ? undefined : { costUsd: micro === null ? null : fromMicroUsd(micro) });
-  return { model: stageOf(sums.model), advisors: stageOf(sums.advisors) };
+  if (sum === undefined) return undefined;
+  if (!metered) return { notMetered: true };
+  return { costUsd: sum === null ? null : fromMicroUsd(sum) };
 }
 
 /** The plan's tickets for the Tickets table; none without a plan. */
@@ -145,7 +132,7 @@ function ticketRows(state: TaskState | undefined): ReviewTicketRow[] {
     return {
       id: ticket.id,
       difficulty: ticketDifficulty(ticket),
-      implementer: run?.provider && run.model ? `${run.provider}/${run.model}` : "—",
+      implementer: run?.provider && run.model ? ranModelText(run.provider, run.model) : "—",
       review: reviewLabel(run),
       cost: run ? costLabel(run) : "—",
     };
@@ -173,7 +160,7 @@ async function baseRef(ctx: WorkflowContext, base: string, onBase: boolean): Pro
 const numbered = (items: ReviewItem[]) => items.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
 
 /** The message that sends findings to the model in the current session. */
-function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string, notes: string[] = []): string {
+function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string): string {
   const commands = checks.map((check) => `- \`${[check.command, ...check.args].join(" ")}\``);
   return redact(
     [
@@ -181,7 +168,6 @@ function fixMessage(items: ReviewItem[], checks: { command: string; args: string
       "",
       request ? "All findings, for reference (the numbers match the list):" : "Findings:",
       numbered(items),
-      ...(request && notes.length ? ["", "Not numbered (rejected by the reviewer or unresolved; fix one only if the request refers to it):", ...notes.map((line) => `- ${line.replace(/^> /, "")}`)] : []),
       "",
       "Rules:",
       "- Fix them in this working tree and keep the changes scoped to what is listed.",
@@ -199,18 +185,11 @@ function fixMessage(items: ReviewItem[], checks: { command: string; args: string
  * the checks, a static scan, and the advisory model pass. Nothing is committed or pushed. With a UI, the findings open
  * in a dialog that offers to send them to the model in this session. A task is optional.
  */
-export function review(ctx: WorkflowContext): Promise<CommandResult> {
-  // The progress line is always taken down, however the review ends.
-  return guard(async () => {
-    try {
-      return await runReview(ctx);
-    } finally {
-      ctx.indicator?.stop();
-    }
-  });
+export function review(ctx: WorkflowContext, args = ""): Promise<CommandResult> {
+  return guard(() => runReview(ctx, parseReviewArgs(ctx, args)));
 }
 
-async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
+async function runReview(ctx: WorkflowContext, override?: TicketModel): Promise<CommandResult> {
   const found = await activeTask(ctx);
   const state = found && found.phase !== "COMPLETE" && found.phase !== "IDLE" ? found : undefined;
   const taskId = state?.taskId ?? SESSION_TASK_ID;
@@ -224,68 +203,42 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
   if (exhausted) return exhausted;
 
   const plan = state?.plan;
-  const classification: AcceptedClassification = state?.classification ?? classifyKeywords("ad-hoc changes");
-  const decision = await decide(ctx, classification, "review", { taskId: state?.taskId });
-  await announce(ctx, state?.taskId, "review", decision);
+  const picked = passModel(ctx, override);
+  // `--with` asks for the model pass by name, so it runs even when `review.model` is off.
+  const modelOn = ctx.config.review.model || override !== undefined;
+  await announce(ctx, state?.taskId, "review", picked.route);
   const started = ctx.now().getTime();
-  ctx.indicator?.start("Review");
   const progress = (line: string) => ctx.progress?.(`Review: ${line}`);
   const checks = reviewChecks(ctx, plan);
-  progress(`started · ${branch} against ${ref} · ${ctx.config.setup.length} setup step(s), ${checks.length} check(s) · model ${decision.candidate ? `${decision.provider}/${decision.model}` : "off"}`);
+  progress(`started · ${branch} against ${ref} · ${ctx.config.setup.length} setup step(s), ${checks.length} check(s) · model ${modelOn ? (picked.candidate || picked.agent ? picked.route.label : `unavailable (${picked.problem})`) : "off"}`);
   const diff = redact(rawDiff);
-  // Which advisors this branch gets, by its plan's ticket difficulty (or its size when there is no plan).
-  const foundAdvisors = ctx.config.review.model && ctx.chat && decision.candidate ? await availableAdvisors(ctx, state?.taskId, classification.task_type) : undefined;
-  const pick = foundAdvisors
-    ? reviewAdvisorsFor({
-        maxDifficulty: planMaxDifficulty(plan),
-        changedLines: changedLineCount(changedFiles(diff)),
-        adHocMinLines: ctx.config.advisors.adHocMinLines,
-        reviewerProvider: decision.provider,
-        reviewerModel: decision.model,
-        candidates: foundAdvisors.candidates,
-        fromDifficulty: ctx.config.advisors.fromDifficulty,
-      })
-    : undefined;
-  let advisorsMs: number | undefined;
   const report = await reviewDiff({
     diff: rawDiff,
     checks,
     setup: ctx.config.setup,
     now: () => ctx.now().getTime(),
     onProgress: progress,
-    onStage: (text) => ctx.indicator?.stage(text),
     cwd: ctx.git.repoRoot,
     runner: ctx.checkRunner,
     planAcceptance: plan?.acceptance ?? [],
   });
   const reviewPlan: PlanDocument = plan ?? { version: 0, createdAt: iso(ctx), summary: `Ad-hoc changes on ${branch}.`, risks: [], acceptance: [], groups: [], overlap: [], securitySensitive: false };
-  const modelReview = await modelPass(ctx, taskId, classification.task_type, reviewPlan, decision, report.diff ?? diff, !!pick?.advisors.length);
-  if (modelReview && pick) {
-    const rule = { reason: pick.reason, planned: pick.advisors.map((item) => item.model) };
-    const reviewed = modelReview.parts?.some((part) => part.reviewedBy);
-    const advisorsStarted = ctx.now().getTime();
-    const advice = pick.advisors.length === 0 ? {} : reviewed
-      ? await adviseReview(ctx, { taskId, taskType: classification.task_type, decision, candidates: reviewCandidates(ctx, decision), review: modelReview, plan: reviewPlan, diff: report.diff ?? diff, advisors: pick.advisors, progress })
-      : { advisorsSkipped: "the model pass produced no result" };
-    const skippedNote = [(advice as { advisorsSkipped?: string }).advisorsSkipped, ...(foundAdvisors?.notes ?? [])].filter(Boolean).join("; ");
-    report.modelReview = { ...modelReview, ...advice, ...(skippedNote ? { advisorsSkipped: skippedNote } : {}), advisorRule: rule };
-    if (pick.advisors.length > 0) advisorsMs = ctx.now().getTime() - advisorsStarted;
-  } else report.modelReview = modelReview;
+  const mergeBase = picked.agent ? await ctx.git.mergeBase(ref).catch(() => ref) : ref;
+  const modelReview = await modelPass(ctx, taskId, reviewPlan, picked, modelOn, report.diff ?? diff, { hasTask: !!state, base: { ref, sha: mergeBase }, exclude: excludedPaths(ctx), stamp: stamp(ctx) });
+  report.modelReview = modelReview;
+  const carried = carriedFindings(state, modelReview?.findings);
+  if (carried.length > 0) report.carried = carried;
   report.elapsedMs = ctx.now().getTime() - started;
   report.at = iso(ctx);
   report.headSha = await ctx.git.head().catch(() => undefined);
-  const costs = stageCosts(ctx, taskId, started);
   report.stages = {
     ...report.stages,
-    ...(modelReview ? { model: { elapsedMs: modelReview.elapsedMs, ...costs.model } } : {}),
-    ...(advisorsMs !== undefined ? { advisors: { elapsedMs: advisorsMs, ...costs.advisors } } : {}),
+    ...(modelReview ? { model: { elapsedMs: modelReview.elapsedMs, ...modelCost(ctx, taskId, started) } } : {}),
   };
   const setupConfigured = ctx.config.setup.length > 0;
   const saved = state ? `.pi-workflows/tasks/${state.taskId}/reports/review.md` : `.pi-workflows/reports/review-${stamp(ctx)}.md`;
   const markdown = reviewMarkdown(report, { setupConfigured, savedAs: saved, tickets: ticketRows(state) });
   ctx.report?.(markdown);
-  // Done working: the dialog below waits for the person, so the line goes before it.
-  ctx.indicator?.stop();
   if (state) {
     ctx.store.writeText(state.taskId, "reports/review.json", JSON.stringify(report, null, 2));
     ctx.store.writeText(state.taskId, "reports/review.md", markdown);
@@ -299,8 +252,6 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
   // The chat block above holds the detail; the command result stays short.
   const text = ctx.report ? `${report.summary} (${formatDuration(report.elapsedMs)}; details above)` : markdown;
   const items = reviewItems(report);
-  const notes = reviewNotes(report);
-  const header = advisorsHeader(report.modelReview);
   const result = (message: string): CommandResult =>
     report.passed ? { ok: true, text: message, data: report } : { ok: false, code: "REVIEW_BLOCKING", text: `${message}\nFix the problems, then /review again. Nothing was committed or pushed.`, data: report };
   if (items.length === 0 && report.passed) return result(`Review passed: ${report.checks.length} check(s), no findings.`);
@@ -308,7 +259,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
 
   const choice = await ctx.review({
     title: `Review · ${items.length} finding(s)`,
-    markdown: [...(header ? [header, ""] : []), `## ${items.length} finding(s)`, "", ...findingsTable(report), ...(notes.length ? ["", "Rows numbered – are listed only; Fix all does not send them."] : [])].join("\n"),
+    markdown: [`## ${items.length} finding(s)`, "", ...findingsTable(report)].join("\n"),
     // The report above already holds this table; only the choice is shown.
     alreadyShown: !!ctx.report,
     actions: [
@@ -319,7 +270,7 @@ async function runReview(ctx: WorkflowContext): Promise<CommandResult> {
   });
   const request = choice?.value === "fix-some" ? (choice.text ?? "").trim() : undefined;
   if (ctx.startTurn && (choice?.value === "fix-all" || (choice?.value === "fix-some" && request))) {
-    ctx.startTurn(fixMessage(items, checks, request, notes));
+    ctx.startTurn(fixMessage(items, checks, request));
     // The turn is the outcome here; the verdict is in the report and in state.review.
     return done(request ? `Sent your fix request to the model (${items.length} finding(s) listed for reference).` : `Sent ${items.length} finding(s) to the model to fix.`, report);
   }

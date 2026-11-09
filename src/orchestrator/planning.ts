@@ -3,8 +3,7 @@ import type { CommandResult, TaskState } from "../domain.js";
 import { done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { assertGraph, PLAN_FILE, renderPlanReview } from "./plan.js";
 import { requestPlanChanges, SPEC_FILE } from "./interview.js";
-import { taskState } from "./state-label.js";
-import { closeTask, displayName, isFinished, nameForNewTask, requireActiveTask } from "./tasks.js";
+import { closeTask, displayName, isFinished, nameForNewTask, requireActiveTask, stateText } from "./tasks.js";
 
 export function blank(taskId: string, request: string, at: string, name?: string): TaskState {
   return {
@@ -43,7 +42,7 @@ export async function retireCurrent(ctx: WorkflowContext, task: TaskState | unde
 export function announceParked(ctx: WorkflowContext, parked: TaskState | undefined): void {
   if (!parked) return;
   const name = displayName(parked);
-  ctx.progress?.(`Parked ${name} (${taskState(parked, parked.review).line}). /plans ${name} switches back.`);
+  ctx.progress?.(`Parked ${name} (${stateText(parked)}). /plans ${name} switches back.`);
 }
 
 /** The plan document for a task as it is shown for review: `plan.md`, or rendered from the stored plan. */
@@ -83,7 +82,7 @@ export function showPlan(ctx: WorkflowContext): Promise<CommandResult> {
 /** Posts one task's plan in the chat, under a header that names the task and its state. Shared by /show-plan and /plans <name>. */
 export async function showTaskPlan(ctx: WorkflowContext, current: TaskState): Promise<CommandResult> {
   if (!current.plan) return fail("NO_PLAN", `${displayName(current)} has no plan yet. Run /plan <request>.`);
-  const header = `**Task ${displayName(current)}** · ${taskState(current, current.review).line}`;
+  const header = `**Task ${displayName(current)}** · ${stateText(current)}`;
   const markdown = `${header}\n\n${planMarkdown(ctx, current)}`;
   const version = current.plan.version;
   const approved = current.approvedVersion === version;

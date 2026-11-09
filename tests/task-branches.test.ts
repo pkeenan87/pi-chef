@@ -82,7 +82,6 @@ describe("the active task follows the git branch", () => {
     expect(fresh).not.toBe(t.a.taskId);
     // Commands after /plan, still on A's branch, keep the new task.
     expect((await activeTask(t.ctx))?.taskId).toBe(fresh);
-    expect((await t.app.status()).ok).toBe(true);
     expect(t.app.activeTaskId()).toBe(fresh);
     // Checking out A's branch again after leaving it makes A active.
     await git(t.cwd, "switch", t.main);

@@ -3,15 +3,14 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Ticket, TokenUsage } from "../src/domain.js";
 import { runBuild, type BuildDriver, type ModelRef } from "../src/orchestrator/build.js";
-import { reviewTicket } from "../src/orchestrator/ticket-review.js";
-import { record } from "../src/orchestrator/budget.js";
-import { advisorRequestLimit } from "../src/review/advisors.js";
-import { checkRunner, contextOf, fakeChat, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, withAdvisors, type FakeCall } from "./helpers.js";
+import { carriedFindings, reviewTicket } from "../src/orchestrator/ticket-review.js";
+import { checkRunner, contextOf, fakeChat, sampleTicket, tempRepo, tieredConfig, ticketWorkflow, type FakeCall } from "./helpers.js";
 
 const OPUS = "claude-opus-5-5";
-const pass = (extra: object = {}) => JSON.stringify({ verdict: "pass", summary: "Looks right.", findings: [], questions: ["Is the retry bounded?", "Is the backoff tested?"], ...extra });
-const fail = (issue = "retry loop never stops", extra: object = {}) => JSON.stringify({ verdict: "fail", summary: "Not ready.", findings: [{ severity: "high", file: "f.txt", issue }], questions: ["Is the retry bounded?"], ...extra });
-const opinion = (verdict: string, concerns: object[] = []) => JSON.stringify({ answers: [{ question: "Is the retry bounded?", answer: "Looks bounded." }], concerns, verdict });
+const pass = (extra: object = {}) => JSON.stringify({ summary: "Looks right.", findings: [], ...extra });
+/** The review model's answer with these findings; the verdict is the code's rule over their scores. */
+const scored = (findings: object[], extra: object = {}) => JSON.stringify({ summary: "Reviewed.", findings, ...extra });
+const fail = (issue = "retry loop never stops", extra: object = {}) => scored([{ likelihood: 8, severity: 8, file: "f.txt", issue }], extra);
 
 interface Send {
   ticket: string;
@@ -37,7 +36,6 @@ function fakeDriver(cwd: string, script: (send: Send) => { lastText?: string; ab
         },
       });
     },
-    async finish() {},
   };
   const write = (name: string, body = "x\n") => writeFileSync(path.join(cwd, name), body);
   return { driver, sends, write };
@@ -45,19 +43,14 @@ function fakeDriver(cwd: string, script: (send: Send) => { lastText?: string; ab
 
 type Answer = (call: FakeCall) => string | { text: string; usage?: Partial<TokenUsage> } | Promise<string | { text: string; usage?: Partial<TokenUsage> }>;
 
-/** Answers by role: the review model's first review, its resolution, or an advisor. */
-function roles(handlers: { review?: Answer; resolve?: Answer; advisor?: Answer }): Answer {
-  return (call) => {
-    if (call.system.includes("giving the final verdict")) return (handlers.resolve ?? (() => pass({ rationale: "Weighed the advisors." })))(call);
-    if (call.model === OPUS) return (handlers.review ?? (() => pass()))(call);
-    return (handlers.advisor ?? (() => opinion("agree")))(call);
-  };
+/** Answers the review model's call. */
+function roles(handlers: { review?: Answer }): Answer {
+  return (call) => (handlers.review ?? (() => pass()))(call);
 }
 
 async function setup(options: { tickets?: Ticket[]; answer?: Answer; mutate?: (config: ReturnType<typeof tieredConfig>) => void; chat?: boolean } = {}) {
   const cwd = await tempRepo();
-  const config = withAdvisors(tieredConfig());
-  config.tiers.premium = [{ provider: "anthropic", model: OPUS }];
+  const config = tieredConfig();
   options.mutate?.(config);
   const progress: string[] = [];
   const reports: string[] = [];
@@ -81,122 +74,24 @@ async function setup(options: { tickets?: Ticket[]; answer?: Answer; mutate?: (c
   return { cwd, app, taskId, load, progress, reports, passing, calls: fake.calls, ctx, logPath, log, run: (driver: BuildDriver) => runBuild(() => app, driver) };
 }
 
-const calls = (t: { calls: FakeCall[] }, model: string) => t.calls.filter((call) => call.model === model);
-
 describe("per-ticket review in /build", () => {
-  it("reviews a low ticket once with the review model, no advisors, and commits on a pass", async () => {
+  it("reviews a ticket once with the review model and commits on a pass", async () => {
     const t = await setup();
     const d = fakeDriver(t.cwd, () => d.write("f.txt", "export const x = 1;\n"));
     const result = await t.run(d.driver);
     expect(result.ok, result.text).toBe(true);
     expect(t.calls).toHaveLength(1);
     expect(t.calls[0]!.model).toBe(OPUS);
-    // The review sees the ticket and its own diff, including the new untracked file; with no advisors it asks for no questions.
+    // The review sees the ticket and its own diff, including the new untracked file.
     expect(t.calls[0]!.user).toContain("# Ticket 01: Ticket 01");
     expect(t.calls[0]!.user).toContain("Build part 01.");
     expect(t.calls[0]!.user).toContain("+export const x = 1;");
-    expect(t.calls[0]!.system).toContain('"questions" must be []');
+    expect(t.calls[0]!.system).not.toContain("questions");
     const run = t.load().ticketRuns!["01"]!;
     expect(run).toMatchObject({ status: "done", difficulty: "low" });
     expect(run.reviews).toHaveLength(1);
-    expect(run.reviews![0]).toMatchObject({ attempt: 1, round: 1, tier: "ticketLow", implementer: "xai/grok-4.7", verdict: "pass", advisors: [] });
-    expect(t.app.store.readLedger().filter((row) => row.reason.startsWith("ticket review")).map((row) => [row.reason, row.model, row.tier])).toEqual([["ticket review ticket 01", OPUS, "premium"]]);
-  });
-
-  it("consults one advisor from another provider for a medium ticket and weighs its answer", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
-    const d = fakeDriver(t.cwd, () => {
-      d.write("f.txt", "export const y = 2;\n");
-      return { lastText: "IMPLEMENTER-CHATTER finished.\n- [x] retry works\nFiles changed: f.txt" };
-    });
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.calls.map((call) => call.model)).toEqual([OPUS, "gpt-6-astra", OPUS]);
-    expect(t.calls[0]!.system).toContain("openai/gpt-6-astra");
-    // The advisor gets the ticket, the same diff and Opus's questions, and nothing of the session.
-    const advisor = t.calls[1]!;
-    expect(advisor.user).toContain("# Ticket 01: Ticket 01");
-    expect(advisor.user).toContain("Build part 01.");
-    expect(advisor.user).toContain("+export const y = 2;");
-    expect(advisor.user).toContain("# Questions\n1. Is the retry bounded?\n2. Is the backoff tested?");
-    expect(advisor.user).not.toContain("IMPLEMENTER-CHATTER");
-    expect(advisor.user).not.toContain("[BUILD CHUNK]");
-    expect(advisor.maxTokens).toBe(advisorRequestLimit(1500));
-    // The resolve call sees Opus's findings and the advisor's answer.
-    expect(t.calls[2]!.user).toContain("Looks bounded.");
-    expect(t.calls[2]!.user).toContain("openai/gpt-6-astra (verdict: agree)");
-    const review = t.load().ticketRuns!["01"]!.reviews![0]!;
-    expect(review.advisors).toMatchObject([{ provider: "openai", model: "gpt-6-astra", verdict: "agree" }]);
-    expect(review.rationale).toBe("Weighed the advisors.");
-    expect(t.app.store.readLedger().map((row) => row.reason).filter((reason) => /advisor|ticket review/.test(reason))).toEqual(["ticket review ticket 01", "advisor ticket review ticket 01", "ticket review resolve ticket 01"]);
-  });
-
-  it("consults Fable when a medium ticket has escalated to Sol", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
-    t.passing.ok = false;
-    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
-    expect((await t.run(first.driver)).ok).toBe(false);
-    expect(t.calls).toHaveLength(0);
-    // Sonnet failed its checks; the next /build escalates to Sol (OpenAI), whose advisor is Fable (Anthropic).
-    const run1 = t.load().ticketRuns!["01"]!;
-    expect(run1).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5-5", failedBy: "checks" });
-    // The checks still fail on the tree as it is (so it is not committed by hand); they pass once Sol has worked.
-    t.passing.ok = false;
-    const second = fakeDriver(t.cwd, () => {
-      second.write("g.txt");
-      t.passing.ok = true;
-    });
-    expect((await t.run(second.driver)).ok).toBe(true);
-    expect(second.sends[0]!.model).toEqual({ provider: "openai", id: "gpt-6.1-sol" });
-    expect(t.calls.map((call) => call.model)).toEqual([OPUS, "claude-fable-5-1", OPUS]);
-    expect(t.load().ticketRuns!["01"]!.reviews![0]).toMatchObject({ attempt: 2, implementer: "openai/gpt-6.1-sol" });
-  });
-
-  it("starts both advisors of a high ticket before either answers", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    let started = 0;
-    const t = await setup({
-      tickets: [sampleTicket("01", { difficulty: "high" })],
-      answer: roles({
-        advisor: async () => {
-          started += 1;
-          await gate;
-          return opinion("agree");
-        },
-      }),
-    });
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    const running = t.run(d.driver);
-    const deadline = Date.now() + 5000;
-    while (started < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(started).toBe(2);
-    expect(t.calls.filter((call) => call.model !== OPUS).map((call) => call.model).sort()).toEqual(["claude-fable-5-1", "gpt-6-astra"]);
-    release();
-    expect((await running).ok).toBe(true);
-    expect(t.load().ticketRuns!["01"]!.reviews![0]!.advisors).toHaveLength(2);
-  });
-
-  it("lets the resolve verdict win over the first review and stores its rationale", async () => {
-    const t = await setup({
-      tickets: [sampleTicket("01", { difficulty: "medium" })],
-      answer: roles({
-        review: () => pass(),
-        advisor: () => opinion("disagree", [{ severity: "high", file: "f.txt", issue: "swallows the error" }]),
-        resolve: () => fail("swallows the error", { rationale: "Astra is right: the catch hides failures." }),
-      }),
-    });
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    const result = await t.run(d.driver);
-    expect(result.ok).toBe(false);
-    // First fail: the chunk session gets the findings and the rationale, then the retry runs the checks and the review again.
-    expect(d.sends).toHaveLength(2);
-    expect(d.sends[1]!.text).toContain("swallows the error");
-    expect(d.sends[1]!.text).toContain("Astra is right: the catch hides failures.");
-    expect(d.sends[1]!.text).toContain("Fix these; do not commit. The checks and the review run again.");
-    const reviews = t.load().ticketRuns!["01"]!.reviews!;
-    expect(reviews.map((item) => item.verdict)).toEqual(["fail", "fail"]);
-    expect(reviews[0]).toMatchObject({ rationale: "Astra is right: the catch hides failures.", findings: [{ severity: "high", file: "f.txt", issue: "swallows the error" }] });
-    expect(reviews[0]!.advisors[0]).toMatchObject({ verdict: "disagree", concerns: [{ issue: "swallows the error" }] });
+    expect(run.reviews![0]).toMatchObject({ attempt: 1, round: 1, tier: "low", implementer: "xai/grok-4.7", verdict: "pass" });
+    expect(t.app.store.readLedger().filter((row) => row.reason.startsWith("ticket review")).map((row) => [row.reason, row.model, row.tier])).toEqual([["ticket review ticket 01", OPUS, "review"]]);
   });
 
   it("retries once in the same session on a failed review, then commits when the second review passes", async () => {
@@ -237,7 +132,6 @@ describe("per-ticket review in /build", () => {
     const run = t.load().ticketRuns!["01"]!;
     expect(run).toMatchObject({ status: "failed", failedBy: "review" });
     expect(run.attemptLog![0]).toMatchObject({ outcome: "failure", failedBy: "review", provider: "xai" });
-    expect(t.app.store.readMetrics().general?.ticketLow).toMatchObject({ failure: 1 });
     expect(await gitLog(t.cwd)).toBe("base");
     // The tree still passes its checks, but the review failed: no commit without a model turn. It goes one tier up.
     const next = fakeDriver(t.cwd, () => next.write("g.txt"));
@@ -266,54 +160,17 @@ describe("per-ticket review in /build", () => {
     expect(await gitLog(t.cwd)).toBe("01: Ticket 01\nbase");
   });
 
-  it("retries an unparseable review answer on the next candidate", async () => {
+  it("retries an unparseable review answer once on the same model", async () => {
     let n = 0;
     const t = await setup({ answer: () => (++n === 1 ? "looks fine to me" : pass()) });
     const d = fakeDriver(t.cwd, () => d.write("f.txt"));
     expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.calls.map((call) => call.model)).toEqual([OPUS, "grok-4-7"]);
-    expect(t.load().ticketRuns!["01"]!.reviews![0]).toMatchObject({ verdict: "pass", reviewer: "foundry/grok-4-7" });
+    expect(t.calls.map((call) => call.model)).toEqual([OPUS, OPUS]);
+    expect(t.load().ticketRuns!["01"]!.reviews![0]).toMatchObject({ verdict: "pass", reviewer: `anthropic/${OPUS}` });
   });
 
-  it("skips the advisors, and says why, when the budget is soft", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })], mutate: (config) => void (config.budgets.taskUsd = 10) });
-    record(t.ctx, t.taskId, "IMPLEMENTING", "standard", "anthropic", "claude-sonnet-5-5", { input: 3_000_000, output: 0, cacheRead: 0, cacheWrite: 0, requests: 1 }, "success", 0, "earlier work");
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.calls.map((call) => call.model)).toEqual([OPUS]);
-    const review = t.load().ticketRuns!["01"]!.reviews![0]!;
-    expect(review.advisors).toEqual([]);
-    expect(review.advisorsSkipped).toContain("nearly spent");
-  });
-
-  it("never calls an advisor the org allowlist excludes, and says why", async () => {
-    const t = await setup({
-      tickets: [sampleTicket("01", { difficulty: "high" })],
-      mutate: (config) => {
-        config.proprietaryCode = true;
-        config.orgProviderAllowlist = ["anthropic"];
-      },
-    });
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.calls.filter((call) => call.provider === "openai" || call.provider === "foundry")).toEqual([]);
-    expect(t.calls.map((call) => call.model).sort()).toEqual(["claude-fable-5-1", OPUS, OPUS].sort());
-    const review = t.load().ticketRuns!["01"]!.reviews![0]!;
-    expect(review.advisors.map((item) => item.model)).toEqual(["claude-fable-5-1"]);
-    expect(review.advisorsSkipped).toContain("openai/gpt-6-astra skipped: org_allowlist");
-  });
-
-  it("skips an advisor whose circuit is open", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })] });
-    for (let i = 0; i < 5; i += 1) await t.app.store.bumpMetric("general", "advisor", false, t.ctx.now(), { provider: "openai", model: "gpt-6-astra" });
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    expect((await t.run(d.driver)).ok).toBe(true);
-    expect(t.calls.some((call) => call.provider === "openai")).toBe(false);
-    expect(t.load().ticketRuns!["01"]!.reviews![0]!.advisorsSkipped).toContain("openai/gpt-6-astra skipped: circuit_open");
-  });
-
-  it("does not review when advisors.tickets is false or there is no model connection", async () => {
-    for (const options of [{ mutate: (config: ReturnType<typeof tieredConfig>) => void (config.advisors.tickets = false) }, { chat: false }]) {
+  it("does not review when review.tickets is false or there is no model connection", async () => {
+    for (const options of [{ mutate: (config: ReturnType<typeof tieredConfig>) => void (config.review.tickets = false) }, { chat: false }]) {
       const t = await setup(options);
       const d = fakeDriver(t.cwd, () => d.write("f.txt"));
       expect((await t.run(d.driver)).ok).toBe(true);
@@ -322,8 +179,8 @@ describe("per-ticket review in /build", () => {
     }
   });
 
-  it("clips the diff to advisors.maxDiffChars and lists what was cut, with lockfiles omitted", async () => {
-    const t = await setup({ mutate: (config) => void (config.advisors.maxDiffChars = 3000) });
+  it("clips the diff to review.maxDiffChars and lists what was cut, with lockfiles omitted", async () => {
+    const t = await setup({ mutate: (config) => void (config.review.maxDiffChars = 3000) });
     const d = fakeDriver(t.cwd, () => {
       d.write("a.txt", `${"a".repeat(2500)}\n`);
       d.write("b.txt", `${"b".repeat(2500)}\n`);
@@ -336,6 +193,53 @@ describe("per-ticket review in /build", () => {
     expect(sent).toContain("b.txt (not shown)");
     expect(sent).not.toContain("lock\": 1");
     expect(sent).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+  });
+});
+
+describe("ticket review scoring", () => {
+  const run = async (answer: string) => {
+    const t = await setup({ answer: roles({ review: () => answer }) });
+    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
+    const result = await t.run(d.driver);
+    return { t, d, result };
+  };
+
+  it("fails a ticket with a finding at risk 20 (4x5), whatever the model writes as a verdict", async () => {
+    const { t, d, result } = await run(scored([{ likelihood: 4, severity: 5, file: "f.txt", issue: "cap is off by one" }], { verdict: "pass" }));
+    expect(result.code).toBe("REVIEW_FAILED");
+    expect(d.sends[1]!.text).toContain("L4×S5 f.txt: cap is off by one");
+    expect(t.load().ticketRuns!["01"]!.reviews!.map((item) => item.verdict)).toEqual(["fail", "fail"]);
+    expect(t.progress.some((line) => line.includes("review: fail · 1 finding(s)"))).toBe(true);
+  });
+
+  it("passes a ticket whose findings score below 20 (3x5) and keeps them on the record to be carried", async () => {
+    const { t, d, result } = await run(scored([{ likelihood: 3, severity: 5, file: "f.txt", issue: "no test for the empty case" }, { likelihood: 2, severity: 2, issue: "naming nit" }, { severity: 9, issue: "no likelihood" }], { verdict: "fail" }));
+    expect(result.ok, result.text).toBe(true);
+    expect(d.sends).toHaveLength(1);
+    const review = t.load().ticketRuns!["01"]!.reviews![0]!;
+    expect(review).toMatchObject({ verdict: "pass", findings: [{ likelihood: 3, severity: 5, file: "f.txt", issue: "no test for the empty case" }] });
+    expect(review.findings).toHaveLength(1);
+    expect(t.progress.some((line) => line.includes("review: pass · 1 finding(s) (2 below the risk threshold dropped)"))).toBe(true);
+    const carried = carriedFindings(t.load());
+    expect(carried).toEqual([{ ticket: "01", likelihood: 3, severity: 5, file: "f.txt", issue: "no test for the empty case" }]);
+    // The model pass already reported it: listed once.
+    expect(carriedFindings(t.load(), [{ file: "f.txt", message: "No test for the empty case!" }])).toEqual([]);
+  });
+
+  it("does not carry a record from before scores, or a ticket whose last review failed", async () => {
+    const { t } = await run(scored([{ likelihood: 3, severity: 5, issue: "carried" }]));
+    const state = t.load();
+    state.ticketRuns!["01"]!.reviews![0]!.findings.push({ likelihood: 9, severity: "high" as never, issue: "old record" });
+    expect(carriedFindings(state).map((item) => item.issue)).toEqual(["carried"]);
+    state.ticketRuns!["01"]!.reviews![0]!.verdict = "fail";
+    expect(carriedFindings(state)).toEqual([]);
+  });
+
+  it("asks for both scores and names the failing score", async () => {
+    const { t } = await run(pass());
+    expect(t.calls[0]!.system).toContain('"likelihood": 1-10, "severity": 1-10');
+    expect(t.calls[0]!.system).toContain("below 5 combined");
+    expect(t.calls[0]!.system).not.toContain('"verdict"');
   });
 });
 
@@ -354,7 +258,7 @@ describe("routing.maxEscalations", () => {
     const result = await t.run(third.driver);
     expect(result.ok).toBe(false);
     expect(result.code).toBe("MAX_ESCALATIONS");
-    expect(result.text).toContain("routing.maxEscalations is 1");
+    expect(result.text).toContain("routing.maxEscalations (1)");
     expect(third.sends).toHaveLength(0);
     expect(t.load().ticketRuns!["01"]!.status).toBe("failed");
   });
@@ -370,16 +274,47 @@ describe("routing.maxEscalations", () => {
     expect(second.sends).toHaveLength(0);
   });
 
-  it("counts from the difficulty tier, so a high ticket still has its allowance", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })], mutate: (config) => void (config.routing.maxEscalations = 1) });
+  it("counts from the difficulty rung, so a medium ticket still has its allowance", async () => {
+    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })], mutate: (config) => void (config.routing.maxEscalations = 1) });
     t.passing.ok = false;
     const first = fakeDriver(t.cwd, () => first.write("f.txt"));
     await t.run(first.driver);
     const second = fakeDriver(t.cwd, () => second.write("g.txt"));
     await t.run(second.driver);
-    expect(second.sends[0]!.model.id).toBe(OPUS);
+    expect(second.sends[0]!.model.id).toBe("gpt-6.1-sol");
     const third = fakeDriver(t.cwd, () => undefined);
     expect((await t.run(third.driver)).code).toBe("MAX_ESCALATIONS");
+  });
+});
+
+describe("routing.maxEscalations with rungs that name the same model", () => {
+  const sameLowAndMedium = (limit: number) => (config: ReturnType<typeof tieredConfig>) => {
+    config.models.medium = config.models.low;
+    config.routing.maxEscalations = limit;
+  };
+
+  it("counts the skipped rung as climbed: low to high is two rungs, so a limit of 1 stops at low", async () => {
+    const t = await setup({ mutate: sameLowAndMedium(1) });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    await t.run(first.driver);
+    expect(first.sends[0]!.model.id).toBe("grok-4.7");
+    const second = fakeDriver(t.cwd, () => undefined);
+    const result = await t.run(second.driver);
+    expect(result.code).toBe("MAX_ESCALATIONS");
+    expect(result.text).toContain("high");
+    expect(result.text).toContain("routing.maxEscalations (1)");
+    expect(second.sends).toHaveLength(0);
+  });
+
+  it("climbs past the skipped rung when the limit allows two", async () => {
+    const t = await setup({ mutate: sameLowAndMedium(2) });
+    t.passing.ok = false;
+    const first = fakeDriver(t.cwd, () => first.write("f.txt"));
+    await t.run(first.driver);
+    const second = fakeDriver(t.cwd, () => second.write("g.txt"));
+    await t.run(second.driver);
+    expect(second.sends[0]!.model.id).toBe("gpt-6.1-sol");
   });
 });
 
@@ -404,11 +339,11 @@ describe("the per-ticket log, costs and status", () => {
       ticket: "01",
       title: "Ticket 01",
       difficulty: "medium",
-      implementers: [{ tier: "ticketMedium", provider: "anthropic", model: "claude-sonnet-5-5", outcome: "success" }],
-      review: { passes: 1, fails: 0, unavailable: 0, advisors: ["openai/gpt-6-astra"], finalVerdict: "pass", rationale: "Weighed the advisors." },
+      implementers: [{ tier: "medium", provider: "anthropic", model: "claude-sonnet-5-5", outcome: "success" }],
+      review: { passes: 1, fails: 0, unavailable: 0, finalVerdict: "pass", rationale: "Looks right." },
     });
     expect(typeof one!.elapsedMs).toBe("number");
-    expect(two).toMatchObject({ ticket: "02", difficulty: "low", review: { advisors: [], finalVerdict: "pass" } });
+    expect(two).toMatchObject({ ticket: "02", difficulty: "low", review: { finalVerdict: "pass" } });
     // A later append keeps everything before it.
     appendFileSync(t.logPath, '{"later":true}\n');
     t.app.store.appendTicketLog({ more: 1 });
@@ -423,34 +358,22 @@ describe("the per-ticket log, costs and status", () => {
     expect(line).toMatchObject({ ticket: "01", implementers: [{ outcome: "failure", failedBy: "review" }], review: { passes: 0, fails: 2, finalVerdict: "fail" } });
   });
 
-  it("splits the cost into implementer, review and advisors and ledgers each under its reason", async () => {
+  it("splits the cost into implementer and review and ledgers each under its reason", async () => {
     const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })] });
     const d = fakeDriver(t.cwd, (send) => {
       d.write("f.txt");
-      t.app.observeUsage({ provider: send.model.provider, model: send.model.id, usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } });
+      t.app.observeUsage({ provider: send.model.provider, model: send.model.id, usage: { input: 1000, output: 1000, cacheRead: 0, cacheWrite: 0, requests: 1 } }, { ticketId: "01" });
     });
     expect((await t.run(d.driver)).ok).toBe(true);
     const run = t.load().ticketRuns!["01"]!;
-    // Sol 1000 in / 1000 out at $10 / $50 per million = $0.06 for the turn. Opus: 1000/500 at $15 / $75 = $0.0525 per call, two
-    // calls (review and resolve). Astra is a $0 subscription; Fable 1000/500 at $20 / $100 = $0.07.
-    expect(run.costSplit).toEqual({ implementer: 0.06, review: 0.105, advisors: 0.07 });
-    expect(run.costUsd).toBe(0.235);
+    // Sol 1000 in / 1000 out at $10 / $50 per million = $0.06 for the turn. Opus: 1000/500 at $15 / $75 = $0.0525 for the one review call.
+    expect(run.costSplit).toEqual({ implementer: 0.06, review: 0.0525 });
+    expect(run.costUsd).toBe(0.1125);
     const reasons = t.app.store.readLedger().map((row) => row.reason).filter((reason) => /ticket 01$/.test(reason));
-    expect(reasons.sort()).toEqual(["advisor ticket review ticket 01", "advisor ticket review ticket 01", "observed assistant usage · ticket 01", "ticket review resolve ticket 01", "ticket review ticket 01"].sort());
-    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toContain("$0.2350 (impl $0.0600 · review $0.1050 · advisors $0.0700) · checks passed · review pass · Astra, Fable · committed");
-    expect(t.reports[0]).toContain("| 01 | Ticket 01 | high | openai/gpt-6.1-sol | pass · Astra, Fable |");
-    expect(t.reports[0]).toContain("$0.2350 (impl $0.0600 · review $0.1050 · advisors $0.0700)");
-  });
-
-  it("shows each ticket's difficulty, implementer and review in /status", async () => {
-    const t = await setup({ tickets: [sampleTicket("01", { difficulty: "medium" })] });
-    const d = fakeDriver(t.cwd, () => d.write("f.txt"));
-    await t.run(d.driver);
-    const before = t.reports.length;
-    const status = await t.app.status();
-    expect(status.text).toBe("Built · 1 of 1 tickets done · run /review");
-    const table = t.reports.slice(before).join("\n");
-    expect(table).toMatch(/\| 01 \| .* \| medium \| anthropic\/claude-sonnet-5-5 \| pass · Astra \| .* \| done [0-9a-f]{7} \|/);
+    expect(reasons.sort()).toEqual(["observed assistant usage · ticket 01", "ticket review ticket 01"].sort());
+    expect(t.progress.find((line) => line.startsWith("Ticket 01 ·"))).toContain("$0.1125 (impl $0.0600 · review $0.0525) · checks passed · review pass · committed");
+    expect(t.reports[0]).toContain("| 01 | Ticket 01 | high | openai/gpt-6.1-sol | pass |");
+    expect(t.reports[0]).toContain("$0.1125 (impl $0.0600 · review $0.0525)");
   });
 });
 
@@ -466,7 +389,6 @@ describe("a hand fix is reviewed before its commit", () => {
     t.passing.ok = false;
     const first = fakeDriver(t.cwd, () => first.write("f.txt"));
     expect((await t.run(first.driver)).ok).toBe(false);
-    const struck = t.app.store.readMetrics().general?.ticketLow?.failure ?? 0;
     const reviewsBefore = t.calls.filter((call) => call.model === OPUS).length;
     t.passing.ok = true;
     writeFileSync(path.join(t.cwd, "hand-fix.txt"), "fixed\n");
@@ -479,8 +401,6 @@ describe("a hand fix is reviewed before its commit", () => {
     expect(run.status).toBe("done");
     expect(run.reviews!.at(-1)).toMatchObject({ verdict: "pass", implementer: "unknown" });
     expect(run.attemptLog!.at(-1)).toMatchObject({ outcome: "success", model: "hand fix" });
-    expect(t.app.store.readMetrics().general?.ticketLow?.failure ?? 0).toBe(struck);
-    expect(t.app.store.readMetrics().general?.ticketLow?.success ?? 0).toBe(0);
   });
 
   it("a failed review leaves the ticket failed, and the next model attempt gets the findings", async () => {
@@ -489,7 +409,6 @@ describe("a hand fix is reviewed before its commit", () => {
     t.passing.ok = false;
     const first = fakeDriver(t.cwd, () => first.write("f.txt"));
     expect((await t.run(first.driver)).ok).toBe(false);
-    const struck = t.app.store.readMetrics().general?.ticketLow?.failure ?? 0;
     t.passing.ok = true;
     writeFileSync(path.join(t.cwd, "hand-fix.txt"), "fixed\n");
     const second = fakeDriver(t.cwd, () => second.write("g.txt"));
@@ -502,7 +421,6 @@ describe("a hand fix is reviewed before its commit", () => {
     const run = t.load().ticketRuns!["01"]!;
     expect(run.reviews![0]).toMatchObject({ verdict: "fail", implementer: "unknown" });
     expect(run.attemptLog!.map((item) => `${item.model}:${item.outcome}`)).toContain("hand fix:failure");
-    expect(t.app.store.readMetrics().general?.ticketLow?.failure ?? 0).toBe(struck);
   });
 });
 
@@ -520,7 +438,7 @@ describe("aborting and resuming", () => {
     for (let i = 0; i < 3; i++) {
       const d = await aborted(`abort ${i}`);
       expect(d.sends.map((item) => item.model.id)).toEqual(["claude-sonnet-5-5"]);
-      expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "ticketMedium" });
+      expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "medium" });
     }
     const resumed = fakeDriver(t.cwd, () => resumed.write("g.txt"));
     await t.run(resumed.driver);
@@ -537,7 +455,7 @@ describe("aborting and resuming", () => {
     const aborted = await t.run(first.driver);
     expect(aborted.ok).toBe(false);
     expect(first.sends).toHaveLength(2);
-    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "ticketLow" });
+    expect(t.load().ticketRuns!["01"]).toMatchObject({ status: "in-progress", tier: "low" });
     const second = fakeDriver(t.cwd, () => second.write("g.txt"));
     const result = await t.run(second.driver);
     expect(result.code).toBe("REVIEW_FAILED");
@@ -548,11 +466,11 @@ describe("aborting and resuming", () => {
 });
 
 describe("reviewTicket never throws", () => {
-  it("returns unavailable when the diff, the advisors or the ledger blow up", async () => {
+  it("returns unavailable when the diff or the ledger blow up", async () => {
     const t = await setup({ tickets: [sampleTicket("01", { difficulty: "high" })] });
     const state = t.load();
     const ticket = state.plan!.tickets![0]!;
-    const run = { status: "in-progress", attempts: 1, tier: "ticketHigh", provider: "openai", model: "gpt-6.1-sol" } as never;
+    const run = { status: "in-progress", attempts: 1, tier: "high", provider: "openai", model: "gpt-6.1-sol" } as never;
     vi.spyOn(t.ctx.git, "workingDiff").mockRejectedValueOnce(new Error("git exploded"));
     const outcome = await reviewTicket(t.ctx, state, ticket, run);
     expect(outcome).toMatchObject({ kind: "unavailable", record: { verdict: "unavailable" } });

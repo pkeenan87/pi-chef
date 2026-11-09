@@ -1,12 +1,12 @@
-import { localDifficultiesFor, localProfile } from "../config.js";
 import { isDifficulty, WorkflowError, type AcceptedClassification, type CommandResult, type Complexity, type TaskState } from "../domain.js";
 import { redact, redactUnknown } from "../redact.js";
-import { classifyKeywords, isSecuritySensitive, plannerClassification, type PlannerRating } from "../router/classify.js";
+import { defaultClassification, isSecuritySensitive, plannerClassification, type PlannerRating } from "./classification.js";
 import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
 import { announceParked, newTask, retireCurrent } from "./planning.js";
-import { INTERVIEW_RULES, LOCAL_PLAN_NOTE, type LocalPlanTarget, LOCAL_TICKET_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
+import { INTERVIEW_RULES, LOCAL_SIZE_RULES, MAX_INTERVIEW_QUESTIONS, NO_QUESTIONS_RULES, REVISION_RULES, TICKET_RULES } from "./prompts.js";
+import { CLOUD_TICKET_TOKENS, localLimits } from "./routing.js";
 import { renderTicketsMarkdown } from "./tickets.js";
 import { activeTask, displayName } from "./tasks.js";
 
@@ -129,11 +129,11 @@ function resumeMessage(request: string): string {
 }
 
 /** `/plan` entry point. Starts (or resumes) the model-run interview in the session. */
-export function startPlan(ctx: WorkflowContext, request: string, options: { noQuestions?: boolean; local?: boolean } = {}): Promise<CommandResult> {
+export function startPlan(ctx: WorkflowContext, request: string, options: { noQuestions?: boolean } = {}): Promise<CommandResult> {
   return guard(async () => {
     const current = await activeTask(ctx);
     const text = request.trim();
-    if (!text && !current?.planning) return fail("USAGE", "Usage: /plan [--no-questions] [--local | --cloud] <request>");
+    if (!text && !current?.planning) return fail("USAGE", "Usage: /plan [--no-questions] <request>");
     if (!ctx.startTurn) return fail("NO_SESSION", "Planning needs a Pi session to run the interview.");
     const safe = redact(text);
     const noQuestions = options.noQuestions ?? false;
@@ -153,32 +153,15 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     }
     // A request always starts a new task. A finished task is closed; any other is parked untouched (/plans switches back).
     const parked = await retireCurrent(ctx, current);
-    // Until plan_spec saves the planner's rating, the task has the keyword classification.
-    const classification: AcceptedClassification = classifyKeywords(safe);
-    // Local mode: --local or --cloud, else localMode.default. Fixed for the task once planning starts, with the
-    // difficulties the local model takes (localMode.difficulties, capped by its size; unset: every ticket).
-    const wanted = options.local ?? ctx.config.localMode.default;
-    const only = wanted ? localDifficultiesFor(ctx.config) : undefined;
-    // localMode.difficulties that the model's size rules out entirely (medium for a 9B model): a cloud plan.
-    const localMode = wanted && only?.length !== 0;
-    const scope = localMode ? { localMode: true, ...(only ? { localDifficulties: only } : {}) } : {};
-    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, planning: { stage: "interview", noQuestions }, ...scope });
+    // Until plan_spec saves the planner's rating, the task has the default classification.
+    const classification: AcceptedClassification = defaultClassification();
+    const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, planning: { stage: "interview", noQuestions } });
     announceParked(ctx, parked);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     showStatus(ctx);
-    const mode = !localMode ? "" : only ? ` (local mode: ${only.join("/")} tickets go to the local model, the rest to the cloud)` : " (local mode: every ticket goes to the local model)";
-    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}${mode}:\n\n${safe}`);
-    const profile = localMode ? localProfile(ctx.config) : undefined;
-    // Say which model and size the tickets are written for, so a wrong tiers.local is caught before planning.
-    const where = !profile
-      ? wanted
-        ? ` Local mode is off for this plan: the ${localProfile(ctx.config).label} in tiers.local takes no ${ctx.config.localMode.difficulties!.join("/")} tickets.`
-        : ""
-      : only
-        ? ` Local mode: ${only.join("/")} tickets will be written for a ${profile.label} (${profile.model}) and built there; the rest go to the cloud ticket tiers.`
-        : ` Local mode: tickets will be written for a ${profile.label} (${profile.model}) and built only there.`;
+    ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}:\n\n${safe}`);
     return done(
-      `${noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`}${where}`,
+      `${noQuestions ? `Planning ${displayName(state)} without an interview. The model will write the spec and tickets.` : `Interview started for ${displayName(state)}. ${planningStatusText(ctx)}`}`,
       { taskId: state.taskId },
     );
   });
@@ -188,7 +171,7 @@ function planningOrThrow(ctx: WorkflowContext, stage: "interview" | "tickets"): 
   const found = activePlanning(ctx);
   if (!found) throw new WorkflowError("NO_INTERVIEW", "No /plan is running. Start one with /plan <request>.");
   if (found.task.planning!.stage !== stage) {
-    throw new WorkflowError("WRONG_STAGE", stage === "interview" ? "The interview is over: the spec is saved. Call plan_consult, then plan_tickets." : "Write the spec first with plan_spec, then call plan_tickets.");
+    throw new WorkflowError("WRONG_STAGE", stage === "interview" ? "The interview is over: the spec is saved. Call plan_tickets." : "Write the spec first with plan_spec, then call plan_tickets.");
   }
   return found;
 }
@@ -335,7 +318,7 @@ function texts(value: unknown, field: string, errors: string[]): string[] {
 }
 
 /** Saves `spec.md` and moves planning on to the ticket stage. */
-export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promise<{ file: string; classification: AcceptedClassification; keywordRaised: boolean }> {
+export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promise<{ file: string; classification: AcceptedClassification }> {
   // Also allowed at the ticket stage, so a change the person asks for during ticket review can reach the spec.
   const found = activePlanning(ctx);
   const { task } = found?.task.planning?.stage === "tickets" ? found : planningOrThrow(ctx, "interview");
@@ -380,21 +363,16 @@ export async function savePlanSpec(ctx: WorkflowContext, input: unknown): Promis
   const rating = plannerRating(raw, task.classification, errors);
   if (errors.length) throw new WorkflowError("SPEC_INVALID", errors.join("\n"));
   const file = ctx.store.writeText(task.taskId, SPEC_FILE, redact(renderSpec(spec)));
-  // The planner's rating replaces the keyword classification. A rating left out keeps the one the task has.
-  const classification = rating ? plannerClassification(rating, redact(`${task.request}\n${specScanText(spec)}`)) : task.classification ?? classifyKeywords(task.request);
+  // The planner's rating replaces the default classification. A rating left out keeps the one the task has.
+  const classification = rating ? plannerClassification(rating) : task.classification ?? defaultClassification();
   await ctx.store.update(task.taskId, "spec saved", (current) => ({
     ...current,
     classification,
-    planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}), ...(current.planning?.stage === "tickets" && current.planning.consult ? { consult: current.planning.consult } : {}) },
+    planning: { stage: "tickets", noQuestions: current.planning?.noQuestions ?? false, ...(current.planning?.revision ? { revision: current.planning.revision } : {}) },
     updatedAt: iso(ctx),
   }));
   showStatus(ctx);
-  return { file, classification, keywordRaised: !!rating && !rating.securitySensitive && classification.reason_codes.includes("security_keyword_override") };
-}
-
-/** The parts of a spec the keyword scan reads: what it does and touches, not the long background or the decisions log. */
-export function specScanText(spec: PlanSpec): string {
-  return [spec.summary, spec.approach, ...spec.changes.map((item) => `${item.path} ${item.change}`), ...spec.risks].join("\n");
+  return { file, classification };
 }
 
 /**
@@ -427,13 +405,7 @@ function plannerRating(raw: Record<string, unknown>, current: AcceptedClassifica
 export function planningPrompt(ctx: WorkflowContext): string | undefined {
   const found = activePlanning(ctx);
   if (!found) return undefined;
-  const text = stagePrompt(ctx, found);
-  return found.task.localMode ? `${text}\n\n${LOCAL_PLAN_NOTE(localTarget(ctx, found.task))}` : text;
-}
-
-/** The local model the planner writes for, and the difficulties it takes in a hybrid plan. */
-function localTarget(ctx: WorkflowContext, task: TaskState): LocalPlanTarget {
-  return { ...localProfile(ctx.config), ...(task.localDifficulties ? { only: task.localDifficulties } : {}) };
+  return stagePrompt(ctx, found);
 }
 
 function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof activePlanning>>): string {
@@ -442,13 +414,9 @@ function stagePrompt(ctx: WorkflowContext, found: NonNullable<ReturnType<typeof 
   const feedback = revision ? ["", "The user sent the drafted plan back with these requested changes:", revision] : [];
   if (task.planning!.stage === "tickets") {
     const spec = ctx.store.readText(task.taskId, SPEC_FILE) ?? "";
-    // A hybrid plan keeps the cloud rules (difficulty picks the model) and adds the local rules for its local tickets.
-    const target = task.localMode ? localTarget(ctx, task) : undefined;
-    const rules = !target
-      ? [TICKET_RULES(ctx.config.workers.ticketContextTokens)]
-      : target.only
-        ? [TICKET_RULES(ctx.config.workers.ticketContextTokens), "", LOCAL_TICKET_RULES(target)]
-        : [TICKET_RULES(target.targetTokens, true), "", LOCAL_TICKET_RULES(target)];
+    // A difficulty whose model is a local one has a small context window: its tickets must fit.
+    const limits = localLimits(ctx.config);
+    const rules = [TICKET_RULES(CLOUD_TICKET_TOKENS), ...(limits.length ? ["", LOCAL_SIZE_RULES(limits)] : [])];
     return [...rules, ...feedback, "", "Saved spec:", spec.slice(0, 12000)].join("\n");
   }
   if (revision) {

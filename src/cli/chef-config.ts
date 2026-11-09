@@ -1,448 +1,565 @@
 /**
- * chef-config: the bridge between pi-chef's config files and a UI that shows or edits them (the herdr panel).
- * Every command prints one JSON document on stdout. Config problems are data (`errors`), not exit codes:
- * the exit status is nonzero only for a usage error. Nothing here spawns a process or prints a secret.
+ * chef-config: the bridge between pi-chef and the herdr side panel. Every command prints one JSON document on stdout.
+ * A refused request is data (`{ ok: false, error }`, exit 0); the exit status is nonzero only for a usage error.
+ * The panel shows four things (models, the local server, plans, costs), so this is a small purpose-built CLI, not a
+ * generic config editor. Edits go to the user file (`~/.pi/agent/chef.yaml`) through the `yaml` Document API so its
+ * comments survive, are validated by the real loader before anything is written, and never carry a secret.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
-import { ConfigFileError, checkConfigText, configPaths, displayPath, loadConfig, parseModelRef, type WorkflowConfig } from "../config.js";
-import { CONFIG_SCHEMA, schemaFor, type SchemaKey, type SchemaRule } from "../config-schema.js";
-import { redact, redactUnknown } from "../redact.js";
-import { atomicWrite } from "../storage/store.js";
-import { docDelete, docSet, hasLive, inTemplate, insertKey, recomment, removeKey, replaceLive, uncommentSet } from "./config-edit.js";
+import { promisify } from "node:util";
+import { isMap, isScalar, parse, parseDocument, type Document } from "yaml";
+import { agentTable, parseTicketModel, ticketModelProblem } from "../agents.js";
+import { MODEL_KEYS, configPaths, displayPath, loadConfig, parseConfig, type LocalModelConfig, type WorkflowConfig } from "../config.js";
+import { budgetStatusFor, makeDayKey, recordsForDay, summarize, unpricedModels, type SpendBucket } from "../cost/ledger.js";
+import type { CostRecord, TaskState } from "../domain.js";
+import type { WorkflowContext } from "../orchestrator/context.js";
+import { closeTask, displayName, isClosed, listTasks, stateText, unfinishedTasks } from "../orchestrator/tasks.js";
+import { contextMismatch, probeLocalContext, serverOrigin } from "../providers/local-context.js";
+import { containsSecret, redact } from "../redact.js";
+import { TaskStore, atomicWrite } from "../storage/store.js";
 
-export interface ConfigFileView {
-  path: string;
-  /** `~/…` form, for display. */
-  display: string;
-  exists: boolean;
-  /** SHA-256 of the file's text (of the empty text when the file is missing): pass it to `set --expect`. */
-  sha256: string;
-  /** The file's text, redacted. Absent when the file does not exist or cannot be read. */
-  text?: string;
-  /** The parsed YAML (redacted); absent when the file is missing or its YAML cannot be read. */
-  parsed?: Record<string, unknown>;
-  /** Why the file could not be read or parsed. */
-  readError?: string;
-}
+const execFileAsync = promisify(execFile);
 
-export type KeySource = "default" | "user" | "project" | "merged";
+/** Servers the panel offers as presets for `local.baseUrl`. */
+export const LOCAL_PRESETS = [
+  { name: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1" },
+  { name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1" },
+  { name: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1" },
+] as const;
 
-export interface KeyView {
-  /** The concrete dotted path (`providers.foundry.api`). */
-  key: string;
-  /** The schema entry it comes from (`providers.*.type` for `providers.foundry.type`). */
-  schemaKey: string;
-  section: string;
-  rule: SchemaRule;
-  user?: unknown;
-  project?: unknown;
-  default?: unknown;
-  effective?: unknown;
-  source: KeySource;
-}
+const SET_KEYS = ["models.low", "models.medium", "models.high", "models.review", "local.baseUrl", "budgets.taskUsd", "budgets.dailyUsd"] as const;
+const PHASE_LABELS: Record<string, string> = { PLANNING: "plan", AWAITING_PLAN_APPROVAL: "plan", IMPLEMENTING: "build", REVIEWING: "review" };
+const RECENT_CLOSED = 8;
 
-export interface ConfigProblem {
-  /** The rejected file (absolute path), when the problem names one. */
-  file?: string;
-  /** `~/…` form of `file`, for display. */
-  display?: string;
-  message: string;
-}
+type Json = Record<string, unknown>;
 
-export interface InspectResult {
-  /** False only for a refused `set` or `unset`, with `error` saying why; nothing was written then. */
-  ok: boolean;
-  error?: string;
-  /** What a successful `set` or `unset` did. */
-  edit?: { file: "user" | "project"; path: string; key: string; action: "set" | "unset"; changed: boolean; reflowed?: true };
-  cwd: string;
-  user: ConfigFileView;
-  project: ConfigFileView;
-  /** The legacy `cost-workflow.yaml`; `user` is this file when it is the only user config. */
-  legacy: ConfigFileView;
-  /**
-   * Where `effective` came from: `loaded` (both files applied), `user` (the project file was rejected, so only the
-   * user file is shown), or `defaults` (the user file was rejected as well).
-   */
-  effectiveFrom: "loaded" | "user" | "defaults";
-  keys: KeyView[];
-  warnings: string[];
-  errors: ConfigProblem[];
-  schema: readonly SchemaKey[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Json {
   return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function getPath(root: unknown, dotted: string): unknown {
-  return dotted.split(".").reduce<unknown>((o, p) => (isRecord(o) ? o[p] : undefined), root);
 }
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function viewOf(file: string): ConfigFileView {
-  const view: ConfigFileView = { path: file, display: displayPath(file), exists: existsSync(file), sha256: sha256("") };
-  if (!view.exists) return view;
-  let text: string;
+function messageOf(error: unknown): string {
+  return redact(error instanceof Error && error.message ? error.message : String(error));
+}
+
+function refuse(error: string, extra: Json = {}): Json {
+  return { ok: false, error: redact(error), ...extra };
+}
+
+function round(usd: number): number {
+  return Math.round(usd * 1e6) / 1e6;
+}
+
+/** The YAML mapping of a config file, or undefined when it is missing, unreadable or not a mapping. */
+function readRaw(file: string): Json | undefined {
   try {
-    text = readFileSync(file, "utf8");
-  } catch (error) {
-    view.readError = redact(error instanceof Error ? error.message : String(error));
-    return view;
-  }
-  view.sha256 = sha256(text);
-  view.text = redact(text);
-  try {
-    const parsed = parse(text);
-    if (parsed === null || parsed === undefined) view.parsed = {};
-    else if (isRecord(parsed)) view.parsed = redactUnknown(parsed) as Record<string, unknown>;
-    else view.readError = "the file is not a YAML mapping";
-  } catch (error) {
-    view.readError = redact((error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "unreadable");
-  }
-  return view;
-}
-
-function same(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-/** Provider credential and location fields: a project may set them when the user defines no block for the provider. */
-const PROVIDER_LOCATION_FIELDS = new Set(["baseUrl", "endpoint", "endpointEnv", "apiKeyEnv", "audience", "projectDir", "envFile", "resourceGroup"]);
-
-function projectMaySet(key: string, rule: SchemaRule, userRoot: unknown): boolean {
-  if (rule !== "user-only" && rule !== "fixed") return true;
-  // The loader's exception: with no user block for that provider, the project's built-in default value is accepted.
-  const m = /^providers\.([^.]+)\.([^.]+)$/.exec(key);
-  return !!m && PROVIDER_LOCATION_FIELDS.has(m[2]!) && getPath(userRoot, `providers.${m[1]}`) === undefined;
-}
-
-function sourceOf(user: unknown, project: unknown, effective: unknown, dflt: unknown, projectCounts: boolean): KeySource {
-  if (!projectCounts) {
-    if (user !== undefined && same(user, effective)) return "user";
-    return "default";
-  }
-  if (project !== undefined && same(project, effective) && !same(project, user)) return "project";
-  if (user !== undefined && same(user, effective)) return "user";
-  if (project !== undefined && same(project, effective)) return "project";
-  if (user !== undefined || project !== undefined) return same(effective, dflt) ? "default" : "merged";
-  return "default";
-}
-
-/** The concrete keys a schema entry stands for. `*` expands to the names present in a file or the loaded config. */
-function expand(entry: SchemaKey, roots: unknown[]): string[] {
-  if (entry.key.includes("[]")) return [];
-  const star = entry.key.indexOf("*");
-  if (star < 0) return [entry.key];
-  const parent = entry.key.slice(0, star).replace(/\.$/, "");
-  const names = new Set<string>();
-  for (const root of roots) {
-    const at = parent === "" ? root : getPath(root, parent);
-    if (isRecord(at)) for (const name of Object.keys(at)) names.add(name);
-  }
-  return [...names].map((name) => entry.key.replace("*", name));
-}
-
-function problemOf(error: unknown): ConfigProblem {
-  const message = redact(error instanceof Error && error.message ? error.message : String(error));
-  return error instanceof ConfigFileError ? { file: error.file, display: displayPath(error.file), message } : { message };
-}
-
-/** The user file the loader reads: chef.yaml, else the legacy cost-workflow.yaml when only that exists. */
-function userFileView(paths: ReturnType<typeof configPaths>): ConfigFileView {
-  const chef = viewOf(paths.userPath);
-  const legacy = viewOf(paths.legacyUserPath);
-  return !chef.exists && legacy.exists ? legacy : chef;
-}
-
-/** Everything a UI needs to show the two config files and the layering of every key. */
-export function inspect(cwd: string): InspectResult {
-  const paths = configPaths(cwd);
-  const legacy = viewOf(paths.legacyUserPath);
-  // loadConfig reads the legacy file only when chef.yaml does not exist.
-  const user = userFileView(paths);
-  const project = viewOf(paths.projectPath);
-
-  const errors: ConfigProblem[] = [];
-  let config: WorkflowConfig | undefined;
-  let effectiveFrom: InspectResult["effectiveFrom"] = "loaded";
-  let warnings: string[] = [];
-  try {
-    config = loadConfig(cwd);
-    warnings = config.warnings ?? [];
-  } catch (error) {
-    errors.push(problemOf(error));
-    // Show what the user file alone gives, then the defaults, so the panel still has values to display.
-    // An empty directory of our own, so no planted .pi-workflows/config.yaml can be read.
-    const nowhere = mkdtempSync(path.join(tmpdir(), "chef-config-"));
-    try {
-      config = loadConfig(nowhere);
-      warnings = config.warnings ?? [];
-      effectiveFrom = "user";
-    } catch (second) {
-      if (!errors.some((e) => e.message === problemOf(second).message)) errors.push(problemOf(second));
-      config = undefined;
-      effectiveFrom = "defaults";
-    } finally {
-      rmSync(nowhere, { recursive: true, force: true });
-    }
-  }
-  const userRoot = user.parsed;
-  const projectRoot = project.parsed;
-  const keys: KeyView[] = [];
-  for (const entry of CONFIG_SCHEMA) {
-    for (const key of expand(entry, [userRoot, projectRoot, config])) {
-      const u = getPath(userRoot, key);
-      const p = getPath(projectRoot, key);
-      const dflt = entry.default;
-      const eff = (config ? getPath(config, key) : undefined) ?? dflt;
-      const view: KeyView = { key, schemaKey: entry.key, section: entry.section, rule: entry.rule, source: sourceOf(u, p, eff, dflt, projectMaySet(key, entry.rule, userRoot)) };
-      if (u !== undefined) view.user = u;
-      if (p !== undefined) view.project = p;
-      if (dflt !== undefined) view.default = dflt;
-      if (eff !== undefined) view.effective = eff;
-      keys.push(view);
-    }
-  }
-
-  return {
-    ok: true,
-    cwd,
-    user,
-    project,
-    legacy,
-    effectiveFrom,
-    keys,
-    warnings: warnings.map((w) => redact(w)),
-    errors,
-    schema: CONFIG_SCHEMA,
-  };
-}
-
-function boundsProblem(entry: SchemaKey, n: number): string | undefined {
-  if (entry.min !== undefined && (entry.exclusiveMin ? n <= entry.min : n < entry.min)) return `must be ${entry.exclusiveMin ? "greater than" : "at least"} ${entry.min}`;
-  if (entry.max !== undefined && n > entry.max) return `must be at most ${entry.max}`;
-  return undefined;
-}
-
-/** Why `value` does not fit the schema entry (type, enum, bounds), or undefined when it does. */
-export function valueProblem(entry: SchemaKey, value: unknown): string | undefined {
-  switch (entry.type) {
-    case "bool":
-      return typeof value === "boolean" ? undefined : "must be true or false";
-    case "int":
-    case "ms":
-    case "number":
-    case "usd": {
-      if (typeof value !== "number" || !Number.isFinite(value)) return "must be a number";
-      if ((entry.type === "int" || entry.type === "ms") && !Number.isInteger(value)) return "must be a whole number";
-      return boundsProblem(entry, value);
-    }
-    case "enum":
-      return typeof value === "string" && (entry.enum ?? []).includes(value) ? undefined : `must be one of: ${(entry.enum ?? []).join(", ")}`;
-    case "string":
-    case "path":
-      return typeof value === "string" && value !== "" ? undefined : "must be a non-empty string (quote it if it looks like a number or a boolean)";
-    case "modelRef":
-      return typeof value === "string" && parseModelRef(value) ? undefined : "must be provider/model";
-    case "list": {
-      if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) return "must be a list of strings";
-      const bad = entry.enum ? (value as string[]).filter((v) => !entry.enum!.includes(v)) : [];
-      return bad.length > 0 ? `has values outside: ${entry.enum!.join(", ")}` : undefined;
-    }
-    default:
-      return "is a structured setting; edit the file directly";
-  }
-}
-
-/** The sample user config that ships beside this package, if it can be read. */
-function sampleTemplate(): string | undefined {
-  try {
-    return readFileSync(fileURLToPath(new URL("../../templates/chef.yaml", import.meta.url)), "utf8");
+    const parsed = parse(readFileSync(file, "utf8"));
+    return isRecord(parsed) ? parsed : undefined;
   } catch {
     return undefined;
   }
 }
 
-/** What the file's parsed content must be after the edit: the value set at `parts`, or the key gone (and emptied parents). */
-function expectedAfter(base: Record<string, unknown>, parts: string[], value: unknown): Record<string, unknown> {
-  const root = structuredClone(base);
-  if (value !== undefined) {
-    let at: Record<string, unknown> = root;
-    for (const part of parts.slice(0, -1)) {
-      if (!isRecord(at[part])) at[part] = {};
-      at = at[part] as Record<string, unknown>;
-    }
-    at[parts[parts.length - 1]!] = value;
-    return root;
-  }
-  const chain: Record<string, unknown>[] = [root];
-  for (const part of parts.slice(0, -1)) {
-    const next = chain[chain.length - 1]![part];
-    if (!isRecord(next)) return root;
-    chain.push(next);
-  }
-  delete chain[chain.length - 1]![parts[parts.length - 1]!];
-  for (let i = chain.length - 1; i >= 1; i--) if (Object.keys(chain[i]!).length === 0) delete chain[i - 1]![parts[i - 1]!];
-  return root;
+interface Effective {
+  config: WorkflowConfig;
+  errors: string[];
+  /** Raw mappings of the two files (undefined when missing or unreadable). */
+  user?: Json;
+  project?: Json;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
-  if (isRecord(a) && isRecord(b)) {
-    const ka = Object.keys(a);
-    return ka.length === Object.keys(b).length && ka.every((k) => k in b && deepEqual(a[k], b[k]));
-  }
-  return false;
-}
-
-/** True when the candidate text parses to exactly `expected` (so it changed that key and nothing else). */
-function resolves(text: string, expected: Record<string, unknown>): boolean {
+/** The config as the loader gives it. A rejected file does not stop the panel: the defaults (plus what the user file says) are shown with the error. */
+function effective(cwd: string): Effective {
+  const { userPath, projectPath } = configPaths(cwd);
+  const user = existsSync(userPath) ? readRaw(userPath) : undefined;
+  const project = existsSync(projectPath) ? readRaw(projectPath) : undefined;
   try {
-    return deepEqual(parse(text) ?? {}, expected);
-  } catch {
-    return false;
+    return { config: loadConfig(cwd), errors: [], user, project };
+  } catch (error) {
+    const config = parseConfig("");
+    config.models = { ...config.models };
+    config.budgets = { ...config.budgets };
+    // What the user file says, as far as it goes, so the person sees (and can fix) the value that was refused.
+    if (isRecord(user?.models)) for (const key of MODEL_KEYS) if (typeof user.models[key] === "string") config.models[key] = user.models[key];
+    if (isRecord(user?.budgets)) for (const key of ["taskUsd", "dailyUsd"] as const) if (typeof user.budgets[key] === "number") config.budgets[key] = user.budgets[key];
+    if (isRecord(user?.agents)) config.agents = user.agents as WorkflowConfig["agents"];
+    if (isRecord(user?.local) && typeof user.local.baseUrl === "string") {
+      const models = Array.isArray(user.local.models) ? (user.local.models as unknown[]).filter((m): m is LocalModelConfig => isRecord(m) && typeof m.id === "string" && typeof m.contextWindow === "number") : [];
+      config.local = { baseUrl: user.local.baseUrl, models };
+    }
+    return { config, errors: [messageOf(error)], user, project };
   }
 }
 
-/** The file's indentation step (its smallest indent on a live line), or undefined for a flat file. */
-function indentOf(text: string): number | undefined {
+function fileView(file: string): Json {
+  const view: Json = { path: file, display: displayPath(file), exists: existsSync(file), sha256: sha256("") };
+  if (view.exists) {
+    try {
+      view.sha256 = sha256(readFileSync(file, "utf8"));
+    } catch (error) {
+      view.readError = messageOf(error);
+    }
+  }
+  return view;
+}
+
+/** A minimal context for the orchestrator helpers that only read the store, the clock and the config. */
+function contextFor(cwd: string, config: WorkflowConfig): WorkflowContext {
+  return { cwd, config, store: new TaskStore(path.join(cwd, config.workspaceDir)), now: () => new Date() } as unknown as WorkflowContext;
+}
+
+// ---------------------------------------------------------------- models
+
+function modelRow(key: (typeof MODEL_KEYS)[number], eff: Effective): Json {
+  const { config } = eff;
+  const value = config.models[key];
+  const userModels = isRecord(eff.user?.models) ? eff.user.models : undefined;
+  const projectModels = isRecord(eff.project?.models) ? eff.project.models : undefined;
+  const source = projectModels ? (key in projectModels ? "project" : "default") : userModels && key in userModels ? "user" : "default";
+  const row: Json = { value, source, kind: "pi" };
+  let problem = ticketModelProblem(value, config);
+  try {
+    const parsed = parseTicketModel(value, config);
+    if (parsed.kind === "agent") {
+      row.kind = "agent";
+      row.agent = parsed.name;
+      if (parsed.model) row.agentModel = parsed.model;
+    } else if (parsed.provider === "local") {
+      row.kind = "local";
+      row.id = parsed.id;
+      if (!problem && !(config.local?.models ?? []).some((m) => m.id === parsed.id)) {
+        problem = config.local ? `The local server config does not list ${parsed.id}. Add it under Local model.` : "No local server is configured. Set one up under Local model.";
+      }
+    } else {
+      row.provider = parsed.provider;
+      row.id = parsed.id;
+    }
+  } catch {
+    if (value.startsWith("agent:")) row.kind = "agent";
+  }
+  if (problem) row.problem = problem;
+  return row;
+}
+
+// ---------------------------------------------------------------- plans
+
+interface PlanView {
+  id: string;
+  name: string;
+  state: string;
+  phase: string;
+  closed: boolean;
+  active: boolean;
+  ticketsDone: number;
+  ticketsTotal: number;
+  ticketsFailed: number;
+  branch?: string;
+  updatedAt: string;
+  /** Known spend plus the estimate for calls of unknown cost. */
+  spendUsd: number;
+  knownUsd: number;
+  unknown: number;
+}
+
+function planView(task: TaskState, active: string | undefined, spend: SpendBucket | undefined): PlanView {
+  const runs = Object.values(task.ticketRuns ?? {});
+  const total = (task.plan?.tickets ?? []).length || runs.length;
+  const known = spend?.knownUsd ?? 0;
+  return {
+    id: task.taskId,
+    name: displayName(task),
+    state: stateText(task),
+    phase: task.phase,
+    closed: isClosed(task),
+    active: task.taskId === active,
+    ticketsDone: runs.filter((run) => run.status === "done").length,
+    ticketsTotal: total,
+    ticketsFailed: runs.filter((run) => run.status === "failed").length,
+    ...(task.build?.branch ? { branch: task.build.branch } : {}),
+    updatedAt: task.updatedAt,
+    spendUsd: round(known + (spend?.estimatedUnknownUsd ?? 0)),
+    knownUsd: known,
+    unknown: spend?.unknown ?? 0,
+  };
+}
+
+// ---------------------------------------------------------------- costs
+
+function bucketRow(name: string, bucket: SpendBucket): Json {
+  return { name, knownUsd: bucket.knownUsd, unknown: bucket.unknown, estimatedUnknownUsd: bucket.estimatedUnknownUsd ?? 0, spendUsd: round(bucket.knownUsd + (bucket.estimatedUnknownUsd ?? 0)) };
+}
+
+function breakdown(records: CostRecord[], config: WorkflowConfig): { byModel: Json[]; byPhase: Json[] } {
+  const options = { pricing: config.pricing, unknownCallUsd: config.budgets.unknownCallUsd };
+  const groups = new Map<string, CostRecord[]>();
+  for (const record of records) {
+    const key = `${record.provider}/${record.model}`;
+    groups.set(key, [...(groups.get(key) ?? []), record]);
+  }
+  const byModel = [...groups].map(([name, rows]) => {
+    const total = summarize(rows, options);
+    return bucketRow(name, { knownUsd: total.knownUsd, unknown: total.unknownRecords, estimatedUnknownUsd: total.estimatedUnknownUsd });
+  });
+  const phases: Record<string, SpendBucket> = {};
+  for (const [phase, bucket] of Object.entries(summarize(records, options).byPhase)) {
+    const label = PHASE_LABELS[phase] ?? "other";
+    const into = phases[label] ?? { knownUsd: 0, unknown: 0, estimatedUnknownUsd: 0 };
+    phases[label] = { knownUsd: round(into.knownUsd + bucket.knownUsd), unknown: into.unknown + bucket.unknown, estimatedUnknownUsd: round((into.estimatedUnknownUsd ?? 0) + (bucket.estimatedUnknownUsd ?? 0)) };
+  }
+  const byPhase = ["plan", "build", "review", "other"].filter((label) => label in phases).map((label) => bucketRow(label, phases[label]!));
+  return { byModel: byModel.sort((a, b) => (b.spendUsd as number) - (a.spendUsd as number)), byPhase };
+}
+
+function scopeView(records: CostRecord[], limitUsd: number, config: WorkflowConfig): Json {
+  const summary = summarize(records, { pricing: config.pricing, unknownCallUsd: config.budgets.unknownCallUsd });
+  return {
+    knownUsd: summary.knownUsd,
+    estimatedUnknownUsd: summary.estimatedUnknownUsd,
+    spendUsd: round(summary.knownUsd + summary.estimatedUnknownUsd),
+    // Calls whose cost is unknown: a model with no pricing row, or an agent that is not metered.
+    unknown: summary.unknownRecords,
+    limitUsd,
+    status: budgetStatusFor(summary, limitUsd, config.budgets.softWarningRatio),
+    ...breakdown(records, config),
+  };
+}
+
+// ---------------------------------------------------------------- show
+
+/** Everything the panel draws. */
+export function show(cwd: string): Json {
+  const eff = effective(cwd);
+  const { config } = eff;
+  const paths = configPaths(cwd);
+  const ctx = contextFor(cwd, config);
+  // The stored pointer, not `activeTask`: that one reads git and may write the pointer, and a read must not.
+  const stored = ctx.store.readActive();
+  const tasks = listTasks(ctx);
+  const records = ctx.store.readLedger();
+  const spendByTask = summarize(records, { pricing: config.pricing, unknownCallUsd: config.budgets.unknownCallUsd }).byTask;
+  const plans = [...tasks.filter((task) => !isClosed(task)), ...tasks.filter(isClosed).slice(0, RECENT_CLOSED)].map((task) => planView(task, stored, spendByTask[task.taskId]));
+  const active = plans.find((plan) => plan.active && !plan.closed);
+  const agents = agentTable(config);
+
+  return {
+    ok: true,
+    cwd,
+    models: Object.fromEntries(MODEL_KEYS.map((key) => [key, modelRow(key, eff)])),
+    modelsShadowedByProject: isRecord(eff.project?.models),
+    local: {
+      configured: !!config.local,
+      baseUrl: config.local?.baseUrl ?? "",
+      ...(config.local?.apiKeyEnv ? { apiKeyEnv: config.local.apiKeyEnv } : {}),
+      models: config.local?.models ?? [],
+      presets: LOCAL_PRESETS,
+    },
+    agents: Object.keys(agents),
+    agentsWithModelFlag: Object.entries(agents).filter(([, def]) => !!def.modelFlag).map(([name]) => name),
+    budgets: { taskUsd: config.budgets.taskUsd, dailyUsd: config.budgets.dailyUsd, shadowedByProject: isRecord(eff.project?.budgets) },
+    plans,
+    costs: {
+      today: scopeView(recordsForDay(records, new Date(), makeDayKey()), config.budgets.dailyUsd, config),
+      plan: active ? { id: active.id, name: active.name, ...scopeView(records.filter((record) => record.taskId === active.id), config.budgets.taskUsd, config) } : null,
+      // provider/model pairs in the ledger with no pricing row (a local model is a known $0).
+      unpriced: unpricedModels(records, config.pricing).filter((name) => !name.startsWith("local/")),
+    },
+    warnings: (config.warnings ?? []).map(redact),
+    errors: eff.errors,
+    files: {
+      user: fileView(paths.userPath),
+      project: { path: paths.projectPath, display: displayPath(paths.projectPath), exists: existsSync(paths.projectPath) },
+      workspace: path.join(cwd, config.workspaceDir),
+    },
+  };
+}
+
+// ---------------------------------------------------------------- editing the user file
+
+/** The file's indentation step (its smallest indent on a live line), 2 for a flat file. */
+function indentOf(text: string): number {
   let min: number | undefined;
   for (const line of text.split("\n")) {
     const m = /^( +)[^\s#]/.exec(line);
     if (m && (min === undefined || m[1]!.length < min)) min = m[1]!.length;
   }
-  return min;
+  return min ?? 2;
 }
 
-export interface EditArgs {
-  cwd: string;
-  file: "user" | "project";
-  key: string;
-  /** The value as YAML text; absent for `unset`. */
-  value?: string;
-  /** SHA-256 of the file text the caller last saw. */
-  expect?: string;
+/** A section written as a bare `key:` is a null scalar; setIn would throw below it. Make it a mapping. */
+function ensureMap(doc: Document, key: string): void {
+  const node = doc.get(key, true);
+  if (isScalar(node) && (node.value === null || node.value === undefined)) doc.set(key, doc.createNode({}));
 }
 
-function refused(cwd: string, error: string): InspectResult {
-  return { ...inspect(cwd), ok: false, error: redact(error) };
+/** Removes a key, and the section holding it when that leaves it empty. The comment above a removed section moves to the next key. */
+function unsetKey(doc: Document, parts: string[]): void {
+  doc.deleteIn(parts);
+  const parent = doc.getIn(parts.slice(0, -1), true);
+  if (parts.length === 1 || !isMap(parent) || parent.items.length > 0 || !isMap(doc.contents)) return;
+  const items = doc.contents.items;
+  const at = items.findIndex((pair) => isScalar(pair.key) && pair.key.value === parts[0]);
+  const above = (items[at]?.key as { commentBefore?: string } | undefined)?.commentBefore;
+  doc.deleteIn(parts.slice(0, -1));
+  if (!above) return;
+  const next = items[at]?.key as { commentBefore?: string } | undefined;
+  if (next && typeof next === "object") next.commentBefore = next.commentBefore ? `${above}\n${next.commentBefore}` : above;
+  else doc.commentBefore = doc.commentBefore ? `${doc.commentBefore}\n${above}` : above;
 }
 
-/** Sets (or, with no `value`, unsets) one key in the user or project file. Never throws; a refusal is `ok: false`. */
-export function edit(args: EditArgs): InspectResult {
-  const { cwd, file, key, value, expect } = args;
-  const action = value === undefined ? "unset" : "set";
+/** `[ a ]` and `{ a }` (padded) or `[a]` and `{a}`: whichever the file already uses most, so untouched lines keep their look. */
+function paddedFlow(text: string): boolean {
+  return (text.match(/[[{] \S/g) ?? []).length >= (text.match(/[[{][^\s\]}]/g) ?? []).length;
+}
+
+type Apply = (doc: Document) => string | undefined;
+
+/**
+ * Applies one change to the user file. Refuses (and writes nothing) when the file changed since `expect`, when it is
+ * not a YAML mapping, or when the loader would reject the result; that includes any secret.
+ */
+function editUserFile(cwd: string, expect: string | undefined, apply: Apply): Json {
+  const file = configPaths(cwd).userPath;
+  const display = displayPath(file);
   try {
-    const entry = schemaFor(key);
-    if (!entry || entry.key.includes("[]")) return refused(cwd, `${key} is not a setting this tool can edit`);
-    if (action === "set" && (entry.type === "object-list" || entry.type === "map")) return refused(cwd, `${key} is a structured setting; edit the file directly`);
-    const paths = configPaths(cwd);
-    const userView = userFileView(paths);
-    if (file === "project" && !projectMaySet(key, entry.rule, userView.parsed)) {
-      return refused(cwd, `${key} is ${entry.rule === "fixed" ? "fixed" : "user-only"}: set it in the user file, not the project file`);
-    }
-    const target = file === "user" ? userView.path : paths.projectPath;
-    const existed = existsSync(target);
-    const before = existed ? readFileSync(target, "utf8") : "";
-    if (expect !== undefined && expect !== sha256(before)) return refused(cwd, `${displayPath(target)} changed since it was read; refresh and try again`);
-
-    const parts = key.split(".");
-    let parsedValue: unknown;
-    if (action === "set") {
-      try {
-        parsedValue = parse(value!);
-      } catch {
-        return refused(cwd, `the value for ${key} is not valid YAML`);
-      }
-      if (parsedValue === null || parsedValue === undefined) return refused(cwd, `${key} needs a value; use unset to remove it`);
-      const problem = valueProblem(entry, parsedValue);
-      if (problem) return refused(cwd, `${key} ${problem}`);
-    }
-
-    // Work on LF text; the file's line endings are put back at the end.
+    const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+    if (expect !== undefined && expect !== sha256(before)) return refuse(`${display} changed since it was read; refresh and try again`);
     const crlf = before.includes("\r\n");
     const work = crlf ? before.replace(/\r\n/g, "\n") : before;
-    let base: unknown;
+    const doc = parseDocument(work);
+    if (doc.errors.length > 0) return refuse(`${display} cannot be edited: ${doc.errors[0]!.message.split("\n")[0]}`);
+    if (doc.contents !== null && !isMap(doc.contents)) return refuse(`${display} is not a YAML mapping`);
+    let note: string | undefined;
     try {
-      base = parse(work) ?? {};
+      note = apply(doc);
     } catch (error) {
-      return refused(cwd, `${displayPath(target)} cannot be edited: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
+      return refuse(error instanceof Error ? error.message : String(error));
     }
-    if (!isRecord(base)) return refused(cwd, `${displayPath(target)} is not a YAML mapping`);
-    const expected = expectedAfter(base, parts, action === "set" ? parsedValue : undefined);
-    const unit = indentOf(work);
-
-    // Line-level edits first (they keep every other byte). Each candidate is checked against what the edit must
-    // produce; one that does not match (an odd layout) is passed over for the Document API, which may reflow.
-    const candidates: { text: string | undefined; reflowed: boolean }[] = [];
+    const text = doc.toString({ lineWidth: 0, indent: indentOf(work), flowCollectionPadding: paddedFlow(work) });
+    if (containsSecret(text)) return refuse("That would put a secret in the config file; pi-chef config never holds secrets. Nothing was written.");
     try {
-      if (unit === undefined || unit === 2) {
-        if (action === "set") {
-          const text = hasLive(work, parts) ? replaceLive(work, parts, parsedValue) : (uncommentSet(work, parts, parsedValue) ?? insertKey(work, parts, parsedValue));
-          candidates.push({ text, reflowed: false });
-        } else {
-          // Only the user file is the sample's; a project file never gets sample lines put back.
-          const template = file === "user" ? sampleTemplate() : undefined;
-          const text = (template !== undefined && inTemplate(template, parts) ? recomment(work, parts, template) : undefined) ?? removeKey(work, parts, template);
-          candidates.push({ text, reflowed: false });
-        }
-      }
-      candidates.push({ text: action === "set" ? docSet(work, parts, parsedValue, unit ?? 2) : docDelete(work, parts, unit ?? 2), reflowed: true });
+      parseConfig(text, display);
     } catch (error) {
-      return refused(cwd, `${displayPath(target)} cannot be edited: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
+      return refuse(`${display} would be rejected: ${messageOf(error)}`);
     }
-    let chosen: { text: string; reflowed: boolean } | undefined;
-    for (const c of candidates) {
-      if (c.text !== undefined && resolves(c.text, expected)) {
-        chosen = { text: c.text, reflowed: c.reflowed };
-        break;
-      }
-    }
-    if (!chosen) return refused(cwd, `${displayPath(target)}: could not edit ${key} safely; edit the file directly`);
-    // The Document API leaves a file alone when nothing changes.
-    const after = crlf ? chosen.text.replace(/\n/g, "\r\n") : chosen.text;
+    const after = crlf ? text.replace(/\n/g, "\r\n") : text;
     const changed = after !== before;
-    if (changed) {
-      try {
-        // What loadConfig does with a file: only a problem that rejects the whole file refuses the edit.
-        checkConfigText(chosen.text, displayPath(target));
-      } catch (error) {
-        return refused(cwd, `the file would be rejected: ${error instanceof ConfigFileError ? error.reason : error instanceof Error ? error.message : String(error)}`);
-      }
-      const prior = new Set(inspect(cwd).errors.map((e) => e.message));
-      atomicWrite(target, after);
-      // Rules that span both files (proprietaryCode needs orgProviderAllowlist) only show once loaded: undo a write that causes a new error.
-      const fresh = inspect(cwd).errors.find((e) => !prior.has(e.message));
-      if (fresh) {
-        if (existsSync(target) && before === "" && !existed) rmSync(target, { force: true });
-        else atomicWrite(target, before);
-        return refused(cwd, `the config would be rejected: ${fresh.message} (the file was left as it was)`);
-      }
-    }
-    const reflowed = changed && chosen.reflowed;
-    return { ...inspect(cwd), edit: { file, path: target, key, action, changed, ...(reflowed ? { reflowed: true } : {}) } };
+    if (changed) atomicWrite(file, after);
+    return { ok: true, changed, ...(note ? { note } : {}) };
   } catch (error) {
-    return refused(cwd, error instanceof Error && error.message ? error.message : String(error));
+    return refuse(messageOf(error));
   }
 }
 
-const USAGE = `Usage:
-  chef-config inspect --cwd <dir>
-  chef-config set     --cwd <dir> --file user|project --key a.b.c --value <yaml> [--expect <sha256>]
-  chef-config unset   --cwd <dir> --file user|project --key a.b.c [--expect <sha256>]
+/** A successful edit answers with the fresh `show`, so the panel redraws from one document. */
+function withShow(cwd: string, result: Json): Json {
+  return result.ok === true ? { ...show(cwd), ...result } : result;
+}
 
-Prints one JSON document on stdout. Config problems and refused edits are reported inside it ("errors", "ok": false);
-the exit status is nonzero only for a usage error.`;
+/** `set`: one of the keys the panel edits. An empty value removes the key (the default applies again). */
+export function setKey(cwd: string, key: string, value: string, expect?: string): Json {
+  if (!(SET_KEYS as readonly string[]).includes(key)) return refuse(`${key} is not a setting this tool edits (${SET_KEYS.join(", ")})`);
+  const parts = key.split(".");
+  const text = value.trim();
+  let parsed: string | number | undefined;
+  if (key.startsWith("models.")) {
+    if (text !== "") {
+      const problem = ticketModelProblem(text, effective(cwd).config);
+      if (problem) return refuse(`${key}: ${problem}`);
+      parsed = text;
+    }
+  } else if (key.startsWith("budgets.")) {
+    if (text !== "") {
+      const n = Number(text);
+      if (!Number.isFinite(n) || n <= 0) return refuse(`${key} must be a number greater than 0`);
+      parsed = n;
+    }
+  } else {
+    if (text === "") return refuse("local.baseUrl cannot be empty");
+    parsed = text;
+  }
+  const result = editUserFile(cwd, expect, (doc) => {
+    if (parsed === undefined) {
+      unsetKey(doc, parts);
+      return undefined;
+    }
+    if (key === "local.baseUrl" && !isMap(doc.get("local", true))) throw new Error("There is no local server config yet: use Detect, then Add a model, which creates it with this URL.");
+    ensureMap(doc, parts[0]!);
+    doc.setIn(parts, parsed);
+    return undefined;
+  });
+  return withShow(cwd, result);
+}
+
+function localModelItems(doc: Document): unknown[] {
+  const models = doc.getIn(["local", "models"], true) as { items?: unknown[] } | null;
+  return Array.isArray(models?.items) ? models.items : [];
+}
+
+/** `local-add`: saves a served model into `local.models` (updating its contextWindow when the id is there). Creates `local` from `baseUrl` when the file has none. */
+export function localAdd(cwd: string, id: string, contextWindow: number, expect?: string, baseUrl?: string): Json {
+  if (id.trim() === "" || /\s/.test(id)) return refuse("The model id must be a non-empty string without spaces");
+  if (!Number.isInteger(contextWindow) || contextWindow < 4096) return refuse("contextWindow must be a whole number of at least 4096 (what the server runs the model with)");
+  const result = editUserFile(cwd, expect, (doc) => {
+    if (!isMap(doc.get("local", true))) {
+      if (!baseUrl) throw new Error("There is no local server config yet: enter the server URL first.");
+      doc.set("local", doc.createNode({ baseUrl, models: [{ id, contextWindow }] }));
+      return undefined;
+    }
+    const list = localModelItems(doc);
+    const at = list.findIndex((item) => isMap(item) && item.get("id") === id);
+    if (at >= 0) doc.setIn(["local", "models", at, "contextWindow"], contextWindow);
+    else if (list.length > 0) doc.addIn(["local", "models"], doc.createNode({ id, contextWindow }));
+    else doc.setIn(["local", "models"], doc.createNode([{ id, contextWindow }]));
+    return undefined;
+  });
+  return withShow(cwd, result);
+}
+
+/** `local-remove`: drops an id from `local.models`. The last one stays: the loader needs a non-empty list. */
+export function localRemove(cwd: string, id: string, expect?: string): Json {
+  const result = editUserFile(cwd, expect, (doc) => {
+    const list = localModelItems(doc);
+    const at = list.findIndex((item) => isMap(item) && item.get("id") === id);
+    if (at < 0) throw new Error(`${id} is not in local.models`);
+    if (list.length === 1) throw new Error("local.models cannot be empty; edit the local section in the file to remove the server");
+    doc.deleteIn(["local", "models", at]);
+    const models = effective(cwd).config.models;
+    const used = MODEL_KEYS.filter((key) => models[key] === `local/${id}`);
+    return used.length > 0 ? `models.${used.join(", models.")} still names local/${id}` : undefined;
+  });
+  return withShow(cwd, result);
+}
+
+// ---------------------------------------------------------------- local server
+
+export interface DetectedModel {
+  id: string;
+  contextWindow?: number;
+  /** The contextWindow saved in local.models for this id, when it is there. */
+  configured?: number;
+  mismatch?: string;
+}
+
+async function getModels(fetchImpl: typeof fetch, url: string, timeoutMs: number): Promise<string[] | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  (timer as { unref?: () => void }).unref?.();
+  try {
+    const response = await fetchImpl(`${url}/models`, { signal: controller.signal });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { data?: unknown };
+    if (!Array.isArray(body.data)) return undefined;
+    return body.data.map((item) => (isRecord(item) && typeof item.id === "string" ? item.id : "")).filter(Boolean);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Asks a server what it serves: `GET <baseUrl>/models` (the OpenAI-compatible list; a URL with no `/v1` is retried
+ * with it), then the context probe of each id (llama-server `/props`, Ollama `/api/ps`). An unreachable server is a
+ * result (`reachable: false`), not an error.
+ */
+export async function localDetect(baseUrl: string, options: { fetchImpl?: typeof fetch; configured?: LocalModelConfig[]; timeoutMs?: number } = {}): Promise<Json> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl.trim());
+  } catch {
+    return refuse("That is not a URL (for example http://127.0.0.1:8080/v1)");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return refuse("The URL must start with http:// or https://");
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? 3000;
+  const given = url.toString().replace(/\/+$/, "");
+  const candidates = /\/v1$/.test(given) ? [given] : [given, `${given}/v1`];
+  for (const candidate of candidates) {
+    const ids = await getModels(fetchImpl, candidate, timeoutMs);
+    if (!ids) continue;
+    const configured = options.configured ?? [];
+    const models: DetectedModel[] = await Promise.all(
+      [...new Set(ids)].slice(0, 30).map(async (id) => {
+        const contextWindow = await probeLocalContext(candidate, id, { fetchImpl, timeoutMs });
+        const have = configured.find((m) => m.id === id);
+        const mismatch = have ? contextMismatch(id, have.contextWindow, contextWindow) : undefined;
+        return { id, ...(contextWindow ? { contextWindow } : {}), ...(have ? { configured: have.contextWindow } : {}), ...(mismatch ? { mismatch } : {}) };
+      }),
+    );
+    return { ok: true, reachable: true, baseUrl: candidate, origin: serverOrigin(candidate), models };
+  }
+  return { ok: true, reachable: false, baseUrl: given, models: [], error: `No answer from ${candidates.map((c) => `${c}/models`).join(" or ")}` };
+}
+
+// ---------------------------------------------------------------- plans
+
+async function currentBranch(cwd: string): Promise<string | undefined> {
+  try {
+    return (await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `/plans <name>` without the checkout: points `active-task.json` at the task and records the branch that is checked
+ * out now, as `/plans` does last, so the task stays active until the branch changes. It never switches branches: a
+ * click in a panel should not change the working tree. The result says so when the task's branch is not the one out.
+ */
+export async function planActivate(cwd: string, id: string): Promise<Json> {
+  const ctx = contextFor(cwd, effective(cwd).config);
+  const task = listTasks(ctx).find((item) => item.taskId === id);
+  if (!task) return refuse(`No plan with id ${id}`);
+  const name = displayName(task);
+  if (isClosed(task)) return refuse(`${name} is closed. Its files stay on disk; /plan <request> starts a new one.`);
+  const branch = await currentBranch(cwd);
+  ctx.store.setActive(task.taskId, branch);
+  const note = task.build?.branch && branch && task.build.branch !== branch ? `${name} is active. Its branch ${task.build.branch} is not checked out (you are on ${branch}); /plans ${name} in Pi switches to it.` : undefined;
+  return { ...show(cwd), ok: true, ...(note ? { note } : {}) };
+}
+
+/** `/plans close <name>`. A plan with tickets not built, or a build that has not passed review, needs `force` (the prompt of /plans close). */
+export async function planClose(cwd: string, id: string, force = false): Promise<Json> {
+  const ctx = contextFor(cwd, effective(cwd).config);
+  const task = listTasks(ctx).find((item) => item.taskId === id);
+  if (!task) return refuse(`No plan with id ${id}`);
+  const name = displayName(task);
+  if (isClosed(task)) return { ...show(cwd), ok: true, note: `${name} is already closed.` };
+  const unbuilt = (task.plan?.tickets ?? []).filter((ticket) => task.ticketRuns?.[ticket.id]?.status !== "done").length;
+  const unreviewed = !!task.build && !task.review?.passed;
+  if ((unbuilt > 0 || unreviewed) && !force) {
+    const what = [...(unbuilt > 0 ? [`${unbuilt} ticket(s) not built`] : []), ...(unreviewed ? ["a build that has not passed review"] : [])].join(" and ");
+    return refuse(`${name} has ${what}.`, { needsForce: true });
+  }
+  await closeTask(ctx, task.taskId, "closed by user");
+  if (ctx.store.readActive() === task.taskId) {
+    const next = unfinishedTasks(listTasks(ctx))[0];
+    if (next) ctx.store.setActive(next.taskId);
+    else ctx.store.clearActive();
+  }
+  return { ...show(cwd), ok: true };
+}
+
+// ---------------------------------------------------------------- command line
+
+const USAGE = `Usage:
+  chef-config show          --cwd <dir>
+  chef-config set           --cwd <dir> --key <${SET_KEYS.join("|")}> --value <v> [--expect <sha256 of the user file>]
+  chef-config local-add     --cwd <dir> --id <model id> --context-window <n> [--base-url <url>] [--expect <sha256>]
+  chef-config local-remove  --cwd <dir> --id <model id> [--expect <sha256>]
+  chef-config local-detect  --base-url <url> [--cwd <dir>]
+  chef-config plan-activate --cwd <dir> --id <plan id>
+  chef-config plan-close    --cwd <dir> --id <plan id> [--force]
+
+Prints one JSON document on stdout: { "ok": true, ... } or { "ok": false, "error": "..." }.
+A refused request is reported inside it (exit 0); the exit status is nonzero only for a usage error.`;
 
 function flag(args: string[], name: string): string | undefined {
   const at = args.indexOf(name);
@@ -453,47 +570,73 @@ function dirOf(cwd: string): string {
   return path.resolve(cwd.startsWith("~/") ? path.join(homedir(), cwd.slice(2)) : cwd);
 }
 
+/** The server key named by local.apiKeyEnv, but only for the configured server itself: never for a URL typed into the panel. */
+function authFetch(cwd: string, baseUrl: string): typeof fetch | undefined {
+  const local = effective(cwd).config.local;
+  const key = local?.apiKeyEnv ? process.env[local.apiKeyEnv] : undefined;
+  if (!local || !key) return undefined;
+  try {
+    if (new URL(local.baseUrl).origin !== new URL(baseUrl).origin) return undefined;
+  } catch {
+    return undefined;
+  }
+  return (input, init) => fetch(input, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), authorization: `Bearer ${key}` } });
+}
+
+const COMMANDS = ["show", "set", "local-add", "local-remove", "local-detect", "plan-activate", "plan-close"];
+
 /** Runs the CLI. Returns the exit code; output goes through `out` / `err` so tests need no process. */
-export function main(argv: string[], out: (text: string) => void = (t) => process.stdout.write(t), err: (text: string) => void = (t) => process.stderr.write(t)): number {
+export async function main(argv: string[], out: (text: string) => void = (t) => process.stdout.write(t), err: (text: string) => void = (t) => process.stderr.write(t)): Promise<number> {
   const [command, ...rest] = argv;
-  const cwd = flag(rest, "--cwd");
-  if (command === "inspect" || command === "set" || command === "unset") {
-    if (!cwd || cwd.startsWith("--")) {
-      err(`chef-config: ${command} needs --cwd <dir>\n${USAGE}\n`);
-      return 2;
-    }
-    if (command === "inspect") {
-      out(`${JSON.stringify(inspect(dirOf(cwd)))}\n`);
-      return 0;
-    }
-    const file = flag(rest, "--file");
-    const key = flag(rest, "--key");
-    const value = flag(rest, "--value");
-    const expect = flag(rest, "--expect");
-    if (file !== "user" && file !== "project") {
-      err(`chef-config: ${command} needs --file user|project\n${USAGE}\n`);
-      return 2;
-    }
-    if (!key || key.startsWith("--")) {
-      err(`chef-config: ${command} needs --key <a.b.c>\n${USAGE}\n`);
-      return 2;
-    }
-    if (command === "set" && value === undefined) {
-      err(`chef-config: set needs --value <yaml>\n${USAGE}\n`);
-      return 2;
-    }
-    if (command === "unset" && value !== undefined) {
-      err(`chef-config: unset takes no --value\n${USAGE}\n`);
-      return 2;
-    }
-    if (rest.includes("--expect") && (expect === undefined || expect.startsWith("--"))) {
-      err(`chef-config: --expect needs a sha256\n${USAGE}\n`);
-      return 2;
-    }
-    const result = edit({ cwd: dirOf(cwd), file, key, ...(command === "set" ? { value } : {}), ...(expect !== undefined ? { expect } : {}) });
+  const usage = (message: string): number => {
+    err(`chef-config: ${message}\n${USAGE}\n`);
+    return 2;
+  };
+  const print = (result: Json): number => {
     out(`${JSON.stringify(result)}\n`);
     return 0;
+  };
+  if (!command || !COMMANDS.includes(command)) return usage(command ? `unknown command "${command}"` : "no command");
+  const cwdArg = flag(rest, "--cwd");
+  if (command !== "local-detect" && (!cwdArg || cwdArg.startsWith("--"))) return usage(`${command} needs --cwd <dir>`);
+  const cwd = cwdArg && !cwdArg.startsWith("--") ? dirOf(cwdArg) : "";
+  const expect = flag(rest, "--expect");
+  if (rest.includes("--expect") && (expect === undefined || expect.startsWith("--"))) return usage("--expect needs a sha256");
+  const id = flag(rest, "--id");
+  try {
+    switch (command) {
+      case "show":
+        return print(show(cwd));
+      case "set": {
+        const key = flag(rest, "--key");
+        const value = flag(rest, "--value");
+        if (!key) return usage("set needs --key");
+        if (value === undefined) return usage("set needs --value");
+        return print(setKey(cwd, key, value, expect));
+      }
+      case "local-add": {
+        const window = flag(rest, "--context-window");
+        if (!id) return usage("local-add needs --id");
+        if (window === undefined) return usage("local-add needs --context-window");
+        return print(localAdd(cwd, id, Number(window), expect, flag(rest, "--base-url")));
+      }
+      case "local-remove":
+        if (!id) return usage("local-remove needs --id");
+        return print(localRemove(cwd, id, expect));
+      case "local-detect": {
+        const baseUrl = flag(rest, "--base-url");
+        if (!baseUrl) return usage("local-detect needs --base-url");
+        const configured = cwd ? effective(cwd).config.local?.models : undefined;
+        const fetchImpl = cwd ? authFetch(cwd, baseUrl) : undefined;
+        return print(await localDetect(baseUrl, { ...(configured ? { configured } : {}), ...(fetchImpl ? { fetchImpl } : {}) }));
+      }
+      case "plan-activate":
+      case "plan-close":
+        if (!id) return usage(`${command} needs --id`);
+        return print(command === "plan-activate" ? await planActivate(cwd, id) : await planClose(cwd, id, rest.includes("--force")));
+    }
+  } catch (error) {
+    return print(refuse(messageOf(error)));
   }
-  err(`chef-config: ${command ? `unknown command "${command}"` : "no command"}\n${USAGE}\n`);
-  return 2;
+  return 0;
 }

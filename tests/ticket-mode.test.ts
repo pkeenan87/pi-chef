@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { ticketMode, type TicketStatus } from "../src/ticket-mode.js";
-import { TURN_GRACE } from "../src/orchestrator/build.js";
+import { TURN_GRACE } from "../src/orchestrator/turn-budget.js";
 
 const ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/ticket-mode.ts");
 const KEYS = ["PI_CHEF_MAX_TURNS", "PI_CHEF_STATUS", "PI_CHEF_TICKET"] as const;
@@ -64,20 +64,6 @@ describe("ticket mode on Pi's SDK", () => {
     expect(results).toContain("do not push");
     expect(results).toContain("Blocked destructive command");
     expect(session.extensionRunner.getRegisteredCommands().map((command) => command.name)).toEqual([]);
-  });
-
-  it("appends a syntax note to a write that breaks a file, and leaves a good write alone", async () => {
-    const { session, provider } = await open({ factory: (pi) => ticketMode(pi, { env: {}, cwd }) });
-    provider.setResponses([
-      fauxAssistantMessage(fauxToolCall("write", { path: "ok.json", content: '{"a": 1}' }, { id: "a" }), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxToolCall("write", { path: "config.json", content: '{"a": 1,' }, { id: "b" }), { stopReason: "toolUse" }),
-      fauxAssistantMessage(fauxText("Done.")),
-    ]);
-    await session.prompt("Build it.");
-    await session.waitForIdle();
-    session.dispose();
-    expect(toolResults(session).match(/no longer parses/g)).toHaveLength(1);
-    expect(toolResults(session)).toContain("config.json no longer parses");
   });
 
   it("with no env vars, has no budget and writes no status file", async () => {
@@ -177,6 +163,31 @@ describe("ticket mode hooks", () => {
     return { pi: pi as never, fire };
   }
   const dir = () => mkdtempSync(path.join(tmpdir(), "mode-"));
+  /** A user config with a `local` section, in a HOME of its own for the duration of `body`. */
+  async function withLocalConfig<T>(body: () => Promise<T>): Promise<T> {
+    const prior = process.env.HOME;
+    process.env.HOME = mkdtempSync(path.join(tmpdir(), "pi-home-"));
+    try {
+      // `local` is user-only: it comes from the user's chef.yaml, never the project's.
+      mkdirSync(path.join(process.env.HOME, ".pi", "agent"), { recursive: true });
+      writeFileSync(path.join(process.env.HOME, ".pi", "agent", "chef.yaml"), "local:\n  baseUrl: http://127.0.0.1:9/v1\n  models:\n    - { id: qwen, contextWindow: 8000 }\n", "utf8");
+      return await body();
+    } finally {
+      process.env.HOME = prior;
+    }
+  }
+
+  it("registers the local provider from the user's config, so --model local/<id> resolves in the child", async () => {
+    await withLocalConfig(async () => {
+      const registered: { name: string; config: { baseUrl: string; models: { id: string; contextWindow: number }[] } }[] = [];
+      const pi = { on: () => undefined, registerProvider: (name: string, config: never) => void registered.push({ name, config }) };
+      ticketMode(pi as never, { env: {}, cwd: dir() });
+      expect(registered).toHaveLength(1);
+      expect(registered[0]!.name).toBe("local");
+      expect(registered[0]!.config.baseUrl).toBe("http://127.0.0.1:9/v1");
+      expect(registered[0]!.config.models.map((model) => [model.id, model.contextWindow])).toEqual([["qwen", 8000]]);
+    });
+  });
 
   it("refuses a destructive command in user_bash and in powershell, like the main session", async () => {
     const { pi, fire } = stub();
@@ -187,7 +198,7 @@ describe("ticket mode hooks", () => {
     expect(await fire("tool_call", { toolName: "powershell", toolCallId: "2", input: { command: "Get-Date" } })).toBeUndefined();
   });
 
-  it("starts a new count and a clean status on every session start (the review tab sends /new before each review)", async () => {
+  it("starts a new count and a clean status on every session start (a /new in the ticket tab)", async () => {
     const { pi, fire } = stub();
     const file = path.join(dir(), "status.json");
     ticketMode(pi, { env: { PI_CHEF_MAX_TURNS: "1", PI_CHEF_STATUS: file }, cwd: dir() });
@@ -206,34 +217,24 @@ describe("ticket mode hooks", () => {
     expect(aborts).toBe(2); // the second session was cut at its own limit, not at the first one's leftovers
   });
 
-  it("passes structuredContent along when it appends a syntax note", async () => {
-    const { pi, fire } = stub();
-    const where = dir();
-    ticketMode(pi, { env: {}, cwd: where, syntax: async () => "bad syntax" });
-    await fire("tool_call", { toolName: "write", toolCallId: "1", input: { path: "new.json" } });
-    const result = (await fire("tool_result", { toolName: "write", toolCallId: "1", input: { path: "new.json" }, content: [{ type: "text", text: "ok" }], structuredContent: { a: 1 } })) as { content: unknown[]; structuredContent: unknown };
-    expect(result.content).toHaveLength(2);
-    expect(result.structuredContent).toEqual({ a: 1 });
-  });
-
   it("with no status file, warns once at session start; a registration failure is redacted in the status file", async () => {
-    const where = dir();
-    mkdirSync(path.join(where, ".pi-workflows"), { recursive: true });
-    writeFileSync(path.join(where, ".pi-workflows", "config.yaml"), "providers:\n  local:\n    baseUrl: http://127.0.0.1:9/v1\ntiers:\n  cheap:\n    - provider: local\n      model: qwen\n", "utf8");
-    const secret = "Bearer abcdefghijklmnopqrstuvwxyz0123456789";
-    const quiet = stub(`refused ${secret}`);
-    ticketMode(quiet.pi, { env: {}, cwd: where });
-    const notices: string[] = [];
-    await quiet.fire("session_start", {}, { ui: { notify: (message: string) => void notices.push(message) } });
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("pi-chef ticket mode");
-    expect(notices[0]).not.toContain(secret);
+    await withLocalConfig(async () => {
+      const where = dir();
+      const secret = "Bearer abcdefghijklmnopqrstuvwxyz0123456789";
+      const quiet = stub(`refused ${secret}`);
+      ticketMode(quiet.pi, { env: {}, cwd: where });
+      const notices: string[] = [];
+      await quiet.fire("session_start", {}, { ui: { notify: (message: string) => void notices.push(message) } });
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain("pi-chef ticket mode");
+      expect(notices[0]).not.toContain(secret);
 
-    const file = path.join(mkdtempSync(path.join(tmpdir(), "status-")), "s.json");
-    const loud = stub(`refused ${secret}`);
-    ticketMode(loud.pi, { env: { PI_CHEF_STATUS: file }, cwd: where });
-    const written = readFileSync(file, "utf8");
-    expect(JSON.parse(written).error).toContain("local");
-    expect(written).not.toContain(secret);
+      const file = path.join(mkdtempSync(path.join(tmpdir(), "status-")), "s.json");
+      const loud = stub(`refused ${secret}`);
+      ticketMode(loud.pi, { env: { PI_CHEF_STATUS: file }, cwd: where });
+      const written = readFileSync(file, "utf8");
+      expect(JSON.parse(written).error).toContain("local");
+      expect(written).not.toContain(secret);
+    });
   });
 });

@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process";
-import { readFileSync, realpathSync, statSync } from "node:fs";
-import path from "node:path";
 import { promisify } from "node:util";
 import { WorkflowError } from "../domain.js";
 
@@ -67,36 +65,8 @@ async function runGit(cwd: string, args: string[], identity: Identity): Promise<
 
 const NO_HOOKS = "/dev/null";
 
-/** True when both name the same directory, through symlinks (macOS `/tmp` is `/private/tmp`). */
-export function samePath(a: string, b: string): boolean {
-  const real = (dir: string) => {
-    try {
-      return realpathSync(dir);
-    } catch {
-      return path.resolve(dir);
-    }
-  };
-  return real(a) === real(b);
-}
-
-/**
- * The main checkout of the repository `dir` belongs to, when `dir` is the top of a linked git worktree; else `dir`.
- * Reads only files (the worktree's `.git` file, then `commondir`), never git, so hot paths can call it.
- */
-export function mainCheckoutOf(dir: string): string {
-  try {
-    const dotGit = path.join(dir, ".git");
-    if (!statSync(dotGit).isFile()) return dir;
-    const gitdir = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+?)\s*$/m)?.[1];
-    if (!gitdir) return dir;
-    const own = path.resolve(dir, gitdir);
-    const common = path.resolve(own, readFileSync(path.join(own, "commondir"), "utf8").trim());
-    // Only a plain `<main>/.git` directory has a checkout beside it (a bare repository has none).
-    return path.basename(common) === ".git" && statSync(common).isDirectory() ? path.dirname(common) : dir;
-  } catch {
-    return dir;
-  }
-}
+/** Where coding agents keep their own settings and state; a file there that git does not track yet is the agent's, not the ticket's. */
+const AGENT_DIRS = [".claude", ".codex", ".cursor", ".gemini", ".opencode", ".grok"];
 
 /**
  * The diff format the review and the static scan parse (`+++ b/<file>`, no colour), whatever the user's git config says
@@ -134,15 +104,17 @@ export class GitWorkspace {
   }
 
   /**
-   * Commits everything in `cwd` except the `exclude` paths (relative to `cwd`). The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
+   * Commits everything in `cwd` except the `exclude` paths (relative to `cwd`) and the files an agent left that are new
+   * under its own directory (`.claude/`, `.codex/` ...; tracked files there commit as usual). The tree may hold hooks or config a model wrote (hooks live in the .git directory), so no hook runs and no fsmonitor command is started: `core.hooksPath=/dev/null`, `--no-verify`.
    */
   async commitAll(cwd: string, message: string, exclude: string[] = []): Promise<string> {
     const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
-    const add = await this.git([...safe, "add", "-A", "--", ".", ...exclude.map((dir) => `:(exclude)${dir}`)], cwd);
+    const skip = [...exclude, ...(await this.agentArtefacts(cwd))];
+    const add = await this.git([...safe, "add", "-A", "--", ".", ...skip.map((path) => `:(exclude,literal)${path}`)], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
-    if (exclude.length > 0) {
+    if (skip.length > 0) {
       // `add` skips the excluded paths, but anything already staged there would still be committed.
-      const unstage = await this.git([...safe, "reset", "-q", "--", ...exclude], cwd);
+      const unstage = await this.git([...safe, "reset", "-q", "--", ...skip.map((path) => `:(literal)${path}`)], cwd);
       if (unstage.code !== 0) throw new WorkflowError("GIT", unstage.stderr);
     }
     const commit = await this.git([...safe, "commit", "--no-verify", "-m", message], cwd);
@@ -150,6 +122,20 @@ export class GitWorkspace {
       throw new WorkflowError("GIT", commit.stderr || commit.stdout);
     }
     return this.head(cwd);
+  }
+
+  /** Files under the agent directories that HEAD does not have: untracked ones, and ones staged as new. Neither is a ticket's work. */
+  async agentArtefacts(cwd = this.repoRoot): Promise<string[]> {
+    const safe = ["-c", "core.fsmonitor=false"];
+    const untracked = await this.git([...safe, "ls-files", "--others", "--exclude-standard", "-z", "--", ...AGENT_DIRS], cwd);
+    const staged = await this.git([...safe, "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--", ...AGENT_DIRS], cwd);
+    return [...untracked.stdout.split("\0"), ...staged.stdout.split("\0")].filter(Boolean);
+  }
+
+  /** `git reset --soft <sha>`: moves HEAD (and the branch) back to `sha`, keeping the index and the working tree. */
+  async resetSoft(sha: string, cwd = this.repoRoot): Promise<void> {
+    const result = await this.git(["reset", "--soft", "--end-of-options", sha], cwd);
+    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || "git reset --soft failed");
   }
 
   /** The checked-out branch name, or "HEAD" when detached. */
@@ -188,30 +174,6 @@ export class GitWorkspace {
       if (result.code === 0 && result.stdout.trim()) return result.stdout.trim();
     }
     return this.head();
-  }
-
-  /**
-   * Adds a worktree at `dir`: on a new branch at `startPoint` when one is given, else on the existing `branch`. The
-   * worktree gets its own index and working tree, so the checkout this runs in is not touched.
-   */
-  async addWorktree(dir: string, branch: string, startPoint?: string): Promise<void> {
-    await this.assertBranchName(branch);
-    if (startPoint !== undefined) this.assertSha(startPoint);
-    const args = startPoint ? ["worktree", "add", "-b", branch, "--", dir, startPoint] : ["worktree", "add", "--", dir, branch];
-    const result = await this.git(args);
-    if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not add a worktree at ${dir}`);
-  }
-
-  /** The worktree that has `branch` checked out, or undefined (`git worktree list --porcelain`). */
-  async worktreeOf(branch: string): Promise<string | undefined> {
-    const result = await this.git(["worktree", "list", "--porcelain"]);
-    if (result.code !== 0) return undefined;
-    let dir: string | undefined;
-    for (const line of result.stdout.split("\n")) {
-      if (line.startsWith("worktree ")) dir = line.slice("worktree ".length);
-      else if (line === `branch refs/heads/${branch}` && dir) return dir;
-    }
-    return undefined;
   }
 
   private async assertBranchName(branch: string): Promise<void> {
@@ -266,7 +228,6 @@ export class GitWorkspace {
     return paths;
   }
 
-  /** How many commits HEAD has that `base` does not. */
   /** The newest commit in `since..HEAD` whose subject is exactly `subject`, or undefined (also on any git error). */
   async commitWithSubject(since: string, subject: string): Promise<string | undefined> {
     const result = await this.git(["log", "--format=%H%x00%s", `${since}..HEAD`, "--"]);
@@ -278,6 +239,7 @@ export class GitWorkspace {
     return undefined;
   }
 
+  /** How many commits HEAD has that `base` does not. */
   async aheadOf(base: string): Promise<number> {
     const result = await this.git(["rev-list", "--count", `${base}..HEAD`, "--"]);
     if (result.code !== 0) throw new WorkflowError("GIT", result.stderr || `Could not compare with ${base}`);

@@ -73,22 +73,22 @@ function timeOf(entry: Record<string, unknown>, fallback: Date): Date {
 /**
  * Ledgers what the child spent that is not in the ledger yet: each assistant message (through `usageOfMessage`, so a
  * failed zero-token attempt bills nothing and an unknown cost stays null) and Pi's own entries (`recordPiUsage`).
- * Rows carry ` · ticket <ticketId>`. `since` leaves older entries alone. Returns the rows added.
+ * Rows carry ` · ticket <ticketId>`. Returns the rows added.
  * Pi's compaction and branch-summary entries name no model: they take `options.model` (what the runner launched), else
  * the nearest preceding assistant message's provider and model in the same file, else stay unknown.
  */
-export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSessionFile[], options: { ticketId?: string; since?: Date; model?: { provider: string; id: string }; /** false: leave assistant messages to the caller (the review tab returns their usage to its caller, who ledgers it). */ messages?: boolean }): CostRecord[] {
+export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSessionFile[], options: { ticketId?: string; model?: { provider: string; id: string } }): CostRecord[] {
   const seen = (ctx.piLedgered ??= new Set(ctx.store.readLedger().map((row) => row.id).filter((id) => id.startsWith("pi-"))));
   const out: CostRecord[] = [];
   let refreshed = false;
   for (const file of files) {
-    for (const entry of options.messages === false ? [] : file.entries) {
+    for (const entry of file.entries) {
       if (entry.type !== "message" || typeof entry.id !== "string") continue;
       const message = entry.message as { role?: unknown; provider?: unknown; model?: unknown } | undefined;
       if (!message || typeof message !== "object" || message.role !== "assistant") continue;
       const id = `pi-${file.sessionId}-${entry.id}`;
       const at = timeOf(entry, ctx.now());
-      if (seen.has(id) || (options.since && at < options.since)) continue;
+      if (seen.has(id)) continue;
       if (!refreshed) {
         refreshed = true;
         refreshPiLedgered(ctx);
@@ -107,7 +107,7 @@ export function ledgerChildSession(ctx: WorkflowContext, files: readonly ChildSe
       if (message?.role === "assistant" && typeof message.provider === "string" && typeof message.model === "string" && message.provider && message.model) preceding = { provider: message.provider, id: message.model };
       if (entry.type === "message") continue;
       const model = options.model ?? preceding;
-      out.push(...recordPiUsage(ctx, { sessionId: file.sessionId, entries: [entry], ...(model ? { model } : {}), ...(options.since ? { since: options.since } : {}), ...(options.ticketId ? { ticketId: options.ticketId } : {}) }));
+      out.push(...recordPiUsage(ctx, { sessionId: file.sessionId, entries: [entry], ...(model ? { model } : {}), ...(options.ticketId ? { ticketId: options.ticketId } : {}) }));
     }
   }
   return out;

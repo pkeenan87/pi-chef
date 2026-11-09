@@ -1,37 +1,30 @@
-import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult, SessionBeforeCompactEvent, SessionBeforeCompactResult } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, isToolCallEventType, serializeConversation, SessionManager } from "@earendil-works/pi-coding-agent";
-import { COMMANDS, helpText } from "./commands.js";
-import { statSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { COMMANDS } from "./commands.js";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { contextMismatch, probeLocalContext } from "./providers/local-context.js";
-import { ConfigFileError, configPaths, DEFAULT_SESSION, displayPath, foundryModelOf, loadConfig, modelLabel, parseModelRef, piModelId, setBillingResolver, tierCandidates, type WorkflowConfig } from "./config.js";
-import type { FileAuthProbe } from "./providers/auth.js";
-import { buildBashBlock, isDeniedCommand } from "./sandbox.js";
-import { turnBudget, type BuildDriver, type ChunkLimits, type ChunkSession } from "./orchestrator/build.js";
-import { openTicketAgent, type TicketAgent } from "./subagent/ticket-agent.js";
-import { piChildSdk, runtimeOf } from "./subagent/pi-sdk.js";
-import { runInHerdr } from "./subagent/herdr-runner.js";
+import { ConfigFileError, configPaths, displayPath, loadConfig, type WorkflowConfig } from "./config.js";
+import { isDeniedCommand } from "./sandbox.js";
+import type { BuildDriver } from "./orchestrator/build.js";
 import { createHerdrClient, type HerdrClient } from "./herdr/client.js";
-import { createReviewTabChat } from "./herdr/review-tab.js";
-import { createAgentChat } from "./subagent/advisor-agent.js";
-import { mainCheckoutOf, samePath } from "./git/workspace.js";
-import { createRuntime, registerChatProviders, type ProviderRuntime } from "./providers/runtime.js";
-import { createRegistryChat, type ChatFn, type PiRegistryLike } from "./providers/pi-chat.js";
+import { ticketHost } from "./runner/host.js";
+import { herdrSpace, NEEDS_HERDR, runTicket } from "./runner/ticket.js";
+import { registerLocalProvider } from "./providers/runtime.js";
+import { createRegistryChat, type PiRegistryLike } from "./providers/pi-chat.js";
 import { registryProblem, type UsableRegistry } from "./providers/usable.js";
 import { Workflow } from "./orchestrator/service.js";
 import { presentForDecision } from "./tools/plan-review.js";
 import { asResult } from "./orchestrator/context.js";
 import { redact } from "./redact.js";
-import { WorkflowError, type CommandResult, type ThinkingLevel } from "./domain.js";
+import { WorkflowError, type CommandResult } from "./domain.js";
 import { usageOfMessage } from "./usage-message.js";
 import { registerPlanTools, registerWebTools, type WebToolsDeps } from "./tools/index.js";
 import { isReadOnlyCommand, PLAN_TOOL_NAMES, PLANNING_DISABLED_TOOLS, PLANNING_TOOLS } from "./tools/readonly-bash.js";
 import { SEARCH_MODEL } from "./tools/web-search.js";
 
 let active: Workflow | undefined;
-let runtime: ProviderRuntime | undefined;
 let cwd = process.cwd();
 let piRef: Pick<ExtensionAPI, "registerProvider" | "sendUserMessage"> | undefined;
 /** Last config read for a project root, keyed by the files' mtime and size. */
@@ -41,94 +34,30 @@ let toolsBeforePlan: string[] | undefined;
 const TOOLS_ENTRY = "chef-tools";
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
 /**
- * Where provider registration goes: the live session's `pi.registerProvider`, and the signature of the provider and tier
- * settings last registered there. On globalThis because Pi may load a fresh copy of this module for each session, and
+ * Where provider registration goes: the live session's `pi.registerProvider`, and the signature of the `local` section
+ * last registered there. On globalThis because Pi may load a fresh copy of this module for each session, and
  * the copy running /build would otherwise register with a replaced session's pi, whose registry nothing reads.
  */
 const PROVIDERS_SLOT = Symbol.for("pi-chef.providers");
 const providerSlot = globalThis as { [PROVIDERS_SLOT]?: { register: (name: string, config: unknown) => void; signature?: string } };
+
+/** Tests bind a fake herdr client here; unset, the real `hc` is used. */
+let herdrClientFactory: (() => HerdrClient) | undefined;
+export function bindHerdrClient(factory: (() => HerdrClient) | undefined): void {
+  herdrClientFactory = factory;
+}
+
+/** The herdr client for ticket tabs and agent reviews. Creating it runs nothing; `hc` is called when a tab is opened. */
+function herdrClient(): HerdrClient {
+  return (herdrClientFactory ?? (() => createHerdrClient()))();
+}
 
 /** Points registration at `pi` (a new session's registry starts empty, so nothing counts as registered yet). */
 function registerWith(pi: Partial<Pick<ExtensionAPI, "registerProvider">>): void {
   if (typeof pi.registerProvider === "function") providerSlot[PROVIDERS_SLOT] = { register: pi.registerProvider.bind(pi) as (name: string, config: unknown) => void };
 }
 
-/** `~/` at the start of a configured command: execFile does not expand it. */
-function expandHome(command: string): string {
-  return command === "~" || command.startsWith("~/") ? path.join(homedir(), command.slice(1)) : command;
-}
-
-/** Tests bind a fake herdr client here; unset, `isolation.runner: herdr` spawns the real `hc`. */
-let herdrClientFactory: ((command: string) => HerdrClient) | undefined;
-export function bindHerdrClient(factory: ((command: string) => HerdrClient) | undefined): void {
-  herdrClientFactory = factory;
-  reviewTab = undefined;
-}
-
-/**
- * The review tab's chat (`isolation.runner: herdr`): every review call goes through one herdr tab. It holds the tab's
- * queue and last-used model, so it lives across binds (one per command) and only its registry and checkout are refreshed.
- * Outside herdr (`client.self()` has a problem) it answers with the plain chat and says so once.
- */
-let reviewTab: { key: string; latest: { registry: PiRegistryLike; checkout: string; plain: ChatFn }; chat: ChatFn; warned: boolean } | undefined;
-
-function reviewChatFor(workflow: Workflow, registry: PiRegistryLike | undefined, checkout: string, plain: ChatFn | undefined): ChatFn | undefined {
-  const isolation = workflow.config.isolation;
-  if (isolation.runner !== "herdr" || !registry || !plain) return undefined;
-  const command = expandHome(isolation.herdrCommand);
-  const key = `${command}|${workflow.reviewsRoot()}`;
-  if (reviewTab && reviewTab.key === key) {
-    reviewTab.latest = { registry, checkout, plain };
-    return reviewTab.chat;
-  }
-  const client = (herdrClientFactory ?? ((cmd: string) => createHerdrClient({ command: cmd })))(command);
-  const latest = { registry, checkout, plain };
-  let space: string | undefined;
-  const spaceOf = async () => {
-    if (space) return space;
-    const self = await client.self();
-    if ("problem" in self) return self;
-    space = self.space;
-    return space;
-  };
-  const tab = createReviewTabChat({
-    client,
-    registry: { find: (provider, model) => latest.registry.find(provider, model), isUsingOAuth: (model) => latest.registry.isUsingOAuth?.(model) ?? false },
-    apiKeyFallback: (provider) => active?.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true,
-    piModelId: (provider, model) => piModelId(active!.config, provider, model),
-    checkout: () => latest.checkout,
-    space: spaceOf,
-    ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
-    host: {
-      reviewsRoot: () => active?.reviewsRoot(),
-      ledgerOwn: (files, model) => void active?.ledgerChildSession(files, { model, messages: false }),
-      progress: (text) => active?.progress(text),
-    },
-  });
-  const entry = {
-    key,
-    latest,
-    warned: false,
-    chat: (async (candidate, request) => {
-      const where = await spaceOf();
-      if (typeof where !== "string") {
-        if (!entry.warned) {
-          entry.warned = true;
-          active?.progress(`herdr not available: ${where.problem}; reviewing without the review tab`);
-        }
-        return entry.latest.plain(candidate, request);
-      }
-      return tab(candidate, request);
-    }) as ChatFn,
-  };
-  reviewTab = entry;
-  return entry.chat;
-}
-
 export function bindWorkflow(workflow: Workflow | undefined): void {
-  // A workflow bound from outside brings its own auth probe; prices fall back to subscription billing.
-  setBillingResolver(undefined);
-  reviewTab = undefined;
   active = workflow;
   loaded = undefined;
   const slot = providerSlot[PROVIDERS_SLOT];
@@ -154,26 +83,24 @@ function stamp(file: string): string {
  * files are invalid; the previous good config is kept so a later fix applies without a restart.
  */
 function refreshConfig(root: string): { config: WorkflowConfig; changed: boolean } {
-  // A /build worktree reads the main checkout's project config, never the copy a ticket could edit.
-  const project = mainCheckoutOf(root);
   // Every candidate (.yaml and .yml) is stamped, so adding, removing, or editing whichever file is used reloads.
-  const key = configPaths(project).watch.map(stamp).join("|");
+  const key = configPaths(root).watch.map(stamp).join("|");
   if (loaded && loaded.root === root && loaded.key === key) return { config: loaded.config, changed: false };
-  const config = loadConfig(project);
+  const config = loadConfig(root);
   const changed = !!loaded && loaded.root === root;
   loaded = { root, key, config };
   return { config, changed };
 }
 
-/** Registers Foundry, Vercel, and local chat models with Pi, once per distinct provider/tier configuration. */
+/** Registers the `local` section with Pi as provider "local", once per distinct `local` configuration. */
 function syncProviders(config: WorkflowConfig): void {
   const slot = providerSlot[PROVIDERS_SLOT];
   if (!slot) return;
-  const signature = JSON.stringify([config.providers, config.tiers]);
+  const signature = JSON.stringify(config.local ?? null);
   if (signature === slot.signature) return;
   slot.signature = signature;
   const errors: string[] = [];
-  registerChatProviders({ registerProvider: slot.register }, config, { vercel: runtime?.vercel }, process.env, errors);
+  registerLocalProvider({ registerProvider: slot.register }, config.local, errors);
   // Each provider is tried on its own; what Pi refused is reported, never swallowed.
   if (errors.length > 0) throw new Error(errors.join("; "));
 }
@@ -188,7 +115,7 @@ const deferredNotices: string[] = [];
 function problemNotice(error: unknown): string {
   if (error instanceof ConfigFileError) {
     const reason = error.reason.split(homedir()).join("~");
-    return `${displayPath(error.file)} was ignored; built-in tiers are in use, and chef commands stay stopped until it is fixed. ${reason}`;
+    return `${displayPath(error.file)} was ignored; built-in defaults are in use, and chef commands stay stopped until it is fixed. ${reason}`;
   }
   const text = asResult(error).text;
   return error instanceof WorkflowError ? `Chef config problem: ${text}` : `Chef could not register its models with Pi: ${text}`;
@@ -203,12 +130,6 @@ function tell(ctx: ExtensionContext | undefined, text: string): void {
   }
 }
 
-/** Prices follow the credential Pi holds: API-key rows while a provider is on an API key. */
-function useBilling(next: ProviderRuntime): void {
-  const probe = next.auth as Partial<Pick<FileAuthProbe, "billing">>;
-  setBillingResolver(typeof probe.billing === "function" ? (provider) => probe.billing!(provider) : undefined);
-}
-
 /**
  * One Workflow per project root. Later commands only rebind session/UI hooks, and a changed config file is
  * applied to the existing instance. Throws when the config is invalid.
@@ -218,13 +139,9 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
   if (!active || root !== cwd) {
     active?.dispose();
     cwd = root;
-    runtime = createRuntime(config, root);
-    useBilling(runtime);
-    active = new Workflow({ cwd: root, config, auth: runtime.auth });
+    active = new Workflow({ cwd: root, config });
   } else if (changed) {
-    runtime = createRuntime(config, root);
-    useBilling(runtime);
-    active.reconfigure(config, { auth: runtime.auth });
+    active.reconfigure(config);
     try {
       syncProviders(config);
     } catch (error) {
@@ -233,25 +150,20 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
   }
   if (ctx) {
     const registry = (ctx as { modelRegistry?: PiRegistryLike }).modelRegistry;
-    // A replacement session's ctx brings its own sendUserMessage; the captured pi is stale after a replacement.
     const send = typeof ctx.sendUserMessage === "function" ? ctx.sendUserMessage.bind(ctx) : piRef && typeof piRef.sendUserMessage === "function" ? piRef.sendUserMessage.bind(piRef) : undefined;
-    const apiKeyFallback = (provider: string) => active!.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
-    const plainChat = registry ? createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(active!.config, provider, model)) : undefined;
+    const plainChat = registry ? createRegistryChat(registry) : undefined;
     active.bind({
       registry: registry as unknown as UsableRegistry | undefined,
       chat: plainChat,
-      advisorChat: advisorChatFor(registry, apiKeyFallback, ctx.cwd),
-      reviewChat: reviewChatFor(active, registry, ctx.cwd, plainChat),
       // Routes and planning stages redraw the one status line; its text is derived from the task, not passed in.
       status: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
+      herdr: herdrClient(),
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
       report: (markdown) => showPlanMessage(ctx, markdown, "chef-report"),
-      // The live ctx's widget slot above the editor; a replaced session's ctx is swapped out by the next bind.
-      indicatorSink: ctx.hasUI && typeof ctx.ui.setWidget === "function" ? { owner: ctx, render: (line) => ctx.ui.setWidget("chef-progress", line === undefined ? undefined : [line]) } : undefined,
       // Commands run while Pi is idle, so sendMessage shows the plan at once; there is no popup.
       review: ctx.hasUI && typeof ctx.ui.select === "function" ? (input) => presentForDecision(ctx, input, (markdown) => showPlanMessage(ctx, markdown, "chef-report")) : undefined,
       edit: ctx.hasUI && typeof ctx.ui.editor === "function" ? (title, prefill) => ctx.ui.editor(title, prefill) : undefined,
@@ -262,21 +174,11 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
 }
 
 type CommandContext = ExtensionContext & {
-    newSession: (options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>;
-    switchSession?: (sessionPath: string, options?: { withSession?: (next: CommandContext) => Promise<void> }) => Promise<{ cancelled: boolean }>;
     compact?: (options?: { customInstructions?: string }) => void;
     sendUserMessage?: (text: string) => Promise<void> | void;
-    waitForIdle?: () => Promise<void>;
     sendMessage?: (message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }) => Promise<void> | void;
   };
 
-/**
- * The context a command must use once it has replaced the session (Pi invalidates the old ctx and pi then).
- * Set from `withSession` and read by the command handler after `run` returns.
- */
-let replacementCtx: CommandContext | undefined;
-
-/** Posts a plan as a displayed message in the chat. Uses the replacement ctx's sendMessage, else the extension's. */
 /**
  * Redraws the one persistent `chef` status line (task · state and next step · running model · task spend · today's
  * spend), with today's spend alone when no task is open. Runs after commands, routes and planning stages, and after
@@ -291,6 +193,7 @@ function refreshStatus(ctx: ExtensionContext): void {
   }
 }
 
+/** Posts a plan as a displayed message in the chat. Uses the ctx's sendMessage, else the extension's. */
 function showPlanMessage(ctx: CommandContext, text: string, customType = "chef-plan"): void {
   const message = { customType, content: text, display: true };
   try {
@@ -302,177 +205,19 @@ function showPlanMessage(ctx: CommandContext, text: string, customType = "chef-p
 }
 
 /**
- * The model /build wants a fresh session to start on (Pi starts it on the default model). Kept on globalThis because the
- * new session may load a fresh copy of this module.
- */
-const RESTORE_MODEL = Symbol.for("pi-chef.restore-model");
-type ModelRef = { provider: string; id: string; thinking?: ThinkingLevel };
-
-/**
- * Resolves when the model restore started by this session's `session_start` has finished (the driver waits for it before
- * sending to a fresh /build session). On globalThis for the same reason as RESTORE_MODEL.
- */
-const RESTORE_DONE = Symbol.for("pi-chef.restore-done");
-/**
- * `setModel` of the newest extension instance, refreshed by every `session_start`. A command's own `pi` and ctx are dead
- * after /build opens a session, and the replacement ctx has no setModel (only `pi` has), so /build puts the user's model
- * back through this, which always belongs to the live session.
- */
-const SET_MODEL = Symbol.for("pi-chef.set-model");
-/** The live session's `pi.setThinkingLevel`, set by `session_start` like SET_MODEL: /build's finish() puts the user's level back with it. */
-const SET_THINKING = Symbol.for("pi-chef.set-thinking");
-/** The last assistant text and abort flag of the run /build is waiting on, filled by the message_end and agent_settled handlers. */
-const TURN = Symbol.for("pi-chef.turn");
-/** What message_end fills in while /build waits on a ticket's turn; `onAssistant` counts the turn against its budget. */
-type TurnSlot = { lastText: string; aborted: boolean; onAssistant?: () => void };
-/**
- * The cwd of the last session this extension's `session_start` saw. The driver clears it before opening or switching a
- * session: still unset in `withSession` means Pi did not load pi-chef there, so nothing switched the model either.
- */
-const STARTED = Symbol.for("pi-chef.session-started");
-const restoreSlot = globalThis as { [RESTORE_MODEL]?: ModelRef; [RESTORE_DONE]?: Promise<void>; [SET_MODEL]?: (model: never) => Promise<boolean>; [SET_THINKING]?: (level: ThinkingLevel) => void; [TURN]?: TurnSlot; [STARTED]?: string };
-
-/**
- * Warns when the local server runs `model` with a different context window than its tiers.local entry tells Pi
+ * Warns when the local server runs `model` with a different context window than its `local.models` entry tells Pi
  * (`probeLocalContext`). Never blocks or throws: the server may not say, and the ticket starts either way.
  */
 export async function warnLocalContext(config: WorkflowConfig, model: string, ctx: Pick<ExtensionContext, "hasUI" | "ui">, fetchImpl?: typeof fetch): Promise<void> {
   try {
-    const baseUrl = config.providers.local?.baseUrl;
+    const baseUrl = config.local?.baseUrl;
     if (!baseUrl) return;
-    const entry = tierCandidates(config, "local").find((candidate) => candidate.provider === "local" && candidate.model === model);
+    const entry = config.local?.models.find((candidate) => candidate.id === model);
     const warning = contextMismatch(model, entry?.contextWindow, await probeLocalContext(baseUrl, model, { fetchImpl }));
     if (warning && ctx.hasUI) ctx.ui.notify(warning, "warning");
   } catch {
     /* best effort */
   }
-}
-
-/** Why a new session in `dir` has no pi-chef, and how to give it one. */
-function notLoadedIn(dir: string): string {
-  return `pi-chef is not loaded in ${dir}, so /build cannot run tickets there. Pi loads project packages from ${path.join(dir, ".pi", "settings.json")}; install pi-chef for every project (\`pi install git:github.com/pkeenan87/pi-chef\`), or check that the folder is trusted, then /build again.`;
-}
-
-/**
- * Re-selects the model the replaced session was using, when the new session started on a different one, and then the
- * ticket's thinking level (`tiers.*[].thinking`) when it has one.
- */
-function restoreModel(pi: Partial<Pick<ExtensionAPI, "setModel" | "setThinkingLevel">>, ctx: ExtensionContext): Promise<void> | undefined {
-  const wanted = restoreSlot[RESTORE_MODEL];
-  delete restoreSlot[RESTORE_MODEL];
-  if (!wanted) return undefined;
-  const think = () => applyThinking(pi, ctx, wanted.thinking);
-  const current = (ctx as { model?: ModelRef }).model;
-  if (current?.provider === wanted.provider && current.id === wanted.id) return void think();
-  const startedOn = current ? `${current.provider}/${current.id}` : "the default model";
-  const warn = () => {
-    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${startedOn}. Run /model ${wanted.provider}/${wanted.id} to switch back.`, "warning");
-  };
-  // An empty or unknown id has nothing to switch back to: say what was wanted instead of a broken /model command.
-  const unknown = () => {
-    if (ctx.hasUI) ctx.ui.notify(`The new session started on ${startedOn}; the model wanted was ${wanted.provider}/${wanted.id || "(no model id)"}, which Pi does not know. Check the tier config.`, "warning");
-  };
-  const model = wanted.id ? ctx.modelRegistry?.find(wanted.provider, wanted.id) : undefined;
-  if (!model) return void unknown();
-  if (typeof pi.setModel !== "function") return void warn();
-  return pi.setModel(model as never).then((ok) => (ok ? think() : warn()), warn);
-}
-
-/** Sets Pi's thinking level, which Pi clamps to what the model accepts. Never throws: a failure only warns. */
-function applyThinking(pi: Partial<Pick<ExtensionAPI, "setThinkingLevel">>, ctx: ExtensionContext, level: ThinkingLevel | undefined): void {
-  if (!level) return;
-  try {
-    if (typeof pi.setThinkingLevel !== "function") throw new Error("this Pi has no setThinkingLevel");
-    pi.setThinkingLevel(level as never);
-  } catch (error) {
-    if (ctx.hasUI) ctx.ui.notify(`Could not set the thinking level to ${level}: ${redact(error instanceof Error ? error.message : String(error))}`, "warning");
-  }
-}
-
-/**
- * Puts the session on `session.model` when pinning is on and the session started on another model. Not used while a
- * /build model is pending (that slot wins). One warning when the model is unknown or Pi refuses the switch.
- */
-function pinSessionModel(pi: Partial<Pick<ExtensionAPI, "setModel">>, ctx: ExtensionContext): Promise<void> | undefined {
-  const session = (active ?? tryWorkflowFor(ctx.cwd))?.config.session ?? DEFAULT_SESSION;
-  const wanted = session.pin ? parseModelRef(session.model) : undefined;
-  if (!wanted) return undefined;
-  const current = (ctx as { model?: ModelRef }).model;
-  if (current?.provider === wanted.provider && current.id === wanted.id) return undefined;
-  const warn = () => {
-    if (ctx.hasUI) ctx.ui.notify(`Could not switch to ${session.model}. Run /model ${session.model}, or set session.pin: false to keep your own model.`, "warning");
-  };
-  const model = ctx.modelRegistry?.find(wanted.provider, wanted.id);
-  if (!model || typeof pi.setModel !== "function") return void warn();
-  return pi.setModel(model as never).then((ok) => (ok ? undefined : warn()), warn);
-}
-
-/** Set when the soft-budget notice has been shown; reset by `session_start`. */
-let softBudgetShown = false;
-
-/**
- * Pi's `session_before_compact` hook: the summary comes from `session.compactionTier` (Haiku by default) instead of the
- * session model. Returns undefined, and so lets Pi compact as usual, on any problem or a hard budget. Never throws.
- */
-async function compactWithCheapTier(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<SessionBeforeCompactResult | undefined> {
-  try {
-    const workflow = active ?? tryWorkflowFor(cwd);
-    const registry = ctx.modelRegistry as unknown as PiRegistryLike | undefined;
-    if (!workflow || !registry || event.signal?.aborted) return undefined;
-    const { preparation } = event;
-    const messages = preparation.isSplitTurn ? [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages] : preparation.messagesToSummarize;
-    const conversation = serializeConversation(convertToLlm(messages));
-    if (!conversation.trim()) return undefined;
-    const apiKeyFallback = (provider: string) => workflow.config.providers[provider as keyof WorkflowConfig["providers"]]?.apiKeyFallback === true;
-    const result = await workflow.summarizeForCompaction(createRegistryChat(registry, apiKeyFallback, (provider, model) => piModelId(workflow.config, provider, model)), {
-      conversation,
-      previousSummary: preparation.previousSummary,
-      customInstructions: event.customInstructions,
-      signal: event.signal,
-    });
-    if (!result) return undefined;
-    const { input, output, cacheRead, cacheWrite } = result.usage;
-    const [i, o, r, w] = [input ?? 0, output ?? 0, cacheRead ?? 0, cacheWrite ?? 0];
-    const cost = result.record.actualUsd;
-    // `usage` is optional in Pi's CompactionResult, and its `cost` cannot say "unknown". Report usage only when the
-    // price is known; otherwise omit it rather than show $0. Our ledger keeps the null either way.
-    return {
-      compaction: {
-        summary: result.summary,
-        firstKeptEntryId: preparation.firstKeptEntryId,
-        tokensBefore: preparation.tokensBefore,
-        ...(cost === null ? {} : { usage: { input: i, output: o, cacheRead: r, cacheWrite: w, totalTokens: i + o + r + w, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } } }),
-      },
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Pi's `input` hook, the budget gate. A hard budget stops a prompt before it reaches the model; commands (`/cost`,
- * `/status`, ...) always pass, and so does input an extension sent itself (/build and /plan check the budget on their own).
- * A soft budget shows one notice per session.
- */
-function gateInput(event: InputEvent, ctx: ExtensionContext): InputEventResult {
-  const proceed = { action: "continue" as const };
-  try {
-    // A command is `/name` or `/plugin:name` as the first word; `/tmp/app.log shows an error` is a prompt.
-    if (event.source === "extension" || /^\/[\w-]+(:[\w-]+)?(\s|$)/.test(event.text.trimStart())) return proceed;
-    const workflow = active ?? tryWorkflowFor(cwd);
-    const status = workflow?.budgetStatus(workflow.activeTaskId());
-    if (status === "hard") {
-      if (ctx.hasUI) ctx.ui.notify("Task or daily budget is exhausted. Run /cost for details.", "warning");
-      return { action: "handled" };
-    }
-    if (status === "soft" && !softBudgetShown) {
-      softBudgetShown = true;
-      if (ctx.hasUI) ctx.ui.notify("Budget warning: spend is near the task or daily limit. Run /cost for details.", "warning");
-    }
-  } catch {
-    /* a gate that cannot read the budget must not stop the user typing */
-  }
-  return proceed;
 }
 
 /**
@@ -525,299 +270,62 @@ function restoreToolsBeforePlan(ctx: ExtensionContext): void {
 }
 
 /**
- * The session driver for /build, the only code that opens Pi sessions for tickets. Each chunk gets a fresh session on
- * its routed model: `newSession` from the command ctx (never from a lifecycle handler), then `sendUserMessage` and
- * `waitForIdle` on the replacement ctx handed to `withSession`. After each replacement the old ctx and `pi` are dead,
- * so `live` always holds the newest ctx and the workflow is re-resolved from it on every call.
+ * The driver for /build, the only code that opens ticket tabs. Every ticket attempt runs in its own herdr tab beside the
+ * user's session, which is never replaced, so `ctx` stays valid for the whole build. A Pi model runs as `pi -ne -e
+ * ticket-mode.ts` in the tab (`runner/pi-ticket.ts`), an `agent:<name>` as that coding agent (`runner/agent-ticket.ts`).
  */
-function buildHost(ctx: CommandContext): { getWorkflow: () => Workflow; driver: BuildDriver } {
-  let live: CommandContext = ctx;
-  // Plain data captured before the first replacement: the model the user was on, and the session to go back to.
-  const original = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
-  const originalThinking = (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel;
-  // Local models whose served context window was compared with tiers.local in this build (once each).
+function buildHost(ctx: CommandContext, client: HerdrClient = herdrClient()): { getWorkflow: () => Workflow; driver: BuildDriver } {
+  const live: CommandContext = ctx;
+  // Local models whose served context window was compared with its local.models entry in this build (once each).
   const contextChecked = new Set<string>();
-  let thinkingChanged = false;
-  let startFile: string | undefined;
-  try {
-    startFile = ctx.sessionManager.getSessionFile();
-  } catch {
-    /* an in-memory session: nothing to switch back to */
-  }
   const getWorkflow = () => workflowFor(live.cwd, live);
-  /** The model runtime for ticket subagents, or undefined to replace the session per ticket (`isolation.runner`). */
-  const subagentRuntime = (): unknown => {
-    try {
-      if (getWorkflow().config.isolation.runner === "session") return undefined;
-    } catch {
-      return undefined;
-    }
-    return runtimeOf(live.modelRegistry);
-  };
-  /**
-   * Runs one ticket attempt in a ticket subagent (`subagent/ticket-agent.ts`) in the build's checkout. Its messages are
-   * ledgered like the session's own turns; Pi's own calls in it (compaction) are swept from its entries at the end.
-   * Never throws: any failure is a `stopped`, which `runBuild` handles as before.
-   */
-  const runInSubagent = async (runtime: unknown, model: ModelRef, run: (session: ChunkSession) => Promise<void>, ticketId: string, limits: ChunkLimits | undefined): Promise<void | { stopped: string }> => {
-    const since = getWorkflow().now();
-    let agent: TicketAgent | undefined;
-    const label = `Build · ticket ${ticketId} · ${model.provider}/${model.id}`;
-    try {
-      const piModel = live.modelRegistry?.find(model.provider, model.id);
-      if (!piModel) return { stopped: `Ticket ${ticketId} cannot start: Pi does not know ${model.provider}/${model.id}. Check the tier config, then /build again.` };
-      agent = await openTicketAgent({
-        sdk: piChildSdk(runtime),
-        cwd: live.cwd,
-        model: piModel,
-        thinking: model.thinking,
-        limits,
-        onMessage: (message) => {
-          const call = usageOfMessage(message);
-          if (call) getWorkflow().observeUsage(call);
-          refreshStatus(live);
-        },
-        onActivity: (text) => getWorkflow().activity("stage", text),
-        watchdog: { every: getWorkflow().config.advisors.watchdogEvery, look: (turn) => getWorkflow().watchTicket(ticketId, turn) },
-      });
-      const opened = agent;
-      await run({
-        async send(text) {
-          getWorkflow().activity("start", label);
-          try {
-            return await opened.send(text);
-          } finally {
-            getWorkflow().activity("stop");
-          }
-        },
-      });
-      return undefined;
-    } catch (error) {
-      return { stopped: `Ticket ${ticketId} stopped: ${redact(error instanceof Error && error.message ? error.message : String(error))}. /build resumes it.` };
-    } finally {
-      try {
-        const swept = agent?.entries();
-        if (swept) getWorkflow().recordPiUsage({ sessionId: swept.sessionId, entries: swept.entries as never, since, model: { provider: model.provider, id: model.id } });
-      } catch {
-        /* nothing more to ledger */
-      }
-      agent?.dispose();
-    }
-  };
+  const needsHerdr = (problem: string) => `${NEEDS_HERDR} (${redact(problem)})`;
   const driver: BuildDriver = {
-    async fresh(model, run, ticketId, limits) {
-      // Preflight: opening a session on a model Pi does not know, or has no login for, cannot be undone cleanly.
-      // Routing applies the same test (registryProblem) to every candidate, so this only trips when Pi changed since.
-      let preflight: string | undefined;
-      try {
-        const config = getWorkflow().config;
-        const name = model.provider === "foundry" ? foundryModelOf(config, model.id) : model.id;
-        preflight = live.modelRegistry ? registryProblem(config, live.modelRegistry as unknown as UsableRegistry, model.provider, name) : `model ${model.id} cannot be checked: this Pi session has no model registry`;
-        if (preflight) preflight = `${modelLabel(config, model.provider, name)}: ${preflight}`;
-      } catch (error) {
-        preflight = `${model.provider}/${model.id} could not be checked: ${redact(error instanceof Error ? error.message : String(error))}`;
-      }
-      if (preflight) {
-        return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the tier config or sign in, then /build again.` };
-      }
-      if (model.provider === "local" && !contextChecked.has(model.id)) {
-        contextChecked.add(model.id);
-        await warnLocalContext(getWorkflow().config, model.id, live);
-      }
-      // The herdr runner: the ticket is its own pi process in a tab. Outside herdr (or without hc) it falls back, with a notice.
-      let herdrProblem: string | undefined;
-      try {
-        const isolation = getWorkflow().config.isolation;
-        if (isolation.runner === "herdr") {
-          const client = (herdrClientFactory ?? ((command: string) => createHerdrClient({ command })))(expandHome(isolation.herdrCommand));
-          const self = await client.self();
-          if ("problem" in self) herdrProblem = self.problem;
-          else {
-                        const workflow = getWorkflow();
-            return await runInHerdr(
-              {
-                client,
-                space: self.space,
-                cwd: live.cwd,
-                ticketId,
-                model,
-                modelLabel: modelLabel(workflow.config, model.provider, model.provider === "foundry" ? foundryModelOf(workflow.config, model.id) : model.id),
-                limits,
-                ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
-                host: {
-                  sessionsRoot: () => getWorkflow().ticketSessionsRoot(),
-                  taskName: () => getWorkflow().ticketSessionsName(),
-                  ledger: (files, id, launched) => {
-                    getWorkflow().ledgerChildSession(files, { ticketId: id, model: launched });
-                    refreshStatus(live);
-                  },
-                  sweep: (id, launched) => void getWorkflow().sweepTicketSessions(id, { model: launched }),
-                  progress: (text) => getWorkflow().progress(text),
-                  activity: (action, text) => getWorkflow().activity(action, text),
-                },
-              },
-              run,
-            );
-          }
-        }
-      } catch (error) {
-        herdrProblem = redact(error instanceof Error ? error.message : String(error));
-      }
-      // The ticket subagent: a session beside this one, so nothing below (session replacement and its slots) applies.
-      const childRuntime = subagentRuntime();
-      if (herdrProblem) getWorkflow().progress(`herdr not available: ${herdrProblem}; running the ticket in ${childRuntime ? "a subagent" : "this session"}`);
-      if (childRuntime) return runInSubagent(childRuntime, model, run, ticketId, limits);
-      restoreSlot[RESTORE_MODEL] = { provider: model.provider, id: model.id, ...(model.thinking ? { thinking: model.thinking } : {}) };
-      if (model.thinking) thinkingChanged = true;
-      delete restoreSlot[STARTED];
-      let opened = false;
-      // Pi's newSession rethrows an error from withSession and the app dies with "Failed to create session", so nothing
-      // is thrown in there: the error is kept and turned into a stop once newSession has returned.
-      let failure: string | undefined;
-      const stash = (error: unknown) => {
-        failure ??= redact(error instanceof Error && error.message ? error.message : String(error));
-      };
-      try {
-        const result = await live.newSession({
-          withSession: async (next) => {
-            try {
-              opened = true;
-              replacementCtx = next;
-              live = next;
-              try {
-                workflowFor(next.cwd, next);
-              } catch {
-                /* a config problem is reported by the next command */
-              }
-              // Without pi-chef in the new session nothing set the model; say that, not "wrong model".
-              if (restoreSlot[STARTED] === undefined) throw new Error(notLoadedIn(next.cwd));
-              // session_start starts the model switch without awaiting it; wait here so the ticket never runs on the wrong model.
-              await restoreSlot[RESTORE_DONE];
-              delete restoreSlot[RESTORE_DONE];
-              const on = (next as { model?: ModelRef }).model;
-              if (on && (on.provider !== model.provider || on.id !== model.id)) {
-                throw new Error(`The new session is on ${on.provider}/${on.id}, not the routed ${model.provider}/${model.id}, so the ticket was not started. /build resumes it.`);
-              }
-              if (typeof next.sendUserMessage !== "function") throw new Error("This Pi session cannot send messages, so /build cannot run.");
-              // The turn budget covers the whole attempt, so the count survives the check and review retry turns.
-              const budget = turnBudget(limits, (text) => next.sendMessage?.({ customType: "chef-turn-limit", content: text, display: true }, { deliverAs: "steer" }), () => next.abort());
-              const session: ChunkSession = {
-                async send(text) {
-                  restoreSlot[TURN] = { lastText: "", aborted: false, onAssistant: budget.count };
-                  await next.sendUserMessage!(text);
-                  await next.waitForIdle?.();
-                  const turn = restoreSlot[TURN] ?? { lastText: "", aborted: false };
-                  delete restoreSlot[TURN];
-                  return { lastText: turn.lastText, aborted: turn.aborted, ...(budget.stopped() ? { turnLimit: true } : {}) };
-                },
-              };
-              await run(session);
-            } catch (error) {
-              stash(error);
-            }
-          },
-        });
-        if (!failure && (result.cancelled || !opened)) stash("Pi did not open a new session for the next ticket (cancelled), so /build stopped. Run /build to resume.");
-      } catch (error) {
-        stash(error);
-      } finally {
-        delete restoreSlot[RESTORE_MODEL];
-        delete restoreSlot[RESTORE_DONE];
-        delete restoreSlot[TURN];
-      }
-      return failure ? { stopped: failure } : undefined;
+    // Before the build touches git: /build outside herdr (or without `hc`) starts no ticket and makes no branch.
+    async preflight() {
+      const where = await herdrSpace(client);
+      return "problem" in where ? needsHerdr(where.problem) : undefined;
     },
-    async finish() {
-      // A ticket's thinking level does not outlive the build: the user's level comes back (Pi clamps it to the model).
-      if (thinkingChanged && originalThinking) {
+    async fresh(model, run, ticketId, limits, attempt = 1) {
+      // Preflight: a Pi child on a model Pi does not know, or has no login for, cannot be undone cleanly. Routing applies the
+      // same test (registryProblem) to every candidate, so this only trips when Pi changed since. An agent is not a Pi model.
+      if (!model.agent) {
+        let preflight: string | undefined;
         try {
-          restoreSlot[SET_THINKING]?.(originalThinking);
-        } catch {
-          /* the level stays; Shift+Tab changes it */
+          preflight = live.modelRegistry ? registryProblem(live.modelRegistry as unknown as UsableRegistry, model.provider, model.id) : `model ${model.id} cannot be checked: this Pi session has no model registry`;
+          if (preflight) preflight = `${model.provider}/${model.id}: ${preflight}`;
+        } catch (error) {
+          preflight = `${model.provider}/${model.id} could not be checked: ${redact(error instanceof Error ? error.message : String(error))}`;
+        }
+        if (preflight) {
+          return { stopped: `Ticket ${ticketId} cannot start on ${preflight}. Fix the models config or sign in, then /build again.` };
+        }
+        if (model.provider === "local" && !contextChecked.has(model.id)) {
+          contextChecked.add(model.id);
+          await warnLocalContext(getWorkflow().config, model.id, live);
         }
       }
-      // With pinning on the session belongs on session.model; otherwise it goes back to the model the user was on.
-      let target = original;
-      try {
-        const session = getWorkflow().config.session;
-        if (session.pin) target = parseModelRef(session.model) ?? original;
-      } catch {
-        /* an unreadable config: put the user's model back */
-      }
-      if (!target) return;
-      const now = (live as { model?: ModelRef }).model;
-      if (now?.provider === target.provider && now.id === target.id) return;
-      const model = live.modelRegistry?.find(target.provider, target.id);
-      const set = restoreSlot[SET_MODEL];
-      const ok = model && set ? await set(model as never).catch(() => false) : false;
-      if (!ok && live.hasUI) live.ui.notify(`Run /model ${target.provider}/${target.id} to switch back to your model.`, "warning");
+      const where = await herdrSpace(client);
+      if ("problem" in where) return { stopped: needsHerdr(where.problem) };
+      const workflow = getWorkflow();
+      return runTicket(
+        {
+          client,
+          space: where.space,
+          cwd: live.cwd,
+          ticketId,
+          attempt,
+          model,
+          limits,
+          config: workflow.config,
+          ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
+          host: ticketHost(getWorkflow, () => refreshStatus(live)),
+        },
+        run,
+      );
     },
   };
-  // Pi gives a new session the current session's directory, so moving into a worktree is a switch to a session file
-  // whose header names it. Without switchSession a new build works in this checkout.
-  if (typeof ctx.switchSession === "function") {
-    driver.enter = async (dir) => {
-      let failure: string | undefined;
-      const stash = (error: unknown) => {
-        failure ??= redact(error instanceof Error && error.message ? error.message : String(error));
-      };
-      let opened = false;
-      try {
-        if (typeof live.switchSession !== "function") throw new Error("This Pi session cannot switch sessions, so it cannot move into the worktree.");
-        const file = worktreeSessionFile(dir);
-        delete restoreSlot[STARTED];
-        const result = await live.switchSession(file, {
-          withSession: async (next) => {
-            try {
-              opened = true;
-              replacementCtx = next;
-              live = next;
-              try {
-                workflowFor(next.cwd, next);
-              } catch {
-                /* a config problem is reported by the next command */
-              }
-              if (restoreSlot[STARTED] === undefined) throw new Error(notLoadedIn(dir));
-              await restoreSlot[RESTORE_DONE];
-              delete restoreSlot[RESTORE_DONE];
-              if (!samePath(next.cwd, dir)) throw new Error(`Pi opened the session in ${next.cwd}, not in the worktree ${dir}, so no ticket was started.`);
-            } catch (error) {
-              stash(error);
-            }
-          },
-        });
-        if (!failure && (result.cancelled || !opened)) stash(`Pi did not move into the worktree ${dir} (cancelled), so /build stopped.`);
-      } catch (error) {
-        stash(error);
-      }
-      // A session in the worktree that /build cannot use (no pi-chef, wrong folder) goes back to where /build started.
-      if (failure && opened && startFile && typeof live.switchSession === "function") {
-        try {
-          await live.switchSession(startFile, {
-            withSession: async (next) => {
-              replacementCtx = next;
-              live = next;
-            },
-          });
-          failure = `${failure} Pi is back in ${live.cwd}.`;
-        } catch {
-          /* stays in the worktree; the message says why */
-        }
-      }
-      return failure ? { stopped: failure } : undefined;
-    };
-  }
   return { getWorkflow, driver };
-}
-
-/** Writes a session file whose header puts Pi in `dir`, with Pi's own header and file name. Pi writes a new session only once it has a turn, so the header goes first. */
-function worktreeSessionFile(dir: string): string {
-  const manager = SessionManager.create(dir);
-  const file = manager.getSessionFile();
-  const header = manager.getHeader();
-  if (!file || !header) throw new Error(`Pi could not name a session for ${dir}.`);
-  writeFileSync(file, `${JSON.stringify(header)}\n`, { flag: "wx" });
-  return file;
 }
 
 /** Since when this extension has watched each session: Pi's own calls from before then are not this run's to ledger. */
@@ -851,47 +359,33 @@ export function registerWorkflow(pi: ExtensionAPI): void {
           return;
         }
         let result: CommandResult;
-        replacementCtx = undefined;
-        // /cost and /status should see every call Pi made on its own so far.
+        // /cost should see every call Pi made on its own so far.
         sweepPiUsage(ctx);
         try {
           const workflow = workflowFor(ctx.cwd, ctx as unknown as CommandContext);
           if (spec.drive) {
             const host = buildHost(ctx as unknown as CommandContext);
             result = await spec.drive(host.getWorkflow, host.driver);
-          } else result = await spec.run(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
+          } else result = await spec.run!(workflow, args, ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : async () => false);
         } catch (error) {
           // An invalid config must reach the user as a failed command, not as an exception inside Pi.
           result = asResult(error);
         }
-        // After a session replacement (for example /build opening a session per ticket) the captured ctx and pi throw on
-        // use. The new session's session_start already synced the plan tools, so only the result is shown, through
-        // the replacement ctx.
-        const live: ExtensionContext = replacementCtx ?? ctx;
-        const replaced = !!replacementCtx;
-        replacementCtx = undefined;
         try {
-          if (!replaced) syncPlanTools(pi);
-          if (live.hasUI) {
-            refreshStatus(live);
-            live.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
+          syncPlanTools(pi);
+          if (ctx.hasUI) {
+            refreshStatus(ctx);
+            ctx.ui.notify(result.text.slice(0, 1500), result.ok ? "info" : "warning");
           }
         } catch {
-          /* the session was replaced again or closed; the result is in the task's event log */
+          /* the session was closed; the result is in the task's event log */
         }
       },
     });
   }
-  pi.registerCommand("chef", {
-    description: "List the chef commands.",
-    handler: async (_args, ctx) => {
-      if (ctx.hasUI) ctx.ui.notify(helpText(), "info");
-    },
-  });
   piRef = pi;
   registerWith(pi);
   pi.on("session_start", (_event, ctx) => {
-    restoreSlot[STARTED] = ctx.cwd;
     // A new session may start with an empty provider registry, so register again, with this session's pi.
     registerWith(pi);
     try {
@@ -920,27 +414,16 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     toolsBeforePlan = undefined;
     restoreToolsBeforePlan(ctx);
     syncPlanTools(pi);
-    // A /plan resumed after a restart, or a /build ticket's new session, shows where the task stands.
+    // A /plan resumed after a restart shows where the task stands.
     refreshStatus(ctx);
-    softBudgetShown = false;
     try {
-      // Foundry, Vercel, and local models must be in Pi's registry before anything can select them.
+      // The local models must be in Pi's registry before anything can select them.
       syncProviders(refreshConfig(ctx.cwd).config);
     } catch (error) {
       // A bad config or a refused registration must not stop the session from starting, but it is always shown.
       show(problemNotice(error));
     }
-    restoreSlot[SET_MODEL] = typeof pi.setModel === "function" ? (model) => pi.setModel(model) : undefined;
-    restoreSlot[SET_THINKING] = typeof pi.setThinkingLevel === "function" ? (level) => pi.setThinkingLevel(level as never) : undefined;
-    try {
-      // A model /build routed for its ticket wins; otherwise the session goes onto session.model (when pinned).
-      restoreSlot[RESTORE_DONE] = restoreSlot[RESTORE_MODEL] ? restoreModel(pi, ctx) : pinSessionModel(pi, ctx);
-    } catch {
-      /* the model stays as Pi chose it; /model switches it */
-    }
   });
-  pi.on("session_before_compact", (event, ctx) => compactWithCheapTier(event, ctx));
-  pi.on("input", (event, ctx) => gateInput(event, ctx));
   pi.on("session_compact", (_event, ctx) => {
     sweepPiUsage(ctx);
     refreshStatus(ctx);
@@ -967,10 +450,6 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     if (isToolCallEventType("bash", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command. It stays blocked until a person runs an approved command." };
     }
-    if (isToolCallEventType("bash", event) && active?.buildingTicket()) {
-      const reason = buildBashBlock(event.input.command);
-      if (reason) return { block: true, reason };
-    }
     if (isToolCallEventType("powershell", event) && isDeniedCommand(event.input.command)) {
       return { block: true, reason: "Blocked destructive command." };
     }
@@ -985,7 +464,6 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   pi.on("agent_settled", async (event, ctx) => {
     sweepPiUsage(ctx);
     refreshStatus(ctx);
-    if (event.aborted && restoreSlot[TURN]) restoreSlot[TURN].aborted = true;
     // plan_tickets saved a draft during this turn: post it as markdown now that Pi is idle, then ask. An aborted turn keeps
     // the flag, and /show-plan still offers the draft. Only this handler's live ctx is used; any failure is shown, never thrown.
     if (event.aborted || !ctx.hasUI || !active?.hasPendingPlan()) return;
@@ -998,13 +476,6 @@ export function registerWorkflow(pi: ExtensionAPI): void {
   });
   pi.on("message_end", (event, ctx) => {
     const message = event.message;
-    const turn = restoreSlot[TURN];
-    if (turn && message.role === "assistant") {
-      turn.onAssistant?.();
-      const text = Array.isArray(message.content) ? message.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
-      if (text.trim()) turn.lastText = text;
-      if ("stopReason" in message && message.stopReason === "aborted") turn.aborted = true;
-    }
     const call = usageOfMessage(message);
     if (!call) return;
     // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
@@ -1012,13 +483,6 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     // The footer's spend follows each turn, not just the next command.
     refreshStatus(ctx);
   });
-}
-
-/** Advisors as read-only Pi sessions in `cwd` (`advisors.tools`), when this Pi's model runtime can be reached. */
-function advisorChatFor(registry: PiRegistryLike | undefined, apiKeyFallback: (provider: string) => boolean, cwd: string): ChatFn | undefined {
-  const runtime = runtimeOf(registry);
-  if (!registry || !runtime) return undefined;
-  return createAgentChat({ sdk: piChildSdk(runtime), registry, cwd: () => cwd, apiKeyFallback, piModelId: (provider, model) => piModelId(active!.config, provider, model) });
 }
 
 /** The workflow for a project root, or undefined when its config is invalid. */
@@ -1052,7 +516,7 @@ export function registerExtensionTools(pi: Pick<ExtensionAPI, "registerTool">, o
 export default function extension(pi: ExtensionAPI): void {
   registerWorkflow(pi);
   registerExtensionTools(pi);
-  // Register Foundry, Vercel, and local models at load time too, so `--model` and `--list-models` resolve them
+  // Register the local models at load time too, so `--model` and `--list-models` resolve them
   // before any session starts. session_start registers them again with the session's cwd.
   try {
     syncProviders(refreshConfig(process.cwd()).config);

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderSpec } from "../src/orchestrator/interview.js";
-import { ticketDifficulty, type Difficulty, type Tier } from "../src/domain.js";
+import { ticketDifficulty, type Difficulty } from "../src/domain.js";
 import { ticketPrompt, TICKET_RULES } from "../src/orchestrator/prompts.js";
 import type { PlanReviewRequest } from "../src/orchestrator/types.js";
 import { parseTicketsMarkdown, renderTicketsMarkdown, validateTickets } from "../src/orchestrator/tickets.js";
@@ -94,14 +94,11 @@ describe("ticket difficulty", () => {
     expect(TICKET_RULES(150000)).toMatch(/low = mechanical or small and well specified; medium = typical feature work; high = cross-cutting/);
   });
 
-  it("maps a suggestedTier-only ticket to a difficulty and lets difficulty win", () => {
-    const of = (item: { difficulty?: Difficulty; suggestedTier?: string }) => ticketDifficulty(item);
-    expect(of({ suggestedTier: "deterministic" })).toBe("low");
-    expect(of({ suggestedTier: "cheap" })).toBe("low");
-    expect(of({ suggestedTier: "standard" })).toBe("medium");
-    expect(of({ suggestedTier: "premium" })).toBe("high");
+  it("reads a ticket's difficulty, medium when the planner left it out", () => {
+    const of = (item: { difficulty?: Difficulty }) => ticketDifficulty(item);
+    expect(of({ difficulty: "low" })).toBe("low");
+    expect(of({ difficulty: "high" })).toBe("high");
     expect(of({})).toBe("medium");
-    expect(of({ suggestedTier: "premium", difficulty: "low" })).toBe("low");
   });
 });
 
@@ -181,12 +178,12 @@ describe("/show-plan on a draft", () => {
     const { app } = await drafted();
     const headlessResult = await app.showPlan();
     expect(headlessResult.text).toContain("# Plan v1");
-    expect(headlessResult.text.startsWith("**Task retry-ingest-parser** · Draft v1 · waiting for approval (/show-plan)\n\n")).toBe(true);
+    expect(headlessResult.text.startsWith("**Task retry-ingest-parser** · plan draft, /show-plan\n\n")).toBe(true);
     const shown: string[] = [];
     app.bind({ show: (markdown) => void shown.push(markdown) });
     const result = await app.showPlan();
     expect(result.text).toContain("is shown above");
-    expect(shown[0]).toBe(`**Task retry-ingest-parser** · Draft v1 · waiting for approval (/show-plan)\n\n${readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")}`);
+    expect(shown[0]).toBe(`**Task retry-ingest-parser** · plan draft, /show-plan\n\n${readFileSync(path.join(app.store.taskDir(app.activeTaskId()!), "plan.md"), "utf8")}`);
   });
 });
 

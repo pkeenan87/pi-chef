@@ -8,3 +8,6 @@ process.env.HOME = home;
 // Git reads $XDG_CONFIG_HOME/git/config as well as ~/.gitconfig.
 process.env.XDG_CONFIG_HOME = path.join(home, ".config");
 process.env.USERPROFILE = home;
+// Tests run inside herdr for the people who write them: an unbound code path must fail closed, never open real tabs.
+delete process.env.HC_TERMINAL_ID;
+delete process.env.HC_SCOPE;

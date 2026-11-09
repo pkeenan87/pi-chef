@@ -1,24 +1,17 @@
-import { localProfile } from "../config.js";
-import { WorkflowError, type PlanAdvisorReview, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
-import { needsConfirmation } from "../router/policy.js";
+import { WorkflowError, type PlanDocument, type TaskState, type Ticket } from "../domain.js";
+import { isSecuritySensitive } from "./classification.js";
 import { active, iso, type WorkflowContext } from "./context.js";
 import { activePlanning, planningStatusText, SPEC_FILE } from "./interview.js";
 import { move } from "./machine.js";
 import { applyOverlap, assertGraph, forNewPlan, PLAN_FILE, renderPlanReview, ticketsTableLines } from "./plan.js";
-import { suggestAdvisor } from "./routing.js";
+import { contextTarget } from "./routing.js";
 import { projectFileSize, renderTicket, ticketFileName, ticketsToGroups, validateTickets, type TicketCheck } from "./tickets.js";
 
-/** Validates model- or person-written tickets against the config's context target and the files on disk. */
+/** Validates model- or person-written tickets against the context target of their difficulty's model and the files on disk. */
 export function checkTickets(ctx: WorkflowContext, input: unknown): TicketCheck {
-  // The stored task (no git: plan tools run mid-turn). A local-mode task gets the local target and rules; a hybrid one
-  // (localMode.difficulties) only for the tickets the local model builds.
-  const task = active(ctx);
-  const local = task?.localMode === true ? localProfile(ctx.config) : undefined;
-  const only = local ? task?.localDifficulties : undefined;
   return validateTickets(input, {
-    target: local && !only ? local.targetTokens : ctx.config.workers.ticketContextTokens,
+    target: (difficulty) => contextTarget(ctx.config, difficulty),
     fileSize: (file) => projectFileSize(ctx.cwd, file),
-    ...(local ? { local: { label: local.label, difficulties: only ?? local.difficulties, maxFiles: local.maxFiles, needChecks: ctx.config.checks.length === 0, ...(only ? { only, targetTokens: local.targetTokens } : {}) } } : {}),
   });
 }
 
@@ -41,7 +34,7 @@ export function draftVersion(task: TaskState): number {
 }
 
 /** The draft plan document for these tickets, built from the active planning task without saving anything. */
-function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: string, advisorReview?: PlanAdvisorReview): PlanDocument {
+function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: string): PlanDocument {
   const parsed = applyOverlap(ticketsToGroups(tickets));
   assertGraph(parsed.groups);
   const classification = task.classification;
@@ -54,11 +47,8 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
     acceptance: [...new Set([...ticketCriteria, "Configured checks pass with recorded exit codes", "Review reports no blocking findings"])],
     groups: parsed.groups,
     overlap: parsed.overlap,
-    securitySensitive: classification ? needsConfirmation(classification, ctx.config) : false,
+    securitySensitive: classification ? isSecuritySensitive(classification) || classification.risk === "high" : false,
     tickets,
-    ...(task.localMode ? { localMode: true } : {}),
-    ...(task.localMode && task.localDifficulties ? { localDifficulties: task.localDifficulties } : {}),
-    ...(advisorReview ? { advisorReview } : {}),
   };
 }
 
@@ -66,11 +56,11 @@ function draftFor(ctx: WorkflowContext, task: TaskState, tickets: Ticket[], at: 
  * Writes the ticket files, maps tickets to plan groups, and moves the task to AWAITING_PLAN_APPROVAL.
  * Plan approval is still required before /build.
  */
-export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], advisorReview?: PlanAdvisorReview, options: { present?: boolean } = {}): Promise<{ plan: PlanDocument; files: string[]; markdown: string; table: string }> {
+export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], options: { present?: boolean } = {}): Promise<{ plan: PlanDocument; files: string[]; markdown: string; table: string }> {
   requireTicketStage(ctx);
   const { task } = activePlanning(ctx)!;
   const at = iso(ctx);
-  const draft = draftFor(ctx, task, tickets, at, advisorReview);
+  const draft = draftFor(ctx, task, tickets, at);
   await ctx.store.update(task.taskId, "tickets drafted", (current) =>
     move({ ...current, ...forNewPlan(current, draft), plan: draft, planning: undefined, presentPlan: options.present ? { version: draft.version } : undefined, approvedVersion: undefined }, "AWAITING_PLAN_APPROVAL", at),
   );
@@ -78,9 +68,8 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
   const markdown = renderPlanReview(draft, ctx.store.readText(task.taskId, SPEC_FILE), ctx.config);
   ctx.store.writeText(task.taskId, "plan.json", JSON.stringify(draft, null, 2));
   ctx.store.writeText(task.taskId, PLAN_FILE, markdown);
-  if (draft.securitySensitive) suggestAdvisor(ctx, task.taskId, "security-sensitive plan");
   ctx.planStatus?.(planningStatusText(ctx) ?? `plan · ${tickets.length} tickets ready for review (/show-plan)`);
-  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config, task).join("\n") };
+  return { plan: draft, files, markdown, table: ticketsTableLines(tickets, ctx.config).join("\n") };
 }
 
 /**
@@ -90,7 +79,7 @@ export async function commitTickets(ctx: WorkflowContext, tickets: Ticket[], adv
 export async function redraftTickets(ctx: WorkflowContext, tickets: Ticket[]): Promise<PlanDocument> {
   const task = active(ctx);
   if (!task?.plan || task.phase !== "AWAITING_PLAN_APPROVAL") throw new WorkflowError("NO_DRAFT", "There is no draft waiting for approval.");
-  const draft = draftFor(ctx, task, tickets, iso(ctx), task.plan.advisorReview);
+  const draft = draftFor(ctx, task, tickets, iso(ctx));
   await ctx.store.update(task.taskId, "tickets edited", (current) => ({ ...current, ...forNewPlan(current, draft), plan: draft }));
   ctx.store.replaceTextDir(task.taskId, "tickets", Object.fromEntries(tickets.map((ticket) => [ticketFileName(ticket), renderTicket(ticket)])));
   ctx.store.writeText(task.taskId, "plan.json", JSON.stringify(draft, null, 2));

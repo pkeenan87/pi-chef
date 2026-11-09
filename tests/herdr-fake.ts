@@ -1,4 +1,3 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { HerdrError, type ExecResult, type HerdrClient, type HerdrExec, type RunOptions, type SelfResult, type WaitResult } from "../src/herdr/client.js";
 
 export interface FakeCall {
@@ -28,7 +27,7 @@ export function fakeHerdr(replies: Record<string, FakeReply[]> = {}): { exec: He
 export const ok = (json: unknown): ExecResult => ({ stdout: JSON.stringify(json), stderr: "", code: 0 });
 export const fail = (message: string, stderr = ""): ExecResult => ({ stdout: JSON.stringify({ error: { kind: "x", message } }), stderr, code: 1 });
 
-/** What a fake tab knows about the child it "runs", parsed from the `hc run` argv the runner built. */
+/** What a fake tab knows about the program it "runs", parsed from the `hc run` argv the runner built. */
 export interface FakeTab {
   address: string;
   options: RunOptions;
@@ -38,36 +37,51 @@ export interface FakeTab {
   maxTurns?: string;
   model: string;
   sends: string[];
-  /** Slash commands sent with `command()` (`/new`). */
-  commands: string[];
   killed: boolean;
+  /** What herdr shows for the tab: `idle` when it is ready, `done` after a finished turn (nobody looked yet), `working`, `blocked`... */
+  status: string;
+  /** Turns started so far. */
+  turn: number;
+  /** The calls the runner made, in order: `wait` (hc wait) and `send` (hc send --wait). */
+  events: string[];
 }
 
 export interface FakeHerdrClientOptions {
   self?: SelfResult;
-  /** Runs when text is sent to a tab: the "child" writes its session file, status file and working-tree change. */
+  /** Runs when text is sent to a tab: the program "does the turn" here (writes its session file, status file, working-tree change). */
   onSend?: (tab: FakeTab, text: string) => void | Promise<void>;
-  /** Overrides what `waitIdle` answers; the second argument counts the tab's waits (1 is the ready wait). */
-  waitIdle?: (tab: FakeTab, wait: number) => WaitResult;
+  /**
+   * What the tab shows from the moment a send starts a turn: the first status is what `hc send --wait` answers (`working` is
+   * its check-in), each later one is the next `hc wait` answer; the last stays. Default: `["done"]`. An object sets the exit code of `ended`.
+   */
+  turn?: (tab: FakeTab, send: number) => Array<string | { status: string; exitCode?: number }>;
   /** Runs when a tab starts, before `run` returns (a child failing at startup writes its status file here). */
   onRun?: (tab: FakeTab) => void;
+  /** What a tab's first `hc wait` (its ready wait) answers, `idle` by default. */
+  ready?: (tab: FakeTab) => WaitResult;
   /** A reason makes `run` fail with it (hc's message for a duplicate name, say) before any tab exists. */
   failRun?: (run: RunOptions) => string | undefined;
-  /** Runs when a slash command is sent (the child starts a new session). */
-  onCommand?: (tab: FakeTab, text: string) => void | Promise<void>;
+  /** What `read` answers for a tab (the agent's screen). */
+  read?: (tab: FakeTab) => string;
 }
 
-/** A fake `HerdrClient` for the runner: records tabs, sends and kills; the test's `onSend` plays the child. */
+/**
+ * A fake `HerdrClient`: records tabs, sends and kills; the test's `onSend` plays the program. Models hc: a send refuses a
+ * `blocked` tab (nothing is typed), `--wait` answers for the turn the send started, and a finished turn leaves the tab `done`.
+ */
 export function fakeHerdrClient(options: FakeHerdrClientOptions = {}) {
   const tabs: FakeTab[] = [];
-  const idle: WaitResult = { status: "idle", exitCode: null, timedOut: false };
-  const waits = new Map<string, number>();
-  const argAfter = (argv: string[], flag: string) => argv[argv.indexOf(flag) + 1] ?? "";
+  const queued = new Map<string, WaitResult[]>();
+  const argAfter = (argv: string[], flag: string) => (argv.includes(flag) ? (argv[argv.indexOf(flag) + 1] ?? "") : "");
   const envOf = (argv: string[], key: string) => argv.find((a) => a.startsWith(`${key}=`))?.slice(key.length + 1);
   const find = (address: string) => {
     const tab = tabs.find((t) => t.address === address);
     if (!tab) throw new Error(`no tab ${address}`);
     return tab;
+  };
+  const result = (tab: FakeTab, item: string | { status: string; exitCode?: number }): WaitResult => {
+    const { status, exitCode } = typeof item === "string" ? { status: item, exitCode: undefined } : item;
+    return { status, exitCode: exitCode ?? (status === "ended" ? 1 : null), turn: tab.turn, timedOut: false };
   };
   const client: HerdrClient = {
     async self() {
@@ -85,8 +99,10 @@ export function fakeHerdrClient(options: FakeHerdrClientOptions = {}) {
         maxTurns: envOf(run.argv, "PI_CHEF_MAX_TURNS"),
         model: argAfter(run.argv, "--model"),
         sends: [],
-        commands: [],
         killed: false,
+        status: "idle",
+        turn: 0,
+        events: [],
       };
       tabs.push(tab);
       options.onRun?.(tab);
@@ -94,59 +110,34 @@ export function fakeHerdrClient(options: FakeHerdrClientOptions = {}) {
     },
     async send(terminal, text) {
       const tab = find(terminal);
+      tab.events.push("send");
+      if (tab.status === "blocked") throw new HerdrError("send failed: the terminal is blocked; nothing was typed", "hc send", "", "status_mismatch");
       tab.sends.push(text);
       await options.onSend?.(tab, text);
+      tab.turn += 1;
+      const [first, ...rest] = options.turn?.(tab, tab.sends.length) ?? ["done"];
+      queued.set(terminal, rest.map((item) => result(tab, item)));
+      const answer = result(tab, first ?? "done");
+      tab.status = answer.status;
+      return answer;
     },
-    async command(terminal, text) {
-      const tab = find(terminal);
-      tab.commands.push(text);
-      await options.onCommand?.(tab, text);
-    },
-    async keys() {},
     async waitIdle(terminal) {
       const tab = find(terminal);
-      const n = (waits.get(terminal) ?? 0) + 1;
-      waits.set(terminal, n);
-      return options.waitIdle?.(tab, n) ?? idle;
+      tab.events.push("wait");
+      const next = queued.get(terminal)?.shift();
+      if (next) {
+        tab.status = next.status;
+        return next;
+      }
+      if (tab.events.filter((event) => event === "wait").length === 1 && tab.sends.length === 0 && options.ready) return options.ready(tab);
+      return { status: tab.status, exitCode: null, turn: tab.turn, timedOut: false };
     },
-    async interrupt() {},
+    async read(terminal) {
+      return options.read?.(find(terminal)) ?? "";
+    },
     async kill(terminal) {
       find(terminal).killed = true;
-    },
-    async get(terminal) {
-      return { address: terminal, labels: { ...find(terminal).options.labels }, raw: {} };
-    },
-    // Like `hc ls --label`: the live tabs carrying every asked label (rows carry no labels, as in hc's list).
-    async find({ labels }) {
-      return tabs.filter((t) => !t.killed && Object.entries(labels).every(([k, v]) => t.options.labels?.[k] === v)).map((t) => ({ address: t.address, labels: {}, raw: {} }));
     },
   };
   return { client, tabs };
 }
-
-/** The reviewer tab's session, as Pi's SessionManager writes it. */
-const cost = (total: number) => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total });
-const assistant = (content: unknown[], input: number, output: number, total: number, model = "claude-opus-5-5", extra: Record<string, unknown> = {}) => ({
-  role: "assistant" as const,
-  content,
-  api: "anthropic-messages",
-  provider: "anthropic",
-  model,
-  usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost: cost(total) },
-  stopReason: "stop" as const,
-  timestamp: Date.now(),
-  ...extra,
-});
-
-/** The reviewer's session as Pi's real SessionManager writes it: a new session (what `/new` makes) with two turns. */
-export function reviewerWrites(dir: string, final: string) {
-  const sm = SessionManager.create("/work", dir);
-  sm.appendMessage({ role: "user", content: "Review request", timestamp: Date.now() } as never);
-  sm.appendMessage(assistant([{ type: "toolCall", id: "c1", name: "read", arguments: { path: "src/a.ts" } }], 10, 5, 0.01) as never);
-  sm.appendMessage({ role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "x" }], isError: false, timestamp: Date.now() } as never);
-  sm.appendMessage(assistant([{ type: "text", text: final }], 20, 7, 0.02) as never);
-  return sm;
-}
-
-export const VERDICT = 'I read src/a.ts and it looks fine.\n\n```json\n{"verdict":"pass","findings":[],"rationale":"criteria met"}\n```\nThat is my review.';
-

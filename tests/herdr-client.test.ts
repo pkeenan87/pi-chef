@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createHerdrClient, execFileExec, HerdrError, slashKeys } from "../src/herdr/client.js";
+import { createHerdrClient, execFileExec, HerdrError } from "../src/herdr/client.js";
 import { fail, fakeHerdr, ok } from "./herdr-fake.js";
 
 const wait = (status: string, extra: object = {}) => ok({ children: [], ended: true, exit_code: null, reason: "status", signal: null, status, terminal: "t5", turn: 1, ...extra });
 
 describe("herdr client errors", () => {
-  it("surfaces hc's error kind (status_mismatch: --if idle typed nothing)", async () => {
-    const { exec } = fakeHerdr({ send: [{ stdout: JSON.stringify({ error: { kind: "status_mismatch", message: "terminal is working", hint: "nothing was typed" } }), stderr: "", code: 10 }] });
-    const error = (await createHerdrClient({ exec }).send("t5", "hi", { ifIdle: true }).catch((e: unknown) => e)) as HerdrError;
+  it("surfaces hc's error kind (status_mismatch: a blocked terminal, nothing typed)", async () => {
+    const { exec } = fakeHerdr({ send: [{ stdout: JSON.stringify({ error: { kind: "status_mismatch", message: "terminal is blocked", hint: "nothing was typed" } }), stderr: "", code: 10 }] });
+    const error = (await createHerdrClient({ exec }).send("t5", "hi", { timeoutMs: 60_000 }).catch((e: unknown) => e)) as HerdrError;
     expect(error).toBeInstanceOf(HerdrError);
     expect(error.kind).toBe("status_mismatch");
   });
@@ -23,11 +23,11 @@ describe("herdr client argv", () => {
     expect(calls[0].args).toEqual(["run", "--bg", "--json", "--no-notify", "--name", "chef-x", "--cwd", "/w", "--label", "herdr.space=sp1", "--label", "pi-chef.ticket=01", "--", "pi", "-ne", "--model", "a/b:high"]);
   });
 
-  it("run: notify and outliveParent flags, custom command", async () => {
+  it("run: a custom command", async () => {
     const { exec, calls } = fakeHerdr({ run: [ok({ address: "t9" })] });
-    await createHerdrClient({ exec, command: "/opt/hc" }).run({ argv: ["pi"], notify: true, outliveParent: true });
+    await createHerdrClient({ exec, command: "/opt/hc" }).run({ argv: ["pi"] });
     expect(calls[0].file).toBe("/opt/hc");
-    expect(calls[0].args).toEqual(["run", "--bg", "--json", "--outlive-parent", "--", "pi"]);
+    expect(calls[0].args).toEqual(["run", "--bg", "--json", "--no-notify", "--", "pi"]);
   });
 
   it("run: refuses bad labels, empty argv, and a missing address", async () => {
@@ -40,46 +40,63 @@ describe("herdr client argv", () => {
   });
 
   it("label values with spaces, quotes and = stay one argv entry", async () => {
-    const { exec, calls } = fakeHerdr({ ls: [ok({ terminals: [] })] });
-    await createHerdrClient({ exec }).find({ labels: { "pi-chef.role": `re view "x"=y` } });
-    expect(calls[0].args).toEqual(["ls", "--json", "--label", `pi-chef.role=re view "x"=y`]);
+    const { exec, calls } = fakeHerdr({ run: [ok({ address: "t9" })] });
+    await createHerdrClient({ exec }).run({ argv: ["pi"], labels: { "pi-chef.role": `re view "x"=y` } });
+    expect(calls[0].args).toContain(`pi-chef.role=re view "x"=y`);
   });
 
-  it("send, keys, interrupt, kill, get", async () => {
-    const { exec, calls } = fakeHerdr({ get: [ok({ address: "t3", status: { state: "idle" }, labels: { a: "b" }, cwd: "/c" })] });
+  it("send waits for the turn it started, kill kills; the sent text is one argv entry after --", async () => {
+    const { exec, calls } = fakeHerdr({ send: [ok({ started: true, status: "idle", turn: 1, wait: { status: "done", turn: 2, ended: true, reason: "status" } })] });
     const client = createHerdrClient({ exec });
-    await client.send("t3", "--force; $(rm -rf /)");
-    await client.keys("t3", ["/", "n", "enter"]);
-    await client.interrupt("t3");
+    expect(await client.send("t3", "--force; $(rm -rf /)", { timeoutMs: 600_000 })).toMatchObject({ status: "done", turn: 2, timedOut: false });
     await client.kill("t3");
-    const info = await client.get("t3");
     expect(calls.map((c) => c.args)).toEqual([
-      ["send", "--json", "t3", "--", "--force; $(rm -rf /)"],
-      ["keys", "--json", "t3", "/", "n", "enter"],
-      ["interrupt", "t3", "--json"],
+      ["send", "--json", "--wait", "--timeout", "180", "t3", "--", "--force; $(rm -rf /)"],
       ["kill", "t3", "--json"],
-      ["get", "t3", "--json"],
     ]);
-    expect(info).toMatchObject({ address: "t3", status: "idle", labels: { a: "b" }, cwd: "/c" });
+  });
+
+  it("send never passes --if: a done terminal is not refused", async () => {
+    const { exec, calls } = fakeHerdr({ send: [ok({ started: true, status: "done", turn: 1, wait: { status: "done", turn: 2, ended: true } })] });
+    await createHerdrClient({ exec }).send("t3", "x", { timeoutMs: 60_000 });
+    expect(calls[0].args).not.toContain("--if");
+  });
+
+  it("send shrinks its wait to the time left, and reports a check-in (or an answer with no status) as working", async () => {
+    const { exec, calls } = fakeHerdr({ send: [ok({ started: true, status: "idle", turn: 0, wait: { status: null, reason: "timeout", ended: false } }), ok({ started: true, status: "idle", wait: {} })] });
+    const client = createHerdrClient({ exec });
+    expect(await client.send("t3", "x", { timeoutMs: 20_000 })).toMatchObject({ status: "working", timedOut: false });
+    expect(await client.send("t3", "x", { timeoutMs: 20_000 })).toMatchObject({ status: "working" });
+    expect(calls[0].args.slice(0, 5)).toEqual(["send", "--json", "--wait", "--timeout", "20"]);
+  });
+
+  it("send reads the turn's outcome from the nested wait, never the pre-send top-level status (verified live)", async () => {
+    // A check-in: hc's top level says the terminal was idle before the send; the turn itself is still running.
+    const { exec } = fakeHerdr({ send: [ok({ started: true, status: "idle", turn: 0, wait: { status: null, reason: "timeout", ended: false, turn: 0 } })] });
+    expect(await createHerdrClient({ exec }).send("t3", "x", { timeoutMs: 60_000 })).toMatchObject({ status: "working" });
+  });
+
+  it("send throws when hc prints no wait result", async () => {
+    const { exec } = fakeHerdr({ send: [ok({ started: true, status: "idle" })] });
+    await expect(createHerdrClient({ exec }).send("t3", "x", { timeoutMs: 60_000 })).rejects.toBeInstanceOf(HerdrError);
+  });
+
+  it("send reports an ended terminal", async () => {
+    const { exec } = fakeHerdr({ send: [ok({ started: true, status: "idle", wait: { exit_code: 3, status: null, ended: true, reason: "exit" } })] });
+    expect(await createHerdrClient({ exec }).send("t3", "x", { timeoutMs: 20_000 })).toMatchObject({ status: "ended", exitCode: 3 });
   });
 
   it("refuses a terminal that looks like a flag", async () => {
     const { exec, calls } = fakeHerdr();
-    await expect(createHerdrClient({ exec }).send("--force", "x")).rejects.toBeInstanceOf(HerdrError);
+    await expect(createHerdrClient({ exec }).send("--force", "x", { timeoutMs: 1000 })).rejects.toBeInstanceOf(HerdrError);
     expect(calls).toHaveLength(0);
-  });
-
-  it("find reads terminals and skips malformed rows", async () => {
-    const { exec } = fakeHerdr({ ls: [ok({ terminals: [{ address: "t1", labels: { r: "x" } }, { nope: 1 }, "str"] })] });
-    const found = await createHerdrClient({ exec }).find({ labels: { r: "x" } });
-    expect(found.map((t) => t.address)).toEqual(["t1"]);
   });
 });
 
 describe("errors", () => {
   it("failure carries the command and redacted stderr, never the sent text", async () => {
     const { exec } = fakeHerdr({ send: [fail("no terminal", "token=sk-abcdefgh12345678 boom")] });
-    const err = await createHerdrClient({ exec }).send("t3", "my secret prompt").catch((e) => e);
+    const err = await createHerdrClient({ exec }).send("t3", "my secret prompt", { timeoutMs: 60_000 }).catch((e) => e);
     expect(err).toBeInstanceOf(HerdrError);
     expect(err.command).toBe("hc send t3 (text omitted)");
     expect(err.message).not.toContain("my secret prompt");
@@ -90,7 +107,7 @@ describe("errors", () => {
     const missing = createHerdrClient({ exec: async () => ({ stdout: "", stderr: "", code: null, spawnError: "ENOENT" }) });
     await expect(missing.kill("t1")).rejects.toThrow(/not installed/);
     const garbage = createHerdrClient({ exec: async () => ({ stdout: "<html>", stderr: "", code: 0 }) });
-    await expect(garbage.get("t1")).rejects.toBeInstanceOf(HerdrError);
+    await expect(garbage.run({ argv: ["pi"] })).rejects.toBeInstanceOf(HerdrError);
     await expect(garbage.waitIdle("t1", { timeoutMs: 5000 })).rejects.toBeInstanceOf(HerdrError);
   });
 
@@ -169,33 +186,20 @@ describe("waitIdle", () => {
   });
 });
 
-describe("slashKeys", () => {
-  it("turns text into key names", () => {
-    expect(slashKeys("/new")).toEqual(["/", "n", "e", "w", "enter"]);
-    expect(slashKeys("/model a/b")).toEqual(["/", "m", "o", "d", "e", "l", "space", "a", "/", "b", "enter"]);
-    expect(slashKeys("/x", false)).toEqual(["/", "x"]);
-  });
-  it("shifts uppercase and throws on characters hc has no name for", () => {
-    expect(slashKeys("aB")).toEqual(["a", "shift+b", "enter"]);
-    for (const bad of ["a:b", "a_b", "a@b", "a+b", "a(b", "é"]) expect(() => slashKeys(bad)).toThrow(HerdrError);
-  });
-});
-
-describe("command, untagged env and ifIdle", () => {
+describe("untagged env", () => {
   const env = { HC_TERMINAL_ID: "t4", HC_SCOPE: "s", HC_TERMINAL_SOCKET: "/sock", PATH: "/bin", GONE: undefined };
 
-  it("send and command run hc without HC_TERMINAL_ID and HC_SCOPE", async () => {
+  it("send runs hc without HC_TERMINAL_ID and HC_SCOPE", async () => {
     const seen: Array<Record<string, string> | undefined> = [];
-    const { exec, calls } = fakeHerdr({ send: [(c) => ({ ...ok({}), stdout: "{}" })] });
+    const { exec, calls } = fakeHerdr({ send: [(c) => ({ ...ok({}), stdout: JSON.stringify({ started: true, wait: { status: "done" } }) })] });
     const spy: typeof exec = async (f, a, o) => {
       seen.push(o.env);
       return exec(f, a, o);
     };
     const client = createHerdrClient({ exec: spy, env });
-    await client.send("t3", "hello");
-    await client.command("t3", "/model a/b");
-    expect(seen).toEqual([{ HC_TERMINAL_SOCKET: "/sock", PATH: "/bin" }, { HC_TERMINAL_SOCKET: "/sock", PATH: "/bin" }]);
-    expect(calls[1].args).toEqual(["send", "--json", "t3", "--", "/model a/b"]);
+    await client.send("t3", "hello", { timeoutMs: 60_000 });
+    expect(seen).toEqual([{ HC_TERMINAL_SOCKET: "/sock", PATH: "/bin" }]);
+    expect(calls[0].args).toEqual(["send", "--json", "--wait", "--timeout", "60", "t3", "--", "hello"]);
   });
 
   it("other calls keep the caller's environment", async () => {
@@ -205,13 +209,14 @@ describe("command, untagged env and ifIdle", () => {
     expect(seen).toBeUndefined();
   });
 
-  it("ifIdle passes --if idle before the terminal", async () => {
-    const { exec, calls } = fakeHerdr();
+  it("read returns the screen text with the history lines asked for, and nothing for a reply without text", async () => {
+    const { exec, calls } = fakeHerdr({ read: [ok({ complete: true, how: "screen", text: "line 1\nline 2" }), ok({})] });
     const client = createHerdrClient({ exec });
-    await client.send("t3", "x", { ifIdle: true });
-    await client.command("t3", "/new", { ifIdle: true });
-    expect(calls[0].args).toEqual(["send", "--json", "--if", "idle", "t3", "--", "x"]);
-    expect(calls[1].args).toEqual(["send", "--json", "--if", "idle", "t3", "--", "/new"]);
+    expect(await client.read("t3", 200)).toBe("line 1\nline 2");
+    expect(calls[0].args).toEqual(["read", "t3", "--json", "--lines", "200"]);
+    expect(await client.read("t3")).toBe("");
+    expect(calls[1].args).toEqual(["read", "t3", "--json", "--lines", "0"]);
+    await expect(client.read("-x")).rejects.toThrow(/bad terminal address/);
   });
 });
 
@@ -220,7 +225,7 @@ describe("execFileExec", () => {
     const SENTINEL = "SENTINEL-prompt-text-9f3a";
     // sh stands in for hc: `sh -c 'kill -9 $$' sh <args>` dies by SIGKILL with the pasted text in its argv.
     const killed: typeof execFileExec extends () => infer E ? E : never = (_f, args, o) => execFileExec()("sh", ["-c", "kill -9 $$", "sh", ...args], o);
-    const err = await createHerdrClient({ command: "sh", exec: killed }).send("t3", SENTINEL).catch((e) => e);
+    const err = await createHerdrClient({ command: "sh", exec: killed }).send("t3", SENTINEL, { timeoutMs: 60_000 }).catch((e) => e);
     expect(err).toBeInstanceOf(HerdrError);
     expect(err.message).toMatch(/killed or timed out/);
     expect(JSON.stringify({ message: err.message, command: err.command, stderr: err.stderr, stack: err.stack })).not.toContain(SENTINEL);

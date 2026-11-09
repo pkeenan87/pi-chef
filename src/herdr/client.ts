@@ -13,7 +13,7 @@ export class HerdrError extends Error {
     message: string,
     readonly command: string,
     readonly stderr = "",
-    /** hc's error kind (`status_mismatch` when `--if idle` found the terminal busy and typed nothing), when it gave one. */
+    /** hc's error kind (for example `status_mismatch` when the terminal was blocked and nothing was typed), when it gave one. */
     readonly kind?: string,
   ) {
     super(message);
@@ -49,25 +49,18 @@ export function execFileExec(): HerdrExec {
 
 export type Labels = Record<string, string>;
 
-export interface SelfInfo {
-  terminal: string;
-  space: string;
-}
-export type SelfResult = SelfInfo | { problem: string };
+export type SelfResult = { terminal: string; space: string } | { problem: string };
 
 export interface RunOptions {
   argv: string[];
   cwd?: string;
   name?: string;
   labels?: Labels;
-  /** Default false: herdr-core types no notes about the child into the parent. */
-  notify?: boolean;
-  outliveParent?: boolean;
 }
 
-export type WaitStatus = "idle" | "done" | "blocked" | "error" | "ended" | "timeout" | string;
+export type WaitStatus = "working" | "idle" | "done" | "blocked" | "error" | "ended" | "timeout" | string;
 export interface WaitResult {
-  /** The last status seen: not "working", "ended" when the terminal exited, or "timeout" when the deadline passed. */
+  /** The last status seen: "working" when a `send` checked in before its turn ended, "ended" when the terminal exited, or "timeout" when the deadline passed. */
   status: WaitStatus;
   exitCode: number | null;
   turn?: number;
@@ -75,59 +68,21 @@ export interface WaitResult {
   timedOut: boolean;
 }
 
-export interface SendOptions {
-  /** Pass `--if idle`: only type when the terminal's status is idle (hc fails otherwise). */
-  ifIdle?: boolean;
-}
-
-export interface TerminalInfo {
-  address: string;
-  status?: string;
-  state?: string;
-  /** Labels. `get` fills them; the rows of `hc ls --json` (so `find`) carry none, so match on the labels you asked for. */
-  labels: Labels;
-  cwd?: string;
-  name?: string;
-  raw: Record<string, unknown>;
-}
-
 export interface HerdrClient {
   self(): Promise<SelfResult>;
   run(options: RunOptions): Promise<string>;
-  /** Pastes text and presses Enter, untagged (see `command`). `ifIdle` types only when the terminal is idle. */
-  send(terminal: string, text: string, options?: SendOptions): Promise<void>;
   /**
-   * Sends a slash command (`/new`, `/model a/b`) to Pi. Same as `send`: hc run from inside herdr wraps the text in an
-   * `<hc from=…>` tag, which Pi reads as a chat message, so both run hc without `HC_TERMINAL_ID` and `HC_SCOPE` and
-   * the text arrives plain. Use this, not `keys`, for slash commands.
+   * Pastes `text`, presses Enter and waits for the turn THIS send started (`hc send --wait`), for at most `timeoutMs`; one
+   * hc call blocks for at most its wait slice. It does not check the status first (hc refuses a blocked terminal and queues
+   * text for a working one), so callers look before sending. The result is "working" when the call checked in before the
+   * turn ended: look again with `waitIdle`. The text goes without `HC_TERMINAL_ID` and `HC_SCOPE`, so hc adds no `<hc from=…>` tag.
    */
-  command(terminal: string, text: string, options?: SendOptions): Promise<void>;
-  keys(terminal: string, keys: string[]): Promise<void>;
+  send(terminal: string, text: string, options: { timeoutMs: number }): Promise<WaitResult>;
+  /** Waits until the terminal is no longer working, or the deadline passes. Any other status returns at once (`done` and `idle` alike). */
   waitIdle(terminal: string, options: { timeoutMs: number }): Promise<WaitResult>;
-  interrupt(terminal: string): Promise<void>;
+  /** The terminal's screen as text, with `lines` of history above it (`hc read --json --lines`). */
+  read(terminal: string, lines?: number): Promise<string>;
   kill(terminal: string): Promise<void>;
-  get(terminal: string): Promise<TerminalInfo>;
-  find(options: { labels: Labels }): Promise<TerminalInfo[]>;
-}
-
-/** Characters `hc keys` accepts as their own name (checked against hc): letters, digits and these marks. */
-const KEY_CHARS = /^[a-z0-9/\-.,;'=[\]`\\]$/;
-
-/**
- * Key names for typing text key by key, then enter. Only for text made of characters hc has key names for: an
- * uppercase letter becomes `shift+<lower>`, and any character without a name (`: _ @ + ( ) "` …) throws a
- * HerdrError. Slash commands go through `command()`, which has no such limit.
- */
-export function slashKeys(text: string, submit = true): string[] {
-  const keys = [...text].map((ch) => {
-    if (ch === " ") return "space";
-    if (ch === "\n") return "enter";
-    if (ch === "\t") return "tab";
-    if (/^[A-Z]$/.test(ch)) return `shift+${ch.toLowerCase()}`;
-    if (KEY_CHARS.test(ch)) return ch;
-    throw new HerdrError(`no key name for ${JSON.stringify(ch)}; use command() for slash commands`, "hc keys");
-  });
-  return submit ? [...keys, "enter"] : keys;
 }
 
 export interface ClientOptions {
@@ -146,21 +101,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function toInfo(value: unknown): TerminalInfo | undefined {
-  const rec = asRecord(value);
-  if (!rec || typeof rec.address !== "string") return undefined;
-  const labels: Labels = {};
-  for (const [k, v] of Object.entries(asRecord(rec.labels) ?? {})) if (typeof v === "string") labels[k] = v;
-  const status = typeof rec.status === "string" ? rec.status : asRecord(rec.status) && typeof asRecord(rec.status)!.state === "string" ? (asRecord(rec.status)!.state as string) : undefined;
-  return {
-    address: rec.address,
-    status,
-    state: typeof rec.state === "string" ? rec.state : undefined,
-    labels,
-    cwd: typeof rec.cwd === "string" ? rec.cwd : undefined,
-    name: typeof rec.name === "string" ? rec.name : undefined,
-    raw: rec,
-  };
+/** hc's wait JSON (also what `send --wait` prints) as a result, or undefined when it names no status and no exit. */
+function waitResult(parsed: Record<string, unknown> | undefined): WaitResult | undefined {
+  if (!parsed) return undefined;
+  const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code : null;
+  const turn = typeof parsed.turn === "number" ? parsed.turn : undefined;
+  if (exitCode !== null || parsed.signal != null) return { status: "ended", exitCode, turn, timedOut: false };
+  return typeof parsed.status === "string" ? { status: parsed.status, exitCode: null, turn, timedOut: false } : undefined;
 }
 
 export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
@@ -214,22 +161,18 @@ export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
     return clean;
   }
 
-  async function sendText(terminal: string, text: string, opts: SendOptions | undefined, what: string): Promise<void> {
-    const args = ["send", "--json"];
-    if (opts?.ifIdle) args.push("--if", "idle");
-    args.push(terminalArg(terminal, what));
-    await call([...args, "--", text], `${what} ${terminal} (text omitted)`, undefined, args, untaggedEnv());
-  }
+  /** Seconds for one hc call that blocks: at most the wait slice, at least 1. */
+  const sliceFor = (remainingMs: number) => Math.max(1, Math.min(slice, Math.ceil(remainingMs / 1000)));
 
-  const client: HerdrClient = {
+  return {
     async self() {
       const terminal = env.HC_TERMINAL_ID?.trim();
       if (!terminal) return { problem: "HC_TERMINAL_ID is not set; pi-chef is not running inside a herdr terminal" };
       try {
-        const info = toInfo(await call(["get", terminal, "--json"], `get ${terminal} --json`));
-        if (!info) return { problem: `${command} get ${terminal} returned no terminal` };
-        const space = info.labels["herdr.space"];
-        if (!space) return { problem: `terminal ${terminal} has no herdr.space label` };
+        const info = asRecord(await call(["get", terminal, "--json"], `get ${terminal} --json`));
+        if (typeof info?.address !== "string") return { problem: `${command} get ${terminal} returned no terminal` };
+        const space = asRecord(info.labels)?.["herdr.space"];
+        if (typeof space !== "string" || !space) return { problem: `terminal ${terminal} has no herdr.space label` };
         return { terminal, space };
       } catch (error) {
         return { problem: (error as Error).message };
@@ -238,9 +181,8 @@ export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
 
     async run(opts) {
       if (!opts.argv.length) throw new HerdrError("run: empty argv", `${command} run`);
-      const args = ["run", "--bg", "--json"];
-      if (!opts.notify) args.push("--no-notify");
-      if (opts.outliveParent) args.push("--outlive-parent");
+      // No notes about the child go into the parent's chat (--no-notify).
+      const args = ["run", "--bg", "--json", "--no-notify"];
       if (opts.name) args.push("--name", opts.name);
       if (opts.cwd) args.push("--cwd", opts.cwd);
       for (const [k, v] of Object.entries(opts.labels ?? {})) {
@@ -254,12 +196,17 @@ export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
       return address;
     },
 
-    send: (terminal, text, opts) => sendText(terminal, text, opts, "send"),
-    command: (terminal, text, opts) => sendText(terminal, text, opts, "command"),
-
-    async keys(terminal, keys) {
-      if (!keys.length) return;
-      await call(["keys", "--json", terminalArg(terminal, "keys"), ...keys], `keys ${terminal} (${keys.length} keys)`);
+    async send(terminal, text, { timeoutMs }) {
+      const seconds = sliceFor(timeoutMs);
+      const args = ["send", "--json", "--wait", "--timeout", String(seconds), terminalArg(terminal, "send")];
+      const parsed = asRecord(await call([...args, "--", text], `send ${terminal} (text omitted)`, seconds * 1000 + 15_000, args, untaggedEnv()));
+      // Verified live (hc, 2026-11-08): `send --wait --json` prints {started, status, turn, wait: {...}}. The top-level
+      // status is the terminal's state BEFORE the send; the turn's outcome is the nested `wait` object. Reading the top
+      // level would report a still-working turn as idle. A `wait` without a status (a check-in timeout) means the caller
+      // keeps waiting with waitIdle.
+      const waited = asRecord(parsed?.wait);
+      if (!waited) throw new HerdrError("send: hc printed no wait result", `${command} send ${terminal}`);
+      return waitResult(waited) ?? { status: "working", exitCode: null, timedOut: false };
     },
 
     async waitIdle(terminal, { timeoutMs }) {
@@ -268,43 +215,22 @@ export function createHerdrClient(options: ClientOptions = {}): HerdrClient {
       for (;;) {
         const remaining = deadline - now();
         if (remaining <= 0) return { status: "timeout", exitCode: null, timedOut: true };
-        const seconds = Math.max(1, Math.min(slice, Math.ceil(remaining / 1000)));
+        const seconds = sliceFor(remaining);
         const parsed = asRecord(await call(["wait", terminal, "--json", "--timeout", String(seconds)], `wait ${terminal}`, seconds * 1000 + 15_000));
         if (!parsed) throw new HerdrError("wait: hc printed no JSON", `${command} wait ${terminal}`);
-        const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code : null;
-        const signal = parsed.signal != null;
-        const turn = typeof parsed.turn === "number" ? parsed.turn : undefined;
-        if (exitCode !== null || signal) return { status: "ended", exitCode, turn, timedOut: false };
-        const status = typeof parsed.status === "string" ? parsed.status : undefined;
+        const result = waitResult(parsed);
         // A timeout or a message to the caller returns while it is still working: keep waiting.
-        if (status && status !== "working") return { status, exitCode: null, turn, timedOut: false };
+        if (result && result.status !== "working") return result;
       }
     },
 
-    async interrupt(terminal) {
-      await call(["interrupt", terminalArg(terminal, "interrupt"), "--json"], `interrupt ${terminal}`);
+    async read(terminal, lines = 0) {
+      const parsed = asRecord(await call(["read", terminalArg(terminal, "read"), "--json", "--lines", String(Math.max(0, Math.floor(lines)))], `read ${terminal}`));
+      return typeof parsed?.text === "string" ? parsed.text : "";
     },
 
     async kill(terminal) {
       await call(["kill", terminalArg(terminal, "kill"), "--json"], `kill ${terminal}`);
     },
-
-    async get(terminal) {
-      const info = toInfo(await call(["get", terminalArg(terminal, "get"), "--json"], `get ${terminal}`));
-      if (!info) throw new HerdrError("get: hc printed no terminal", `${command} get ${terminal}`);
-      return info;
-    },
-
-    async find({ labels }) {
-      const args = ["ls", "--json"];
-      for (const [k, v] of Object.entries(labels)) {
-        if (!LABEL_KEY.test(k) || v.includes("\n")) throw new HerdrError(`ls: bad label "${k}"`, `${command} ls`);
-        args.push("--label", `${k}=${v}`);
-      }
-      const parsed = asRecord(await call(args, "ls --json"));
-      const list = Array.isArray(parsed?.terminals) ? parsed.terminals : [];
-      return list.map(toInfo).filter((x): x is TerminalInfo => !!x);
-    },
   };
-  return client;
 }

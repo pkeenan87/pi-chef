@@ -1,4 +1,5 @@
-import { needsConfirmation } from "../src/router/policy.js";
+import { isSecuritySensitive } from "../src/orchestrator/classification.js";
+import { CLOUD_TICKET_TOKENS } from "../src/orchestrator/routing.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -98,7 +99,7 @@ describe("plan interview start", () => {
     const turns: string[] = [];
     const app = workflow(cwd, { startTurn: (text) => void turns.push(text) });
     const spec = COMMANDS.find((item) => item.name === "plan")!;
-    const result = await spec.run(app, "--no-questions Add retry to ingest", async () => true);
+    const result = await spec.run!(app, "--no-questions Add retry to ingest", async () => true);
     expect(result.ok).toBe(true);
     expect(turns[0]).toContain("(no questions)");
     expect(turns[0]).not.toContain("--no-questions");
@@ -293,17 +294,15 @@ describe("plan_tickets", () => {
   describe("the planner's rating", () => {
     const rating = { complexity: "low", risk: "low", securitySensitive: false, classificationReason: "one parser wrapper" };
 
-    it("starts with the keyword classification and replaces it with the planner's rating from plan_spec", async () => {
+    it("starts with the default classification and replaces it with the planner's rating from plan_spec", async () => {
       const { app, spec } = await planning();
       const before = app.store.load(app.activeTaskId()!)!.classification!;
-      expect(before).toMatchObject({ source: "keywords", complexity: "medium", task_type: "general" });
+      expect(before).toMatchObject({ source: "default", complexity: "medium", task_type: "general" });
       const result = await call(spec, { ...specParams, ...rating }, headless);
       expect(textOf(result)).toContain("Rated low complexity, low risk.");
       const after = app.store.load(app.activeTaskId()!)!;
       expect(after.classification).toMatchObject({ source: "planner", complexity: "low", risk: "low", task_type: "general", required_capabilities: [] });
       expect(after.classification!.reason_codes).toContain("reason: one parser wrapper");
-      const status = (await app.status()).text;
-      expect(status).toContain("| Rating | low risk (planner: one parser wrapper) |");
     });
 
     it("raises risk and the flag when the planner says security-sensitive", async () => {
@@ -312,29 +311,21 @@ describe("plan_tickets", () => {
       const task = app.store.load(app.activeTaskId()!)!;
       expect(task.classification).toMatchObject({ task_type: "security", risk: "high", source: "planner" });
       expect(task.classification!.required_capabilities).toContain("security-sensitive");
-      expect(needsConfirmation(task.classification!, app.config)).toBe(true);
+      expect(isSecuritySensitive(task.classification!)).toBe(true);
     });
 
-    it("does not let the planner lower a keyword hit in the request", async () => {
+    it("scans nothing for keywords: a request or spec that mentions authentication stays as the planner rated it", async () => {
       const { app, spec } = await planning({ request: "Rotate the oauth credentials the ingest job uses" });
-      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "security", risk: "high", source: "keywords" });
-      const result = await call(spec, { ...specParams, ...rating }, headless);
-      expect(textOf(result)).toContain("security-sensitive (the keyword scan marked it security-sensitive; you cannot lower that)");
-      const task = app.store.load(app.activeTaskId()!)!;
-      expect(task.classification).toMatchObject({ task_type: "security", risk: "high", complexity: "low", source: "planner" });
-      expect(task.classification!.reason_codes).toContain("security_keyword_override");
-    });
-
-    it("also scans the spec: a plain request whose spec changes authentication is security-sensitive", async () => {
-      const { app, spec } = await planning();
-      await call(spec, { ...specParams, ...rating, changes: [{ path: "src/auth.ts", change: "check the password hash before parsing" }] }, headless);
-      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "security", risk: "high" });
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "general", risk: "medium", source: "default" });
+      const result = await call(spec, { ...specParams, ...rating, changes: [{ path: "src/auth.ts", change: "check the password hash before parsing" }] }, headless);
+      expect(textOf(result)).not.toContain("keyword");
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ task_type: "general", risk: "low", complexity: "low", source: "planner" });
     });
 
     it("keeps the classification it has when the spec carries no rating, and rejects a malformed one", async () => {
       const { app, spec } = await planning();
       await call(spec, specParams, headless);
-      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ source: "keywords" });
+      expect(app.store.load(app.activeTaskId()!)!.classification).toMatchObject({ source: "default" });
       await expect(call(spec, { ...specParams, complexity: "huge" }, headless)).rejects.toThrow(/complexity must be one of low, medium, high/);
       await expect(call(spec, { ...specParams, securitySensitive: "yes" }, headless)).rejects.toThrow(/securitySensitive must be true or false/);
     });
@@ -372,24 +363,40 @@ describe("plan_tickets", () => {
     expect(app.store.load(app.activeTaskId()!)!.phase).toBe("AWAITING_PLAN_APPROVAL");
   });
 
-  it("honours workers.ticketContextTokens", async () => {
+  it("sizes tickets to the model of their difficulty: half a local model's window, else 150000", async () => {
     const cwd = await tempRepo();
-    const config = parseConfig(`${testYaml()}\nworkers: { tokenBudget: 8000, ticketContextTokens: 30000 }\n`);
-    expect(config.workers.ticketContextTokens).toBe(30000);
+    const config = parseConfig(`models: { low: local/Qwen3.8-27B }\nlocal:\n  baseUrl: "http://127.0.0.1:8081/v1"\n  models: [{ id: Qwen3.8-27B, contextWindow: 40000 }]\n`);
     const app = workflow(cwd, { config, startTurn: () => undefined });
     await app.startPlan("Add retry to ingest");
     await call(createPlanSpecTool(() => app), specParams, headless);
-    await expect(call(createPlanTicketsTool(() => app), { tickets: [ticket("01", { estimatedContextTokens: 40000 })] }, headless)).rejects.toThrow(/above the 30000 target/);
+    // A low ticket is built by the local model: it must fit 20000 tokens. A medium one may use the cloud target.
+    await expect(call(createPlanTicketsTool(() => app), { tickets: [ticket("01", { difficulty: "low", estimatedContextTokens: 30000 })] }, headless)).rejects.toThrow(/above the 20000 target/);
+    await call(createPlanTicketsTool(() => app), { tickets: [ticket("01", { difficulty: "medium", estimatedContextTokens: 30000 })] }, headless);
   });
 
-  it("defaults the target to 150000 tokens", () => {
-    expect(testConfig().workers.ticketContextTokens).toBe(150000);
+  it("tells the planner the size limit of a local model, and only then", async () => {
+    const cwd = await tempRepo();
+    const local = parseConfig(`models: { low: local/Qwen3.8-27B }\nlocal:\n  baseUrl: "http://127.0.0.1:8081/v1"\n  models: [{ id: Qwen3.8-27B, contextWindow: 131072 }]\n`);
+    for (const [config, expected] of [[local, true], [parseConfig(""), false]] as const) {
+      const app = workflow(cwd, { config, startTurn: () => undefined });
+      await app.startPlan(`Add retry to ingest ${expected}`);
+      await call(createPlanSpecTool(() => app), specParams, headless);
+      const prompt = app.planningPrompt()!;
+      expect(prompt.includes("[LOCAL MODEL LIMITS]")).toBe(expected);
+      if (expected) expect(prompt).toContain("low tickets are built by local/Qwen3.8-27B, a local model with a 131072-token context window. Each must fit in about 65536 tokens");
+      expect(prompt).not.toContain("[LOCAL MODE]");
+      expect(prompt).not.toContain("LOCAL MODE TICKETS");
+    }
+  });
+
+  it("defaults the cloud target to 150000 tokens", () => {
+    expect(CLOUD_TICKET_TOKENS).toBe(150000);
   });
 
   it("writes ticket files in the to-tickets format, stores tickets in the plan, and maps them to groups", async () => {
     const { tickets, app } = await atTicketStage();
     const input = [
-      ticket("01", { suggestedTier: "cheap", files: ["src/ingest.ts"] }),
+      ticket("01", { difficulty: "low", files: ["src/ingest.ts"] }),
       ticket("02", { blockedBy: ["01"], title: "Second", acceptanceCriteria: ["a", "b"], checks: ["npm test"] }),
     ];
     const result = await call(tickets, { tickets: input }, headless);
@@ -397,7 +404,7 @@ describe("plan_tickets", () => {
     const dir = path.join(app.store.taskDir(app.activeTaskId()!), "tickets");
     expect(readdirSync(dir).sort()).toEqual(["01-t01.md", "02-t02.md"]);
     const first = readFileSync(path.join(dir, "01-t01.md"), "utf8");
-    expect(first).toMatch(/^---\nid: 01\nslug: t01\nsuggestedTier: cheap\nestimatedContextTokens: 40000\nfiles: \["src\/ingest.ts"\]\n---/);
+    expect(first).toMatch(/^---\nid: 01\nslug: t01\ndifficulty: low\nestimatedContextTokens: 40000\nfiles: \["src\/ingest.ts"\]\n---/);
     expect(first).toContain("# 01: Ticket 01");
     expect(first).toContain("## What to build\n\nUsers can retry a failed ingest end to end.");
     expect(first).toContain("## Acceptance criteria\n\n- [ ] retry works");
@@ -550,9 +557,9 @@ describe("plan_tickets", () => {
   });
 
   it("round-trips ticket markdown", () => {
-    const input = [{ ...ticket("01", { suggestedTier: "premium", files: ["a.ts"], checks: ["x"] }), blockedBy: [] }, ticket("02", { blockedBy: ["01"] })] as never as Parameters<typeof renderTicket>[0][];
+    const input = [{ ...ticket("01", { difficulty: "high", files: ["a.ts"], checks: ["x"] }), blockedBy: [] }, ticket("02", { blockedBy: ["01"] })] as never as Parameters<typeof renderTicket>[0][];
     expect(parseTicketsMarkdown(renderTicketsMarkdown(input))).toMatchObject([
-      { id: "01", slug: "t01", title: "Ticket 01", suggestedTier: "premium", files: ["a.ts"], checks: ["x"], blockedBy: [], acceptanceCriteria: ["retry works"] },
+      { id: "01", slug: "t01", title: "Ticket 01", difficulty: "high", files: ["a.ts"], checks: ["x"], blockedBy: [], acceptanceCriteria: ["retry works"] },
       { id: "02", blockedBy: ["01"] },
     ]);
   });
@@ -560,9 +567,7 @@ describe("plan_tickets", () => {
 
 function testYaml(): string {
   return `
-providers:
-  openai: { type: openai, auth: account-login, model: gpt-5.4 }
-models: { cheap: openai, standard: openai, premium: openai }
+models: { low: openai/gpt-5.4, medium: openai/gpt-5.4, high: openai/gpt-5.4, review: openai/gpt-5.4 }
 `;
 }
 

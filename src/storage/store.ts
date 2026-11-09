@@ -1,8 +1,8 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, readSync, writeFileSync, writeSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { redactUnknown } from "../redact.js";
-import { modelMetricKey, WorkflowError, type CostRecord, type Phase, type TaskState } from "../domain.js";
+import { WorkflowError, type CostRecord, type Phase, type TaskState } from "../domain.js";
 
 export interface TaskEvent {
   seq: number;
@@ -276,9 +276,7 @@ function diffState(before: TaskState, after: TaskState): { patch: Partial<TaskSt
   return { patch: patch as Partial<TaskState>, removed, changed: [...Object.keys(patch), ...removed] };
 }
 
-type Metrics = Record<string, Record<string, { success: number; failure: number; recent?: { at: string; ok: boolean }[] }>>;
 
-const RECENT_ATTEMPTS = 20;
 
 interface FileSig {
   mtimeMs: number;
@@ -320,18 +318,12 @@ function processAlive(pid: number): boolean {
 
 export class TaskStore {
   private ledgerCache?: { sig: FileSig; records: CostRecord[] };
-  private metricsCache?: { sig: FileSig; metrics: Metrics };
   private seqCache = new Map<string, { size: number; seq: number }>();
 
-  /** `checkout`: the linked worktree this store is used from; it gets its own active-task pointer, so two Pi processes do not fight over one. */
-  constructor(
-    readonly root: string,
-    readonly checkout?: string,
-  ) {}
+  constructor(readonly root: string) {}
 
   private activePath(): string {
-    if (!this.checkout) return path.join(this.root, "active-task.json");
-    return path.join(this.root, "active", `${createHash("sha256").update(path.resolve(this.checkout)).digest("hex").slice(0, 16)}.json`);
+    return path.join(this.root, "active-task.json");
   }
 
   taskDir(taskId: string): string {
@@ -553,46 +545,6 @@ export class TaskStore {
     }
     this.ledgerCache = { sig, records };
     return records.slice();
-  }
-
-  readMetrics(): Metrics {
-    const file = path.join(this.root, "metrics", "success.json");
-    const sig = fileSig(file);
-    if (!sig) {
-      this.metricsCache = undefined;
-      return {};
-    }
-    if (this.metricsCache && sameSig(this.metricsCache.sig, sig)) return structuredClone(this.metricsCache.metrics);
-    try {
-      const metrics = JSON.parse(readFileSync(file, "utf8")) as Metrics;
-      this.metricsCache = { sig, metrics };
-      return structuredClone(metrics);
-    } catch {
-      return {};
-    }
-  }
-
-  writeMetrics(metrics: Metrics): void {
-    atomicWrite(path.join(this.root, "metrics", "success.json"), JSON.stringify(metrics, null, 2));
-  }
-
-  /** Locked read-modify-write of one success/failure counter; also keeps the last attempts for the time-windowed circuit breaker. */
-  async bumpMetric(taskType: string, tier: string, success: boolean, at: Date = new Date(), candidate?: { provider: string; model: string }): Promise<void> {
-    await withLock(path.join(this.root, "metrics", ".lock"), () => {
-      const metrics = this.readMetrics();
-      const row = metrics[taskType] ?? {};
-      // The per-tier cell feeds the circuit breaker; the per-model cell feeds candidate selection.
-      const keys = candidate ? [tier, modelMetricKey(tier, candidate.provider, candidate.model)] : [tier];
-      for (const key of keys) {
-        const cell = row[key] ?? { success: 0, failure: 0 };
-        if (success) cell.success += 1;
-        else cell.failure += 1;
-        cell.recent = [...(cell.recent ?? []), { at: at.toISOString(), ok: success }].slice(-RECENT_ATTEMPTS);
-        row[key] = cell;
-      }
-      metrics[taskType] = row;
-      this.writeMetrics(metrics);
-    });
   }
 
   /** Appends a `route` event to the task log without touching state.json. */

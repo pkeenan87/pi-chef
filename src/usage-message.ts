@@ -1,7 +1,7 @@
 import type { TokenUsage } from "./domain.js";
 
 /**
- * The ledger entry of one finished assistant message (the session's own turn or a /build ticket subagent's), or
+ * The ledger entry of one finished assistant message (the session's own turn or a /build ticket child's), or
  * undefined for a message that bills nothing: not an assistant turn, no usage, or a failed attempt with no tokens
  * (Pi retries it, possibly on another model, and the retry ledgers its own message).
  */

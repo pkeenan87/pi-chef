@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { budgetStatus, buildCostRecord, summarize, toCsv } from "../src/cost/ledger.js";
 import { reviewDiff, type CheckRunner } from "../src/review/review.js";
-import { emptyUsage } from "../src/domain.js";
 
 describe("cost and review", () => {
   it("keeps missing usage unknown and exports it as blank", () => {
@@ -13,7 +12,7 @@ describe("cost and review", () => {
     }, pricing, new Date("2026-10-14T00:00:00Z"), "a");
     const unknown = buildCostRecord({
       provider: "openai", model: "gpt-5.4", phase: "IMPLEMENTING", taskId: "t", tier: "premium",
-      usage: emptyUsage(), outcome: "unknown", retries: 0, reason: "no usage",
+      usage: { input: null, output: null, cacheRead: null, cacheWrite: null, requests: 0 }, outcome: "unknown", retries: 0, reason: "no usage",
     }, pricing, new Date("2026-10-14T00:00:00Z"), "b");
     expect(known.actualUsd).toBeCloseTo(0.012);
     expect(unknown.actualUsd).toBeNull();
