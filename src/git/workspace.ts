@@ -110,10 +110,12 @@ export class GitWorkspace {
   async commitAll(cwd: string, message: string, exclude: string[] = []): Promise<string> {
     const safe = ["-c", `core.hooksPath=${NO_HOOKS}`, "-c", "core.fsmonitor=false"];
     const skip = [...exclude, ...(await this.agentArtefacts(cwd))];
-    const add = await this.git([...safe, "add", "-A", "--", ".", ...skip.map((path) => `:(exclude,literal)${path}`)], cwd);
+    // Everything is added, then the skipped paths are unstaged. An exclude pathspec on `add` would fail ("paths are
+    // ignored... use -f") when a skipped path, such as `.pi-workflows`, is in the repo's .gitignore.
+    const add = await this.git([...safe, "add", "-A", "--", "."], cwd);
     if (add.code !== 0) throw new WorkflowError("GIT", add.stderr);
     if (skip.length > 0) {
-      // `add` skips the excluded paths, but anything already staged there would still be committed.
+      // Unstaging also drops anything an agent staged there itself.
       const unstage = await this.git([...safe, "reset", "-q", "--", ...skip.map((path) => `:(literal)${path}`)], cwd);
       if (unstage.code !== 0) throw new WorkflowError("GIT", unstage.stderr);
     }
