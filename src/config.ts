@@ -75,6 +75,10 @@ export interface WorkflowConfig {
      * pricing row) counts as. The ledger keeps `actualUsd: null`.
      */
     unknownCallUsd: number;
+    /** Ask before a message re-sends a big context after this many idle minutes (the prompt cache has probably expired). 0 disables. */
+    idleWarnMinutes: number;
+    /** The idle warning applies only at this many context tokens or more. 0 disables. */
+    idleWarnTokens: number;
   };
   checks: CheckConfig[];
   /** Commands /review runs in the repo root before the checks (an install, for example). Same rules as checks. */
@@ -106,7 +110,7 @@ const DEFAULTS: WorkflowConfig = {
   agents: {},
   routing: { maxEscalations: 2, maxTicketTurns: 100 },
   branchPrefix: "chef",
-  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD },
+  budgets: { taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: DEFAULT_UNKNOWN_CALL_USD, idleWarnMinutes: 60, idleWarnTokens: 100_000 },
   checks: [],
   setup: [],
   review: { model: true, tickets: true, maxDiffChars: 120_000, maxChunks: 6, timeoutMs: 300_000 },
@@ -118,7 +122,7 @@ const KNOWN_KEYS: Record<string, readonly string[] | undefined> = {
   models: MODEL_KEYS,
   local: ["baseUrl", "apiKeyEnv", "models"],
   agents: undefined,
-  budgets: ["taskUsd", "dailyUsd", "softWarningRatio", "unknownCallUsd"],
+  budgets: ["taskUsd", "dailyUsd", "softWarningRatio", "unknownCallUsd", "idleWarnMinutes", "idleWarnTokens"],
   pricing: undefined,
   review: ["model", "tickets", "maxDiffChars", "maxChunks", "timeoutMs"],
   checks: undefined,
@@ -340,6 +344,7 @@ function normalizeRaw(input: unknown, where: string, ignored: Set<string>): Reco
     for (const key of ["taskUsd", "dailyUsd"]) checkNumber(budgets, key, where, { exclusiveMin: 0 }, "budgets");
     checkNumber(budgets, "softWarningRatio", where, { min: 0, max: 1 }, "budgets");
     checkNumber(budgets, "unknownCallUsd", where, { min: 0 }, "budgets");
+    for (const key of ["idleWarnMinutes", "idleWarnTokens"]) checkNumber(budgets, key, where, { min: 0, integer: true }, "budgets");
   }
   for (const key of ["checks", "setup"] as const) {
     const list = out[key];

@@ -69,6 +69,8 @@ Reviews what differs from the base (the build's recorded base, else the default 
 
 Spend by model, job and task against the budgets. A cost that could not be priced shows as unknown, never $0. `/cost json` and `/cost csv` write the ledger to `.pi-workflows/reports/`.
 
+**Idle warning.** A prompt cache lapses after a while, so the first message into a big chat that sat idle re-writes the whole context. When you type a message (not a `/` command) after `budgets.idleWarnMinutes` idle minutes (default 60) with at least `budgets.idleWarnTokens` of context (default 100000), pi-chef asks first: Send anyway, or Don't send. The question says the cache has probably expired (the provider's TTL is not known) and, when the model has a `pricing` row, what re-sending costs at its cache-write price. It asks once per idle period. `/new` starts a fresh session and the task resumes from the branch. Set either value to `0` to turn it off.
+
 ## Status line
 
 One footer line: `chef · <task> · <state> · $spent of $budget · today $spent of $daily budget`. While `/plan` runs it shows the interview stage. `≈` marks an amount that includes unknown cost counted at its estimate.

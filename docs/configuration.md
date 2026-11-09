@@ -79,6 +79,8 @@ Budgets count every priced call: Pi models (including subscription logins) and m
 | `dailyUsd` | `75` | All spend today (> 0). |
 | `softWarningRatio` | `0.8` | Warn at this share of a budget (0 to 1). |
 | `unknownCallUsd` | `0.05` | What a call of unknown cost counts as in budget math only (>= 0). The ledger still stores it as unknown. |
+| `idleWarnMinutes` | `60` | Idle minutes after the last assistant turn before a typed message asks first, because the prompt cache has probably expired and the whole context is re-sent (integer >= 0). `0` turns the warning off. |
+| `idleWarnTokens` | `100000` | The idle warning applies only when the context holds at least this many tokens (integer >= 0). `0` turns the warning off. |
 
 ## routing
 

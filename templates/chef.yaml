@@ -48,6 +48,8 @@
 #   dailyUsd: 75            # all spend today
 #   softWarningRatio: 0.8   # warn at 80% of a budget
 #   unknownCallUsd: 0.05    # what a call with an unknown cost counts as, in budget math only
+#   idleWarnMinutes: 60     # ask before a message re-sends a big context after this long idle (0 = off)
+#   idleWarnTokens: 100000  # ...but only at this many context tokens or more (0 = off)
 
 ## ---------------------------------------------------------------------------------------------------------------
 ## Routing: how far a failed ticket climbs, and how long one attempt may run.
