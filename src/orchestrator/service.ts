@@ -52,6 +52,7 @@ export class Workflow {
       chat: options.chat,
       herdr: options.herdr,
       herdrTimings: options.herdrTimings,
+      ticketModePath: options.ticketModePath,
       status: options.status,
       planStatus: options.planStatus,
       startTurn: options.startTurn,
@@ -74,6 +75,7 @@ export class Workflow {
     const ctx = this.ctx;
     ctx.chat = binding.chat ?? ctx.chat;
     ctx.herdr = binding.herdr ?? ctx.herdr;
+    ctx.ticketModePath = binding.ticketModePath ?? ctx.ticketModePath;
     ctx.registry = binding.registry ?? ctx.registry;
     ctx.status = binding.status ?? ctx.status;
     ctx.planStatus = binding.planStatus ?? ctx.planStatus;
@@ -274,6 +276,12 @@ export class Workflow {
   /** Ledgers what an external agent spent on a ticket (`src/runner/agent-usage.ts`): metered calls, or one "not metered" row. */
   recordAgentUsage(input: Parameters<typeof recordAgentUsage>[1]): CostRecord[] {
     return recordAgentUsage(this.ctx, input);
+  }
+
+  /** A ticket meter has read an agent log to `offset`: the active task's watermark moves there so the sweep skips it. */
+  advanceAgentLog(file: string, offset: number): void {
+    const taskId = this.store.readActive();
+    if (taskId) this.store.advanceAgentLog(taskId, file, offset);
   }
 
   /** Ledgers the calls Pi made on its own (cache warming, its own compaction and branch summaries) from the session file. */

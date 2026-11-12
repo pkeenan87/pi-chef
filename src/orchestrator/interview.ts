@@ -1,6 +1,7 @@
 import { isDifficulty, WorkflowError, type AcceptedClassification, type CommandResult, type Complexity, type TaskState } from "../domain.js";
 import { redact, redactUnknown } from "../redact.js";
 import { defaultClassification, isSecuritySensitive, plannerClassification, type PlannerRating } from "./classification.js";
+import { initAgentWatermark } from "./agent-sweep.js";
 import { budgetState } from "./budget.js";
 import { active, done, fail, guard, iso, type WorkflowContext } from "./context.js";
 import { move } from "./machine.js";
@@ -157,6 +158,7 @@ export function startPlan(ctx: WorkflowContext, request: string, options: { noQu
     const classification: AcceptedClassification = defaultClassification();
     const state = await ctx.store.create({ ...newTask(ctx, safe, at), classification, planning: { stage: "interview", noQuestions } });
     announceParked(ctx, parked);
+    initAgentWatermark(ctx, state.taskId);
     writeInterview(ctx, state.taskId, { version: 1, request: safe, noQuestions, rounds: [] });
     showStatus(ctx);
     ctx.startTurn(`Plan this request${noQuestions ? " (no questions)" : ""}:\n\n${safe}`);

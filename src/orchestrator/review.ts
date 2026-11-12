@@ -1,5 +1,5 @@
 import path from "node:path";
-import { AGENT_PROVIDER, parseTicketModel, ranModelText, type TicketModel } from "../agents.js";
+import { AGENT_PROVIDER, modelText, parseTicketModel, ranModelText, type TicketModel } from "../agents.js";
 import { fromMicroUsd, toMicroUsd } from "../config.js";
 import { ticketDifficulty, WorkflowError, type CommandResult, type ModelReview, type PlanDocument, type ReviewStage, type TaskState } from "../domain.js";
 import { runModelReview, unreviewedDiff } from "../review/model-review.js";
@@ -9,12 +9,15 @@ import { redact } from "../redact.js";
 import { atomicWrite } from "../storage/store.js";
 import { budgetState, gateBudget, record, SESSION_TASK_ID } from "./budget.js";
 import { done, excludedPaths, guard, iso, type WorkflowContext } from "./context.js";
-import { activeTask } from "./tasks.js";
+import { activeTask, displayName } from "./tasks.js";
+import { runFixInTab } from "./review-fix.js";
+import { herdrSpace } from "../runner/ticket.js";
 import { formatDuration, formatUsd } from "./format.js";
 import { findingsTable, reviewItems, reviewMarkdown, type ReviewItem, type ReviewTicketRow } from "./review-report.js";
 import { costLabel, reviewLabel } from "./build.js";
 import { announce, reviewModel, routeFor, type Route } from "./routing.js";
 import { carriedFindings } from "./ticket-review.js";
+import { sweepAgentLogs } from "./agent-sweep.js";
 import { runAgentReview, type ReviewAgent } from "./agent-review.js";
 import { splitCheckLine } from "./tickets.js";
 
@@ -159,8 +162,11 @@ async function baseRef(ctx: WorkflowContext, base: string, onBase: boolean): Pro
 
 const numbered = (items: ReviewItem[]) => items.map((item, index) => `${index + 1}. ${item.text}`).join("\n");
 
-/** The message that sends findings to the model in the current session. */
-function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string): string {
+/**
+ * The message that sends findings to a model: the current session's (`tab` false), or a model in its own herdr tab, which
+ * gets no "run /review again" (it cannot) and is told to stop when done.
+ */
+function fixMessage(items: ReviewItem[], checks: { command: string; args: string[] }[], request?: string, tab = false): string {
   const commands = checks.map((check) => `- \`${[check.command, ...check.args].join(" ")}\``);
   return redact(
     [
@@ -175,7 +181,7 @@ function fixMessage(items: ReviewItem[], checks: { command: string; args: string
       "- Do not commit, push, or switch branches.",
       "- Finish with one line per finding addressed, and say which ones you left and why.",
       "",
-      "Run /review again when done.",
+      ...(tab ? ["Then stop."] : ["Run /review again when done."]),
     ].join("\n"),
   );
 }
@@ -199,6 +205,7 @@ async function runReview(ctx: WorkflowContext, override?: TicketModel): Promise<
   // Workflow state is not the user's code: it stays out of the review and out of every model packet.
   const rawDiff = await ctx.git.workingDiff(ref, excludedPaths(ctx));
   if (!rawDiff.trim()) return done(`Nothing to review: no changes against ${base}.`);
+  if (state) sweepAgentLogs(ctx, state.taskId);
   const exhausted = gateBudget(ctx, taskId);
   if (exhausted) return exhausted;
 
@@ -257,17 +264,31 @@ async function runReview(ctx: WorkflowContext, override?: TicketModel): Promise<
   if (items.length === 0 && report.passed) return result(`Review passed: ${report.checks.length} check(s), no findings.`);
   if (!ctx.review || items.length === 0) return result(text);
 
+  // Fixing in a tab is offered only inside herdr, when `models.medium` parses (and, for a Pi model, Pi can start a child).
+  let fixModel: TicketModel | undefined;
+  try {
+    const medium = parseTicketModel(ctx.config.models.medium, ctx.config);
+    if (!("problem" in (await herdrSpace(ctx.herdr))) && (medium.kind === "agent" || ctx.ticketModePath)) fixModel = medium;
+  } catch {
+    fixModel = undefined;
+  }
   const choice = await ctx.review({
     title: `Review · ${items.length} finding(s)`,
     markdown: [`## ${items.length} finding(s)`, "", ...findingsTable(report)].join("\n"),
     // The report above already holds this table; only the choice is shown.
     alreadyShown: !!ctx.report,
     actions: [
+      ...(fixModel ? [{ value: "fix-tab", label: `Fix all in a tab (${modelText(fixModel)})` }] : []),
       { value: "fix-all", label: "Fix all" },
       { value: "fix-some", label: "Fix…", input: "What should be fixed? (finding numbers like 1, 3, and/or your own instructions)" },
       { value: "close", label: "Close" },
     ],
   });
+  if (choice?.value === "fix-tab" && fixModel) {
+    const fixed = await runFixInTab(ctx, { prompt: fixMessage(items, checks, undefined, true), model: fixModel, taskId, taskName: state ? displayName(state) : "" });
+    // The verdict is in the report and in state.review; this is what the fix did.
+    return fixed.ok ? done(fixed.text, report) : { ok: false, code: "REVIEW_FIX_FAILED", text: fixed.text, data: report };
+  }
   const request = choice?.value === "fix-some" ? (choice.text ?? "").trim() : undefined;
   if (ctx.startTurn && (choice?.value === "fix-all" || (choice?.value === "fix-some" && request))) {
     ctx.startTurn(fixMessage(items, checks, request));

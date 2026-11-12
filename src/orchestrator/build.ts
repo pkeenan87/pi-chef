@@ -5,6 +5,7 @@ import { fromMicroUsd, toMicroUsd } from "../config.js";
 import { rungOf, ticketDifficulty, type BuildRecord, type CheckEvidence, type CommandResult, type CostSplit, type Difficulty, type Phase, type TaskState, type Ticket, type TicketAttempt, type TicketReviewRecord, type TicketRun, type ThinkingLevel } from "../domain.js";
 import { redact } from "../redact.js";
 import { assertCommandSafe } from "../sandbox.js";
+import { sweepAgentLogs } from "./agent-sweep.js";
 import { budgetState, gateBudget, warnSoft } from "./budget.js";
 import { done, excludedPaths, fail, guard, iso, requireActive, type WorkflowContext } from "./context.js";
 import { displayName, requireActiveTask } from "./tasks.js";
@@ -137,6 +138,8 @@ export function startBuild(ctx: WorkflowContext): Promise<CommandResult> {
     if (!state.plan.tickets?.length) return fail("NO_TICKETS", "Re-plan: this plan has no tickets, so /build has nothing to run. Run /plan again.");
     const gitProblem = await ctx.git.preflight();
     if (gitProblem) return fail("GIT_NOT_READY", gitProblem);
+    // Before the claim: outside use since the last sweep is counted now, because the tickets' meters read the logs from here.
+    sweepAgentLogs(ctx, state.taskId);
     const exhausted = gateBudget(ctx, state.taskId);
     if (exhausted) return exhausted;
     const resumeFrom = state.phase === "PAUSED" ? state.pausedFrom : state.phase;

@@ -2,6 +2,7 @@ import path from "node:path";
 import { type CommandResult, type CostRecord } from "../domain.js";
 import { summarize, toCsv, unpricedModels } from "../cost/ledger.js";
 import { atomicWrite } from "../storage/store.js";
+import { sweepAgentLogs } from "./agent-sweep.js";
 import { budgetState, statusFor } from "./budget.js";
 import { done, fail, guard, type WorkflowContext } from "./context.js";
 import { activeTask, displayName, listTasks } from "./tasks.js";
@@ -49,8 +50,10 @@ function spendRows(ctx: WorkflowContext, records: CostRecord[], key: (entry: Cos
 }
 
 async function costReport(ctx: WorkflowContext, format: string): Promise<CommandResult> {
-  const records = ctx.store.readLedger();
   const task = await activeTask(ctx);
+  // Agent use in this repo that pi-chef did not start counts first, so the report and the budgets include it.
+  if (task) sweepAgentLogs(ctx, task.taskId);
+  const records = ctx.store.readLedger();
   const summary = summarize(records, { pricing: ctx.config.pricing, unknownCallUsd: ctx.config.budgets.unknownCallUsd });
   const budget = budgetState(ctx, task?.taskId, records);
   // The exports are files: a chat line is clipped, and a ledger is long.

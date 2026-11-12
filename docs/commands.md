@@ -57,17 +57,21 @@ Spend is ledgered per ticket. Claude Code and Codex are metered from their own l
 
 Reviews what differs from the base (the build's recorded base, else the default branch): commits ahead of the merge-base plus uncommitted and untracked changes. Works after `/build`, after chat fixes, or with no task (the report goes under `.pi-workflows/reports/`). With nothing changed it says so and stops.
 
+With an active task, Claude Code and Codex use in the repo that pi-chef did not start is counted first (see `/cost`).
+
 1. `setup`, then the checks (`config.checks`, else the plan's ticket checks).
 2. A static scan of the added lines (secrets, auth bypass, `eval`, TODO/FIXME).
 3. A model pass (`models.review`, off with `review.model: false`): findings rated like the ticket review, those below risk 5 dropped. A diff over `review.maxDiffChars` is split by file into up to `review.maxChunks` calls.
 
-`passed` means at least one check ran, all exited 0, and the scan found nothing blocking; the model pass is advisory and never changes it. The report (also saved as `reports/review.md`) has the stage table, checks, findings, and the plan's tickets. With a UI and at least one finding, a picker offers Fix all, Fix... (type which numbers and/or instructions), or Close; fixing happens in your session and nothing is committed.
+`passed` means at least one check ran, all exited 0, and the scan found nothing blocking; the model pass is advisory and never changes it. The report (also saved as `reports/review.md`) has the stage table, checks, findings, and the plan's tickets. With a UI and at least one finding, a picker offers Fix all in a tab (first, only inside herdr), Fix all, Fix... (type which numbers and/or instructions), or Close. Fix all in a tab runs `models.medium` (a Pi model or an agent) in its own herdr tab: it fixes the findings in your working tree, then its tab closes and the chat shows what it reported. Its spend is ledgered as "review fix" (an agent not metered shows as such), so the main session never pays for it. Nothing is committed: a commit the fixer makes anyway is undone with `git reset --soft`, and a branch switch is left alone and reported; a failed fix leaves its tab open. Fix all and Fix... send the findings to your session instead.
 
 `/review --with <provider/id | agent:name[/model]>` reviews with another model for this run (it also runs the model pass when `review.model` is false). An agent gets a herdr tab, reads the repo, and writes findings to a JSON file pi-chef reads and filters.
 
 ## /cost
 
-Spend by model, job and task against the budgets. A cost that could not be priced shows as unknown, never $0. `/cost json` and `/cost csv` write the ledger to `.pi-workflows/reports/`.
+Spend by model, job and task against the budgets. Claude Code and Codex use in this repo that pi-chef did not start (for example `hc run claude` from the chat) is counted first, under the job "outside chef"; it starts counting when the task is created, or at the first `/cost`, `/review` or `/build` of a task that predates this. A cost that could not be priced shows as unknown, never $0. `/cost json` and `/cost csv` write the ledger to `.pi-workflows/reports/`.
+
+**Idle warning.** A prompt cache lapses after a while, so the first message into a big chat that sat idle re-writes the whole context. When you type a message (not a `/` command) after `budgets.idleWarnMinutes` idle minutes (default 60) with at least `budgets.idleWarnTokens` of context (default 100000), pi-chef asks first: Send anyway, or Don't send. The question says the cache has probably expired (the provider's TTL is not known) and, when the model has a `pricing` row, what re-sending costs at its cache-write price. It asks once per idle period. `/new` starts a fresh session and the task resumes from the branch. Set either value to `0` to turn it off.
 
 ## Status line
 

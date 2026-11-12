@@ -316,6 +316,15 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Where pi-chef has read the external agents' logs for a task: usage in a log file before `offset` is already ledgered
+ * (by a ticket meter or a sweep), and usage stamped before `since` is not this task's.
+ */
+export interface AgentWatermark {
+  since: string;
+  files: Record<string, { offset: number }>;
+}
+
 export class TaskStore {
   private ledgerCache?: { sig: FileSig; records: CostRecord[] };
   private seqCache = new Map<string, { size: number; seq: number }>();
@@ -381,6 +390,37 @@ export class TaskStore {
   releaseBuild(taskId: string): void {
     const file = path.join(this.taskDir(taskId), "build.claim");
     if (readClaim(file)?.pid === process.pid) rmSync(file, { force: true });
+  }
+
+  /** Who holds the task's build while that process is alive (this one included); undefined when no build runs. */
+  liveBuildClaim(taskId: string): { pid: number; checkout: string } | undefined {
+    const held = readClaim(path.join(this.taskDir(taskId), "build.claim"));
+    return held && processAlive(held.pid) ? held : undefined;
+  }
+
+  /** The task's agent-log watermark (`agent-logs.json`), or undefined before the first sweep or when unreadable. */
+  readAgentWatermark(taskId: string): AgentWatermark | undefined {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(this.taskDir(taskId), "agent-logs.json"), "utf8")) as Partial<AgentWatermark>;
+      if (typeof parsed.since !== "string" || !parsed.files || typeof parsed.files !== "object") return undefined;
+      const files: AgentWatermark["files"] = {};
+      for (const [file, entry] of Object.entries(parsed.files)) if (typeof entry?.offset === "number" && entry.offset >= 0) files[file] = { offset: entry.offset };
+      return { since: parsed.since, files };
+    } catch {
+      return undefined;
+    }
+  }
+
+  writeAgentWatermark(taskId: string, mark: AgentWatermark): void {
+    atomicWrite(path.join(this.taskDir(taskId), "agent-logs.json"), JSON.stringify(mark, null, 2));
+  }
+
+  /** Moves a file's offset forward (a ticket meter has consumed it). Does nothing before the watermark exists. */
+  advanceAgentLog(taskId: string, file: string, offset: number): void {
+    const mark = this.readAgentWatermark(taskId);
+    if (!mark || (mark.files[file]?.offset ?? -1) >= offset) return;
+    mark.files[file] = { offset };
+    this.writeAgentWatermark(taskId, mark);
   }
 
   /** No active task (the file stays, with no id). */

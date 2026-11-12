@@ -93,7 +93,7 @@ export async function runAgentReview(ctx: WorkflowContext, input: AgentPassInput
     if (existsSync(outFile)) unlinkSync(outFile);
     const started = ctx.now().getTime();
     const before = fingerprint(await ctx.git.workingDiff(input.base.ref, input.exclude));
-    const meter = createAgentMeter(agent.name, { cwd: ctx.git.repoRoot, home: input.home });
+    const meter = createAgentMeter(agent.name, { cwd: ctx.git.repoRoot, home: input.home, onConsumed: input.hasTask ? (file, offset) => ctx.store.advanceAgentLog(input.taskId, file, offset) : undefined });
     const name = `chef-review-${input.stamp.replace("-", "")}`;
     progress(`opening ${text} in a herdr tab`);
     tab = await openTab({

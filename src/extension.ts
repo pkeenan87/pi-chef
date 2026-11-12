@@ -1,11 +1,11 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, InputEvent, InputEventResult } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { COMMANDS } from "./commands.js";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { contextMismatch, probeLocalContext } from "./providers/local-context.js";
-import { ConfigFileError, configPaths, displayPath, loadConfig, type WorkflowConfig } from "./config.js";
+import { ConfigFileError, configPaths, displayPath, loadConfig, priceFor, type WorkflowConfig } from "./config.js";
 import { isDeniedCommand } from "./sandbox.js";
 import type { BuildDriver } from "./orchestrator/build.js";
 import { createHerdrClient, type HerdrClient } from "./herdr/client.js";
@@ -160,6 +160,7 @@ function workflowFor(root: string, ctx?: CommandContext): Workflow {
       planStatus: ctx.hasUI ? () => refreshStatus(ctx) : undefined,
       startTurn: send ? (text) => void send(text) : undefined,
       herdr: herdrClient(),
+      ticketModePath: fileURLToPath(new URL("./ticket-mode.ts", import.meta.url)),
       confirm: ctx.hasUI ? ctx.ui.confirm.bind(ctx.ui) : undefined,
       notify: ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined,
       progress: ctx.hasUI ? (message) => ctx.ui.notify(message, "info") : undefined,
@@ -411,6 +412,8 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     }
     pi.appendEntry("chef-workflow", { cwd: ctx.cwd });
     // A /plan that was running before a restart resumes with its tools and progress line.
+    lastTurnEnd = undefined;
+    idleAsked = false;
     toolsBeforePlan = undefined;
     restoreToolsBeforePlan(ctx);
     syncPlanTools(pi);
@@ -474,8 +477,13 @@ export function registerWorkflow(pi: ExtensionAPI): void {
       tell(ctx as CommandContext, problemNotice(error));
     }
   });
+  pi.on("input", (event, ctx) => idleGate(event, ctx));
   pi.on("message_end", (event, ctx) => {
     const message = event.message;
+    if (message.role === "assistant") {
+      lastTurnEnd = (active ?? tryWorkflowFor(cwd))?.now() ?? new Date();
+      idleAsked = false;
+    }
     const call = usageOfMessage(message);
     if (!call) return;
     // With no workflow yet, build one for the project so the turn still counts toward the daily limit.
@@ -483,6 +491,55 @@ export function registerWorkflow(pi: ExtensionAPI): void {
     // The footer's spend follows each turn, not just the next command.
     refreshStatus(ctx);
   });
+}
+
+/** When the last assistant turn ended (the workflow clock), and whether the idle warning was already asked since. */
+let lastTurnEnd: Date | undefined;
+let idleAsked = false;
+
+function formatTokens(tokens: number): string {
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
+}
+
+function formatIdle(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+/**
+ * Pi's `input` hook, the idle-cache warning: a big context that sat idle has probably lost its prompt cache, so the next
+ * message re-writes it all. Asks once per idle period, before the message is sent. Only a prompt that really asks returns
+ * a promise; everything else answers at once. Never throws.
+ */
+function idleGate(event: InputEvent, ctx: ExtensionContext): InputEventResult | Promise<InputEventResult> {
+  const proceed = { action: "continue" as const };
+  try {
+    if (event.source !== "interactive" || event.text.trimStart().startsWith("/") || !ctx.hasUI) return proceed;
+    const workflow = active ?? tryWorkflowFor(cwd);
+    if (!workflow || !lastTurnEnd || idleAsked) return proceed;
+    const { idleWarnMinutes, idleWarnTokens } = workflow.config.budgets;
+    if (idleWarnMinutes <= 0 || idleWarnTokens <= 0) return proceed;
+    const now = workflow.now();
+    const idleMs = now.getTime() - lastTurnEnd.getTime();
+    const tokens = ctx.getContextUsage()?.tokens;
+    if (idleMs < idleWarnMinutes * 60_000 || typeof tokens !== "number" || tokens < idleWarnTokens) return proceed;
+    idleAsked = true;
+    const row = ctx.model ? priceFor(workflow.config.pricing, ctx.model.provider, ctx.model.id, now) : undefined;
+    const rate = row ? (row.cacheWritePerMillionUsd ?? row.inputPerMillionUsd) : undefined;
+    const cost = rate === undefined || !ctx.model ? "" : ` (≈$${((tokens * rate) / 1_000_000).toFixed(2)} at ${ctx.model.id} rates)`;
+    const message = `This chat holds ${formatTokens(tokens)} tokens and has been idle ${formatIdle(idleMs)}, so the prompt cache has probably expired: sending re-sends the whole context${cost}. /new starts a fresh session; your chef task resumes from the branch.`;
+    const send = "Send anyway";
+    return ctx.ui.select(message, [send, "Don't send"]).then(
+      (choice) => {
+        if (choice === send) return proceed;
+        ctx.ui.notify("Not sent. Run /new to start fresh; the task resumes from the branch.", "info");
+        return { action: "handled" as const };
+      },
+      () => proceed,
+    );
+  } catch {
+    return proceed;
+  }
 }
 
 /** The workflow for a project root, or undefined when its config is invalid. */

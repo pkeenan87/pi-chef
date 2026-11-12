@@ -59,6 +59,8 @@ Checked live on 2026-11-08 (herdr mechanics only, not a `/build`): env reaches a
 - A send with `--wait` into a tab that reads `done` is accepted and waits for the new turn (`--if` takes only `idle`/`working`, so it is not used).
 - Claude Code's first-run "trust this folder?" dialog reports no status at all (not `blocked`). The runner never types before a ready report, and after 20 s tells the person the tab needs them. Pressing Enter there would pick "No, exit".
 - The Claude Code meter: a snapshot, one turn, then `collect()` gave exactly one call (`anthropic/claude-haiku-5-5`) with its cache tokens; a second `collect()` gave nothing.
+- Fix all in a tab with an agent (2026-11-09, `agent:claude/haiku`): the tab opened, a Bash approval showed the tab as blocked until answered, the fix finished, the reply came back, one "review fix" row was ledgered from Claude Code's log, the tab closed, and nothing was committed. A new folder asks "trust this folder?" even when its parent is trusted.
+- Tab commands on macOS (2026-11-09): herdr's server runs under launchd with only the system PATH, so every tab is started as `env PATH=<pi-chef's PATH> …`. A ticket's commit works when `.pi-workflows` is in the repo's `.gitignore`.
 
 ## Unverified live
 
@@ -69,9 +71,12 @@ Unit tests cover the code around these with fakes; none ran against a live servi
 - A ticket child's session file after an aborted or retried turn, and whether an assistant message can carry `stopReason` `pending` or `deferred`.
 - That `hc send` of a long multi-line prompt pastes cleanly into each agent (it did for Pi), and that each agent reports `blocked` when it asks for approval.
 - That the Codex rollout is flushed by the time the agent reports idle (a late flush lands on the next read or is missed on the last), and that Claude Code's `output_tokens` is final on long multi-block turns (the meter takes the largest per field).
+- The outside-chef sweep against real Claude Code and Codex logs: that line timestamps and `message.id` repeats behave as the fixtures assume, and that a session running while `/cost` reads is counted once and completely on the next read.
 - Each built-in agent's default command against a real ticket.
 - The `local` registration (including the Qwen 3.8 27B preset) against a live llama-server through `registerProvider`.
 - `getArgumentCompletions` in the live TUI menu.
 - That the `ctx` Pi passes to `message_end` can draw the footer (`ui.setStatus`) mid-run, and that `message_end` usage fields (and `usage.cost.total`) are the provider's counts.
 - Account entitlement: ChatGPT and Claude subscription logins, and Anthropic's extra-usage billing, can change without a Pi release.
 - The herdr side panel's rendering and the layout docking in a live herdr app.
+- Fix all in a tab (`review-fix.ts`) on a live Pi child, and the undo of a commit a live fixer makes.
+- The idle warning in a live Pi session: the `input` hook's select prompt, and the cache-write estimate.

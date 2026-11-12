@@ -55,7 +55,7 @@ export interface PiTicketInput extends TabTimings {
   ticketModePath: string;
 }
 
-interface ChildStatus {
+export interface ChildStatus {
   turns?: number;
   turnLimit?: boolean;
   aborted?: boolean;
@@ -65,7 +65,7 @@ interface ChildStatus {
 /** A Pi child is up in seconds; a tab that is not ready after this never started it. */
 const READY_TIMEOUT_MS = 2 * 60_000;
 
-function readStatus(file: string): ChildStatus {
+export function readStatus(file: string): ChildStatus {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as ChildStatus) : {};

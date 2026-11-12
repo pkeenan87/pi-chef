@@ -31,7 +31,7 @@ describe("defaults", () => {
     expect(config.local).toBeUndefined();
     expect(config.agents).toEqual({});
     expect(config.review).toEqual({ model: true, tickets: true, maxDiffChars: 120000, maxChunks: 6, timeoutMs: 300000 });
-    expect(config.budgets).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: 0.05 });
+    expect(config.budgets).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: 0.05, idleWarnMinutes: 60, idleWarnTokens: 100000 });
     expect(config.branchPrefix).toBe("chef");
   });
 
@@ -161,7 +161,7 @@ describe("the sample files", () => {
     // Uncomment every setting line ("# key"), keep the "##" explanations.
     const uncommented = template().split("\n").map((line) => line.replace(/^# /, "")).join("\n");
     const config = parseConfig(uncommented);
-    expect(config.budgets).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: 0.05 });
+    expect(config.budgets).toEqual({ taskUsd: 20, dailyUsd: 75, softWarningRatio: 0.8, unknownCallUsd: 0.05, idleWarnMinutes: 60, idleWarnTokens: 100000 });
     expect(config.routing).toEqual({ maxEscalations: 2, maxTicketTurns: 100 });
     expect(config.review).toEqual({ model: true, tickets: true, maxDiffChars: 120000, maxChunks: 6, timeoutMs: 300000 });
     expect(config.models).toEqual(DEFAULT_MODELS);
